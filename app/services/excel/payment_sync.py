@@ -23,8 +23,20 @@ from openpyxl.utils import get_column_letter, column_index_from_string
 from app.services.file_stability import FileStabilityChecker
 
 from .headers import normalize_header
+from .carrier import (
+    BK_CARRIER_HEADER_ALIASES,
+    UNMAPPED_CARRIER,
+    carrier_key,
+    carrier_text,
+    join_carriers,
+    period_for_sheet,
+    read_bk_detail_rows,
+    split_carriers,
+    sync_payment_summary_sheet,
+)
 from .models import (
     ConflictType,
+    CarrierSummaryResult,
     ExcelOperation,
     ExcelRunStatus,
     PaymentSyncConflict,
@@ -80,6 +92,8 @@ BK_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "vs_do": ("VS + D/O", "VS D/O LỆNH", "VS DO LỆNH"),
     "command_fee": ("LÀM LỆNH", "Làm lệnh"),
     "repair": ("SỬA CHỮA", "Sửa chữa"),
+    "carrier_hp": BK_CARRIER_HEADER_ALIASES["HP"],
+    "carrier_nam": BK_CARRIER_HEADER_ALIASES["NAM"],
 }
 
 PAYMENT_FIELDS: tuple[str, ...] = (
@@ -706,7 +720,8 @@ def _ensure_summary_block(
 
     headers = _header_values(worksheet)
     raw: dict[str, int] = {}
-    for field, aliases in BK_HEADER_ALIASES.items():
+    for field in ("sqt", "container", *PAYMENT_FIELDS):
+        aliases = BK_HEADER_ALIASES[field]
         raw[field] = _required_column(
             headers, aliases, field, before=summary_start
         )
@@ -1564,7 +1579,7 @@ class PaymentSheetProfile:
         scan_columns = _effective_max_column(worksheet)
         scan_rows = min(30, _effective_max_row(worksheet))
         required = ("sqt", "container", "date")
-        fields = ("sqt", "container", *self.managed_fields, "date")
+        fields = ("sqt", "container", *self.managed_fields, "carrier", "date")
         best_row = 1
         best_score = -1
         best_matches: dict[str, list[int]] = {}
@@ -1584,7 +1599,7 @@ class PaymentSheetProfile:
                 matches[field] = _matching_columns(
                     headers,
                     self.aliases[field],
-                    before=None if field == "date" else detail_boundary,
+                    before=None if field in {"carrier", "date"} else detail_boundary,
                 )
             score = sum(bool(value) for value in matches.values())
             if score > best_score:
@@ -1682,6 +1697,7 @@ class PaymentSheetProfile:
             "sqt",
             "container",
             *(field for field in self.managed_fields if field in resolved.columns),
+            *(field for field in ("carrier",) if field in resolved.columns),
         )
         return all(
             worksheet.cell(row, resolved.columns[field]).value in (None, "", 0, 0.0)
@@ -1696,6 +1712,7 @@ class HPSheetProfile(PaymentSheetProfile):
         "sqt": ("QT",),
         "container": ("SỐ CONT", "Số Container"),
         "loaded_drop": ("HẠ HÀNG",),
+        "carrier": ("Vận Tải", "Vận tải"),
         "date": (DATE_HEADER,),
     }
 
@@ -1714,6 +1731,7 @@ class NAMSheetProfile(PaymentSheetProfile):
         "storage": ("Lưu Cont", "Lưu container"),
         "repair": ("Sửa chữa Cont", "SỬA CHỮA"),
         "overweight": ("QUÁ TẢI",),
+        "carrier": ("Vận Tải", "Vận tải"),
         "date": (DATE_HEADER,),
     }
 
@@ -1738,6 +1756,7 @@ class ResolvedSourceSyncColumns:
     columns: dict[str, int]
     invoice_columns: dict[str, int]
     invoice_candidates: dict[str, tuple[int, ...]]
+    carrier_columns: dict[str, int]
 
 
 def _source_sync_columns(worksheet: Any) -> ResolvedSourceSyncColumns:
@@ -1766,10 +1785,20 @@ def _source_sync_columns(worksheet: Any) -> ResolvedSourceSyncColumns:
         pairing_amount_columns,
         boundary=summary_start,
     )
+    carrier_columns: dict[str, int] = {}
+    for target_type, field in (("HP", "carrier_hp"), ("NAM", "carrier_nam")):
+        matches = _matching_columns(
+            headers,
+            BK_HEADER_ALIASES[field],
+            before=summary_start,
+        )
+        if len(matches) == 1:
+            carrier_columns[target_type] = matches[0]
     return ResolvedSourceSyncColumns(
         columns=columns,
         invoice_columns=invoice_resolution.columns,
         invoice_candidates=invoice_resolution.candidates,
+        carrier_columns=carrier_columns,
     )
 
 
@@ -1868,6 +1897,13 @@ def _source_target_items(
             ):
                 continue
             item_id = _stable_id(worksheet.title, target_type, sqt, container, rows)
+            carrier_column = source_columns.carrier_columns.get(target_type)
+            carrier_values = (
+                [worksheet.cell(row, carrier_column).value for row in rows]
+                if carrier_column is not None
+                else []
+            )
+            carrier_value = join_carriers(carrier_values)
             item = PaymentSyncItem(
                 item_id=item_id,
                 source_row=rows[0],
@@ -1887,6 +1923,7 @@ def _source_target_items(
                     and invoice_candidates.get(field)
                 },
                 target_type=target_type,
+                carrier_value=carrier_value,
             )
             target_errors = [
                 *base_errors,
@@ -2119,6 +2156,80 @@ def _analyze_item_invoices(
     return conflicts
 
 
+def _analyze_item_carrier(
+    worksheet: Any,
+    resolved: ResolvedPaymentProfile,
+    item: PaymentSyncItem,
+    *,
+    row: int | None,
+) -> list[PaymentSyncConflict]:
+    incoming = carrier_text(item.carrier_value)
+    item.carrier_difference = None
+    if incoming is None:
+        return []
+    column = resolved.columns.get("carrier")
+    if column is None:
+        return [
+            PaymentSyncConflict(
+                conflict_id=_stable_id("carrier-column", item.item_id),
+                conflict_type=ConflictType.CARRIER_COLUMN_MISSING,
+                message=f"Sheet {resolved.target_type} không có cột Vận Tải.",
+                item_id=item.item_id,
+                source_row=item.source_row,
+                sqt=item.sqt,
+                container=item.container,
+                allowed_actions=(ResolutionAction.KEEP_EXISTING, ResolutionAction.CANCEL_ALL),
+                default_action=ResolutionAction.KEEP_EXISTING,
+                details={"scope": "carrier", "target_type": resolved.target_type},
+            )
+        ]
+    current = worksheet.cell(row, column).value if row is not None else None
+    current_keys = {carrier_key(value) for value in split_carriers(current)}
+    incoming_keys = {carrier_key(value) for value in split_carriers(incoming)}
+    if incoming_keys and incoming_keys.issubset(current_keys):
+        return []
+    action = item.carrier_action
+    if carrier_text(current) is None:
+        item.carrier_difference = (current, incoming)
+        return []
+    if action is ResolutionAction.OVERWRITE:
+        item.carrier_difference = (current, incoming)
+        return []
+    if action is ResolutionAction.APPEND_CARRIER:
+        item.carrier_difference = (current, join_carriers(current, incoming) or incoming)
+        return []
+    if action is ResolutionAction.KEEP_EXISTING:
+        return []
+    return [
+        PaymentSyncConflict(
+            conflict_id=_stable_id("carrier", item.item_id, current, incoming),
+            conflict_type=ConflictType.CARRIER_VALUE_CONFLICT,
+            message="Ô Vận Tải đang có mã khác với dữ liệu từ BK.",
+            item_id=item.item_id,
+            source_row=item.source_row,
+            sqt=item.sqt,
+            container=item.container,
+            allowed_actions=(
+                ResolutionAction.KEEP_EXISTING,
+                ResolutionAction.APPEND_CARRIER,
+                ResolutionAction.OVERWRITE,
+            ),
+            default_action=ResolutionAction.KEEP_EXISTING,
+            sheet_name=worksheet.title,
+            target_row=row,
+            target_column=column,
+            target_cell=(worksheet.cell(row, column).coordinate if row is not None else None),
+            current_value=current,
+            details={
+                "scope": "carrier",
+                "target_type": resolved.target_type,
+                "carrier_candidates": split_carriers(incoming),
+                "carrier_incoming": incoming,
+            },
+        )
+    ]
+
+
 def _analyze_profile_target(
     worksheet: Any,
     profile: PaymentSheetProfile,
@@ -2186,6 +2297,10 @@ def _analyze_profile_target(
                 worksheet, resolved, item, row=row
             )
             conflicts.extend(invoice_conflicts)
+            carrier_conflicts = _analyze_item_carrier(
+                worksheet, resolved, item, row=row
+            )
+            conflicts.extend(carrier_conflicts)
             if clear_fields:
                 item.status = "CONFLICT"
                 conflicts.append(
@@ -2219,6 +2334,7 @@ def _analyze_profile_target(
                     "UPDATE"
                     if differences
                     or item.invoice_differences
+                    or item.carrier_difference
                     or any(
                         action is ResolutionAction.OVERWRITE
                         for action in item.amount_actions.values()
@@ -2261,6 +2377,9 @@ def _analyze_profile_target(
             item.status = "NEW"
             conflicts.extend(
                 _analyze_item_invoices(worksheet, resolved, item, row=None)
+            )
+            conflicts.extend(
+                _analyze_item_carrier(worksheet, resolved, item, row=None)
             )
     return conflicts
 
@@ -2370,10 +2489,11 @@ def _write_profile_item(
     timestamp: datetime,
     write_identity: bool,
     clear_fields: set[str] | None = None,
-) -> tuple[bool, set[str]]:
+) -> tuple[bool, set[str], bool]:
     clear_fields = clear_fields or set()
     changed = False
     invoice_written: set[str] = set()
+    carrier_written = False
     if write_identity:
         for field, incoming in (("sqt", item.sqt), ("container", item.container)):
             cell = worksheet.cell(row, resolved.columns[field])
@@ -2421,11 +2541,29 @@ def _write_profile_item(
         cell.number_format = "@"
         invoice_written.add(field)
         changed = True
+    if item.carrier_difference is not None and "carrier" in resolved.columns:
+        before, planned_carrier = item.carrier_difference
+        action = item.carrier_action
+        if action is not ResolutionAction.KEEP_EXISTING:
+            cell = worksheet.cell(row, resolved.columns["carrier"])
+            incoming = carrier_text(planned_carrier)
+            if action is ResolutionAction.APPEND_CARRIER:
+                incoming = join_carriers(cell.value, incoming)
+            if incoming is not None and carrier_text(cell.value) != incoming:
+                if carrier_text(cell.value) is None or action in {
+                    None,
+                    ResolutionAction.OVERWRITE,
+                    ResolutionAction.APPEND_CARRIER,
+                }:
+                    cell.value = incoming
+                    cell.number_format = "@"
+                    carrier_written = True
+                    changed = True
     if changed:
         date_cell = worksheet.cell(row, resolved.columns["date"])
         date_cell.value = timestamp
         date_cell.number_format = DATE_NUMBER_FORMAT
-    return changed, invoice_written
+    return changed, invoice_written, carrier_written
 
 
 def _package_has_vba(path: str | Path) -> bool:
@@ -3182,6 +3320,11 @@ class PaymentSyncService:
                 ConflictType.INVOICE_COLUMN_MISSING,
             }:
                 item.invoice_actions[field] = action
+            elif conflict.conflict_type in {
+                ConflictType.CARRIER_VALUE_CONFLICT,
+                ConflictType.CARRIER_COLUMN_MISSING,
+            }:
+                item.carrier_action = action
             elif conflict.conflict_type is ConflictType.PAYMENT_CLEAR_VALUE:
                 clear_fields = tuple(conflict.details.get("clear_fields", ()))
                 if action is ResolutionAction.SKIP:
@@ -3336,6 +3479,26 @@ class PaymentSyncService:
             }:
                 field = str(conflict.details.get("field", ""))
                 all_plan_items[conflict.item_id].invoice_actions[field] = action
+            elif conflict.conflict_type in {
+                ConflictType.CARRIER_VALUE_CONFLICT,
+                ConflictType.CARRIER_COLUMN_MISSING,
+            }:
+                carrier_item = all_plan_items[conflict.item_id]
+                carrier_item.carrier_action = action
+                if conflict.conflict_type is ConflictType.CARRIER_VALUE_CONFLICT:
+                    incoming = carrier_text(carrier_item.carrier_value)
+                    if action is ResolutionAction.OVERWRITE and incoming is not None:
+                        carrier_item.carrier_difference = (
+                            conflict.current_value,
+                            incoming,
+                        )
+                    elif action is ResolutionAction.APPEND_CARRIER and incoming is not None:
+                        carrier_item.carrier_difference = (
+                            conflict.current_value,
+                            join_carriers(conflict.current_value, incoming) or incoming,
+                        )
+                    elif action is ResolutionAction.KEEP_EXISTING:
+                        carrier_item.carrier_difference = None
             else:
                 skipped_ids.add(conflict.item_id)
 
@@ -3352,11 +3515,16 @@ class PaymentSyncService:
         target_after = plan.target_fingerprint
         timestamp = self.clock().replace(tzinfo=None, microsecond=0)
         target_results: dict[str, PaymentTargetResult] = {}
+        summary_report = CarrierSummaryResult(
+            source_sheet_name=plan.source_sheet,
+            period=period_for_sheet(plan.source_sheet),
+        )
         written: dict[str, dict[str, int]] = {"HP": {}, "NAM": {}}
         invoice_written: dict[str, dict[str, set[str]]] = {
             "HP": defaultdict(set),
             "NAM": defaultdict(set),
         }
+        carrier_written_items: dict[str, set[str]] = {"HP": set(), "NAM": set()}
         try:
             _progress(progress_callback, "Đang tạo bản làm việc an toàn…")
             source_working = self.backups.create_working_copy(
@@ -3427,7 +3595,7 @@ class PaymentSyncService:
                     for item in target_plan.update_rows:
                         if item.item_id in skipped_ids or item.target_row is None:
                             continue
-                        changed, invoices = _write_profile_item(
+                        changed, invoices, carrier_changed = _write_profile_item(
                             worksheet,
                             row=item.target_row,
                             item=item,
@@ -3440,6 +3608,8 @@ class PaymentSyncService:
                             updated += 1
                             written[target_type][item.item_id] = item.target_row
                             invoice_written[target_type][item.item_id].update(invoices)
+                            if carrier_changed:
+                                carrier_written_items[target_type].add(item.item_id)
                     clear_conflict_items = {
                         conflict.item_id
                         for conflict in target_plan.conflicts
@@ -3449,7 +3619,7 @@ class PaymentSyncService:
                         item = all_items[item_id]
                         if item_id in skipped_ids or item.target_row is None:
                             continue
-                        changed, invoices = _write_profile_item(
+                        changed, invoices, carrier_changed = _write_profile_item(
                             worksheet,
                             row=item.target_row,
                             item=item,
@@ -3463,6 +3633,8 @@ class PaymentSyncService:
                             updated += 1
                             written[target_type][item_id] = item.target_row
                             invoice_written[target_type][item_id].update(invoices)
+                            if carrier_changed:
+                                carrier_written_items[target_type].add(item_id)
                         else:
                             effective_unchanged += 1
                     for item_id, row in selected_targets.items():
@@ -3473,7 +3645,7 @@ class PaymentSyncService:
                             or item_id in skipped_ids
                         ):
                             continue
-                        changed, invoices = _write_profile_item(
+                        changed, invoices, carrier_changed = _write_profile_item(
                             worksheet,
                             row=row,
                             item=item,
@@ -3486,10 +3658,12 @@ class PaymentSyncService:
                             updated += 1
                             written[target_type][item_id] = row
                             invoice_written[target_type][item_id].update(invoices)
+                            if carrier_changed:
+                                carrier_written_items[target_type].add(item_id)
                     for item, row in zip(
                         new_items, blank_rows[: len(new_items)], strict=True
                     ):
-                        changed, invoices = _write_profile_item(
+                        changed, invoices, carrier_changed = _write_profile_item(
                             worksheet,
                             row=row,
                             item=item,
@@ -3502,6 +3676,8 @@ class PaymentSyncService:
                             inserted += 1
                             written[target_type][item.item_id] = row
                             invoice_written[target_type][item.item_id].update(invoices)
+                            if carrier_changed:
+                                carrier_written_items[target_type].add(item.item_id)
                     skipped = len(
                         {
                             item.item_id
@@ -3524,7 +3700,32 @@ class PaymentSyncService:
                             len(fields)
                             for fields in invoice_written[target_type].values()
                         ),
+                        carrier_written_cells=len(carrier_written_items[target_type]),
+                        carrier_appended_cells=sum(
+                            item.item_id in carrier_written_items[target_type]
+                            and item.carrier_action is ResolutionAction.APPEND_CARRIER
+                            for item in target_plan.items
+                        ),
+                        carrier_kept_cells=sum(
+                            item.carrier_action is ResolutionAction.KEEP_EXISTING
+                            for item in target_plan.items
+                            if item.carrier_value
+                        ),
                     )
+                carrier_details = read_bk_detail_rows(source_book, plan.source_sheet)
+                if carrier_details:
+                    for target_type in ("HP", "NAM"):
+                        target_results[target_type].unmapped_carrier_items = sum(
+                            carrier_text(detail.get("Carrier hiệu lực"))
+                            == UNMAPPED_CARRIER
+                            and detail.get("Nhóm") == target_type
+                            for detail in carrier_details
+                        )
+                summary_report = sync_payment_summary_sheet(
+                    target_book,
+                    carrier_details,
+                    source_sheet=plan.source_sheet,
+                )
                 calculation = getattr(target_book, "calculation", None)
                 if calculation is not None:
                     calculation.fullCalcOnLoad = True
@@ -3542,6 +3743,7 @@ class PaymentSyncService:
                 plan,
                 written=written,
                 invoice_written=invoice_written,
+                carrier_written=carrier_written_items,
                 clear_fields=clear_fields,
                 timestamp=timestamp,
             )
@@ -3549,7 +3751,7 @@ class PaymentSyncService:
             target_changed = any(
                 result.sheet_created or result.inserted_rows or result.updated_rows
                 for result in target_results.values()
-            )
+            ) or summary_report.changed
             if source_changed or target_changed:
                 with ExitStack() as stack:
                     for path in sorted(
@@ -3600,7 +3802,7 @@ class PaymentSyncService:
             changed = normalization.changed or any(
                 result.sheet_created or result.inserted_rows or result.updated_rows
                 for result in target_results.values()
-            )
+            ) or summary_report.changed
             result = PaymentSyncResult(
                 status=ExcelRunStatus.SUCCEEDED if changed else ExcelRunStatus.NO_CHANGES,
                 source_path=plan.source_path,
@@ -3613,9 +3815,14 @@ class PaymentSyncService:
                 fingerprint_after=target_after,
                 source_fingerprint_after=source_after,
                 vba_preserved=True,
+                carrier_summary=summary_report,
                 run_id=plan.run_id,
                 message=(
-                    "Đã đồng bộ nguyên tử hai sheet HP/NAM."
+                    "Đã đồng bộ nguyên tử hai sheet HP/NAM; "
+                    f"VT: ghi đè {sum(value.carrier_written_cells - value.carrier_appended_cells for value in target_results.values())}, "
+                    f"ghi thêm {sum(value.carrier_appended_cells for value in target_results.values())}, "
+                    f"giữ nguyên {sum(value.carrier_kept_cells for value in target_results.values())}, "
+                    f"chưa xác định {sum(value.unmapped_carrier_items for value in target_results.values())}."
                     if changed
                     else "Dữ liệu HP/NAM đã đồng bộ."
                 ),
@@ -3638,6 +3845,7 @@ class PaymentSyncService:
         *,
         written: Mapping[str, Mapping[str, int]],
         invoice_written: Mapping[str, Mapping[str, set[str]]],
+        carrier_written: Mapping[str, set[str]],
         clear_fields: Mapping[str, set[str]],
         timestamp: datetime,
     ) -> None:
@@ -3646,7 +3854,18 @@ class PaymentSyncService:
         if plan.target_vba_present and not _package_has_vba(target_path):
             raise PaymentSyncError("VBA của file Thanh toán không còn trong bản làm việc.")
         target_book = self.gateway.load(target_path, read_only=False)
+        source_book = self.gateway.load(source_path, read_only=False)
         try:
+            expected_details = read_bk_detail_rows(source_book, plan.source_sheet)
+            summary_verification = sync_payment_summary_sheet(
+                target_book,
+                expected_details,
+                source_sheet=plan.source_sheet,
+            )
+            if summary_verification.changed:
+                raise PaymentSyncError(
+                    "Bảng TONG_HOP_VAN_TAI không khớp sổ chi tiết sau khi lưu."
+                )
             all_items = {item.item_id: item for item in plan.items}
             for target_type, target_plan in plan.targets.items():
                 worksheet = target_book[target_plan.sheet_name]
@@ -3692,6 +3911,29 @@ class PaymentSyncService:
                             raise PaymentSyncError(
                                 f"Số HĐ {field} dòng {row} không qua kiểm tra."
                             )
+                    if item_id in carrier_written.get(target_type, set()):
+                        carrier_column = profile_resolved.columns.get("carrier")
+                        if carrier_column is None:
+                            raise PaymentSyncError(
+                                f"Cột Vận Tải {target_type} không còn tồn tại khi verify."
+                            )
+                        actual_carrier = worksheet.cell(row, carrier_column).value
+                        expected_carrier = (
+                            item.carrier_difference[1]
+                            if item.carrier_difference is not None
+                            else item.carrier_value
+                        )
+                        if item.carrier_action is ResolutionAction.APPEND_CARRIER:
+                            expected_carrier = join_carriers(
+                                item.carrier_difference[0]
+                                if item.carrier_difference is not None
+                                else None,
+                                item.carrier_value,
+                            )
+                        if carrier_text(actual_carrier) != carrier_text(expected_carrier):
+                            raise PaymentSyncError(
+                                f"Vận Tải dòng {row} không qua kiểm tra."
+                            )
                     if worksheet.cell(
                         row, profile_resolved.columns["date"]
                     ).value != timestamp:
@@ -3699,6 +3941,7 @@ class PaymentSyncService:
                             f"Date cập nhật dòng {row} không qua kiểm tra."
                         )
         finally:
+            source_book.close()
             target_book.close()
 
     def cancel(self, plan: PaymentSyncPlan) -> None:

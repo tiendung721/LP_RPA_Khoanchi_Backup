@@ -97,6 +97,10 @@ class Database:
                 self._migration_8(connection)
                 connection.execute("PRAGMA user_version = 8")
                 current_version = 8
+            if current_version < 9:
+                self._migration_9(connection)
+                connection.execute("PRAGMA user_version = 9")
+                current_version = 9
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -339,6 +343,34 @@ class Database:
             ON expense_carry_forwards(workbook_path, target_sheet, target_row)
             """
         )
+
+    @staticmethod
+    def _migration_9(connection: sqlite3.Connection) -> None:
+        """Lưu vết bên vận tải mà không thay đổi khóa lịch sử hiện có."""
+
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(expense_posting_items)"
+            ).fetchall()
+        }
+        if not columns:
+            return
+        additions = {
+            "carrier_source": "TEXT",
+            "carrier_effective": "TEXT",
+            "carrier_group": "TEXT",
+            "carrier_target_column": "INTEGER",
+            "carrier_target_cell": "TEXT",
+            "carrier_value_before": "TEXT",
+            "carrier_value_after": "TEXT",
+            "carrier_action": "TEXT",
+        }
+        for name, column_type in additions.items():
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE expense_posting_items ADD COLUMN {name} {column_type}"
+                )
 
     @contextmanager
     def transaction(

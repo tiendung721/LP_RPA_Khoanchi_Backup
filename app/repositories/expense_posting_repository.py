@@ -51,14 +51,34 @@ _UPDATABLE_COLUMNS = frozenset(
         "invoice_value_before",
         "invoice_value_after",
         "invoice_action",
+        "carrier_source",
+        "carrier_effective",
+        "carrier_group",
+        "carrier_target_column",
+        "carrier_target_cell",
+        "carrier_value_before",
+        "carrier_value_after",
+        "carrier_action",
         "status",
     }
 )
 _VALUE_COLUMNS = frozenset(
-    {"value_before", "value_after", "invoice_value_before", "invoice_value_after"}
+    {
+        "value_before",
+        "value_after",
+        "invoice_value_before",
+        "invoice_value_after",
+        "carrier_value_before",
+        "carrier_value_after",
+    }
 )
 _POSITIVE_COLUMNS = frozenset(
-    {"target_row", "target_column", "invoice_target_column"}
+    {
+        "target_row",
+        "target_column",
+        "invoice_target_column",
+        "carrier_target_column",
+    }
 )
 
 
@@ -117,6 +137,14 @@ class ExpensePostingItemRecord:
     invoice_value_before: Any
     invoice_value_after: Any
     invoice_action: str | None
+    carrier_source: str | None
+    carrier_effective: str | None
+    carrier_group: str | None
+    carrier_target_column: int | None
+    carrier_target_cell: str | None
+    carrier_value_before: Any
+    carrier_value_after: Any
+    carrier_action: str | None
     status: str
     created_at: str
 
@@ -174,6 +202,14 @@ class ExpensePostingRepository:
         invoice_value_before: object | None = None,
         invoice_value_after: object | None = None,
         invoice_action: object | None = None,
+        carrier_source: str | None = None,
+        carrier_effective: str | None = None,
+        carrier_group: str | None = None,
+        carrier_target_column: int | None = None,
+        carrier_target_cell: str | None = None,
+        carrier_value_before: object | None = None,
+        carrier_value_after: object | None = None,
+        carrier_action: object | None = None,
         created_at: str | None = None,
     ) -> ExpensePostingItemRecord:
         payload = self._normalize_create_payload(
@@ -202,6 +238,14 @@ class ExpensePostingRepository:
                 "invoice_value_before": invoice_value_before,
                 "invoice_value_after": invoice_value_after,
                 "invoice_action": invoice_action,
+                "carrier_source": carrier_source,
+                "carrier_effective": carrier_effective,
+                "carrier_group": carrier_group,
+                "carrier_target_column": carrier_target_column,
+                "carrier_target_cell": carrier_target_cell,
+                "carrier_value_before": carrier_value_before,
+                "carrier_value_after": carrier_value_after,
+                "carrier_action": carrier_action,
                 "status": status,
                 "created_at": created_at or local_now_iso(),
             }
@@ -600,10 +644,13 @@ class ExpensePostingRepository:
                 value_after, action, invoice_no, invoice_selected,
                 invoice_target_column, invoice_target_cell,
                 invoice_value_before, invoice_value_after, invoice_action,
+                carrier_source, carrier_effective, carrier_group,
+                carrier_target_column, carrier_target_cell,
+                carrier_value_before, carrier_value_after, carrier_action,
                 status, created_at
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             tuple(
@@ -633,6 +680,14 @@ class ExpensePostingRepository:
                     "invoice_value_before",
                     "invoice_value_after",
                     "invoice_action",
+                    "carrier_source",
+                    "carrier_effective",
+                    "carrier_group",
+                    "carrier_target_column",
+                    "carrier_target_cell",
+                    "carrier_value_before",
+                    "carrier_value_after",
+                    "carrier_action",
                     "status",
                     "created_at",
                 )
@@ -680,6 +735,7 @@ class ExpensePostingRepository:
         target_row = payload.get("target_row")
         target_column = payload.get("target_column")
         invoice_target_column = payload.get("invoice_target_column")
+        carrier_target_column = payload.get("carrier_target_column")
         if target_row is not None:
             target_row = _required_positive_int(target_row, field_name="target_row")
         if target_column is not None:
@@ -691,6 +747,11 @@ class ExpensePostingRepository:
             invoice_target_column = _required_positive_int(
                 invoice_target_column,
                 field_name="invoice_target_column",
+            )
+        if carrier_target_column is not None:
+            carrier_target_column = _required_positive_int(
+                carrier_target_column,
+                field_name="carrier_target_column",
             )
         return {
             "run_id": run_id,
@@ -717,6 +778,14 @@ class ExpensePostingRepository:
             "invoice_value_before": _json_text(payload.get("invoice_value_before")),
             "invoice_value_after": _json_text(payload.get("invoice_value_after")),
             "invoice_action": _optional_text(payload.get("invoice_action")),
+            "carrier_source": _optional_text(payload.get("carrier_source")),
+            "carrier_effective": _optional_text(payload.get("carrier_effective")),
+            "carrier_group": _optional_text(payload.get("carrier_group")),
+            "carrier_target_column": carrier_target_column,
+            "carrier_target_cell": _optional_text(payload.get("carrier_target_cell")),
+            "carrier_value_before": _json_text(payload.get("carrier_value_before")),
+            "carrier_value_after": _json_text(payload.get("carrier_value_after")),
+            "carrier_action": _optional_text(payload.get("carrier_action")),
             "status": _posting_status(payload["status"]),
             "created_at": created_at,
         }
@@ -759,6 +828,18 @@ class ExpensePostingRepository:
             invoice_value_before=_json_value(row["invoice_value_before"]),
             invoice_value_after=_json_value(row["invoice_value_after"]),
             invoice_action=row["invoice_action"],
+            carrier_source=row["carrier_source"],
+            carrier_effective=row["carrier_effective"],
+            carrier_group=row["carrier_group"],
+            carrier_target_column=(
+                int(row["carrier_target_column"])
+                if row["carrier_target_column"] is not None
+                else None
+            ),
+            carrier_target_cell=row["carrier_target_cell"],
+            carrier_value_before=_json_value(row["carrier_value_before"]),
+            carrier_value_after=_json_value(row["carrier_value_after"]),
+            carrier_action=row["carrier_action"],
             status=str(row["status"]),
             created_at=str(row["created_at"]),
         )

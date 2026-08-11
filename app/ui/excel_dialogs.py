@@ -437,6 +437,13 @@ DEFAULT_ACTIONS: dict[str, tuple[str, ...]] = {
     "INVOICE_COLUMN_MISSING": ("SKIP_INVOICE", "CANCEL_ALL"),
     "MULTIPLE_EXPENSE_SAME_CELL": ("SELECT_SOURCE_ITEM",),
     "CARRY_FORWARD_MAPPING_INVALID": ("SKIP", "CANCEL_ALL"),
+    "MULTIPLE_SOURCE_CARRIERS": ("SELECT_CARRIER",),
+    "CARRIER_VALUE_CONFLICT": (
+        "KEEP_EXISTING",
+        "APPEND_CARRIER",
+        "OVERWRITE",
+    ),
+    "CARRIER_COLUMN_MISSING": ("KEEP_EXISTING", "CANCEL_ALL"),
     "BATCH_ALREADY_POSTED": ("POST_UNPOSTED_ONLY", "CANCEL"),
     "FILE_CHANGED": ("REANALYZE", "CANCEL"),
     "FILE_LOCKED": ("RETRY", "CANCEL"),
@@ -467,6 +474,9 @@ DEFAULT_RESOLUTION: dict[str, str] = {
     "INVOICE_COLUMN_MISSING": "SKIP_INVOICE",
     "MULTIPLE_EXPENSE_SAME_CELL": "SELECT_SOURCE_ITEM",
     "CARRY_FORWARD_MAPPING_INVALID": "SKIP",
+    "MULTIPLE_SOURCE_CARRIERS": "SELECT_CARRIER",
+    "CARRIER_VALUE_CONFLICT": "KEEP_EXISTING",
+    "CARRIER_COLUMN_MISSING": "KEEP_EXISTING",
     "BATCH_ALREADY_POSTED": "POST_UNPOSTED_ONLY",
     "FILE_CHANGED": "REANALYZE",
     "FILE_LOCKED": "RETRY",
@@ -486,9 +496,11 @@ ACTION_LABELS = {
     "SELECT_FEE": "Chọn mã phí",
     "SELECT_INVOICE": "Chọn một Số HĐ",
     "SELECT_SOURCE_ITEM": "Chọn một dòng JSON",
+    "SELECT_CARRIER": "Chọn bên vận tải",
     "KEEP_EXISTING": "Giữ nguyên",
     "KEEP_FORMULA": "Giữ công thức",
     "OVERWRITE": "Ghi đè",
+    "APPEND_CARRIER": "Ghi thêm",
     "POST_UNPOSTED_ONLY": "Chỉ nhập khoản chưa xử lý",
     "REANALYZE": "Đọc lại dữ liệu",
     "RETRY": "Thử lại",
@@ -699,6 +711,7 @@ class ConflictResolutionDialog(QDialog):
         self._selected_sheets: dict[str, QComboBox] = {}
         self._selected_months: dict[str, QComboBox] = {}
         self._selected_invoices: dict[str, QComboBox] = {}
+        self._selected_carriers: dict[str, QComboBox] = {}
         self._selector_buttons: dict[str, QPushButton] = {}
         self.setObjectName("excelConflictResolutionDialog")
         self.setWindowTitle("Xử lý xung đột Excel")
@@ -777,6 +790,16 @@ class ConflictResolutionDialog(QDialog):
             _value(details, "invoice_candidates", default=())
         )
         invoice_display = ", ".join(str(value) for value in invoice_candidates)
+        carrier_candidates = _sequence(
+            _value(details, "carrier_candidates", default=())
+        )
+        if carrier_candidates:
+            carrier_display = ", ".join(str(value) for value in carrier_candidates)
+            invoice_display = (
+                f"{invoice_display} | VT: {carrier_display}"
+                if invoice_display
+                else f"VT: {carrier_display}"
+            )
         values = (
             _value(conflict, "container", "container_number"),
             _value(conflict, "bl", "bill_of_lading"),
@@ -921,6 +944,28 @@ class ConflictResolutionDialog(QDialog):
                 combo.addItem(str(invoice), str(invoice))
             self._selected_invoices[conflict_id] = combo
             return combo
+        if conflict_type == "MULTIPLE_SOURCE_CARRIERS" or (
+            conflict_type == "CARRIER_VALUE_CONFLICT"
+            and bool(
+                _value(
+                    details,
+                    "requires_existing_carrier_selection",
+                    default=False,
+                )
+            )
+        ):
+            combo = QComboBox()
+            combo.setObjectName(f"selectConflictCarrier_{row}")
+            combo.addItem("— Chọn bên vận tải —", None)
+            candidate_field = (
+                "existing_carrier_candidates"
+                if conflict_type == "CARRIER_VALUE_CONFLICT"
+                else "carrier_candidates"
+            )
+            for carrier in _sequence(_value(details, candidate_field, default=())):
+                combo.addItem(str(carrier), str(carrier))
+            self._selected_carriers[conflict_id] = combo
+            return combo
         sheet_candidates = _sequence(
             _value(
                 conflict,
@@ -1047,6 +1092,9 @@ class ConflictResolutionDialog(QDialog):
             if conflict_id in self._selected_invoices:
                 invoice = self._selected_invoices[conflict_id].currentData()
                 payload["selected_invoice"] = invoice
+            if conflict_id in self._selected_carriers:
+                carrier = self._selected_carriers[conflict_id].currentData()
+                payload["selected_carrier"] = carrier
             if conflict_id in self._selected_source_items:
                 payload["selected_source_item_index"] = self._selected_source_items[
                     conflict_id
@@ -1086,6 +1134,26 @@ class ConflictResolutionDialog(QDialog):
                 combo = self._selected_source_items.get(conflict_id)
                 if combo is None or combo.currentData() is None:
                     missing.append(f"dòng {row + 1}: chưa chọn dòng JSON")
+            if action == "SELECT_CARRIER":
+                combo = self._selected_carriers.get(conflict_id)
+                if combo is None or combo.currentData() in (None, ""):
+                    missing.append(f"dòng {row + 1}: chưa chọn bên vận tải")
+            details = _value(conflict, "details", default={})
+            if (
+                action == "KEEP_EXISTING"
+                and bool(
+                    _value(
+                        details,
+                        "requires_existing_carrier_selection",
+                        default=False,
+                    )
+                )
+            ):
+                combo = self._selected_carriers.get(conflict_id)
+                if combo is None or combo.currentData() in (None, ""):
+                    missing.append(
+                        f"dòng {row + 1}: chọn mã vận tải hiệu lực đang có"
+                    )
         if missing:
             self.validation_label.setText(" • ".join(missing))
             return

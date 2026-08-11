@@ -18,6 +18,18 @@ from app.services.json_codec import JsonCodec, JsonCodecError
 from app.services.validation_service import normalize_bl, normalize_container
 
 from .headers import HeaderResolution, HeaderResolutionError, HeaderResolver, normalize_header
+from .carrier import (
+    BK_CARRIER_HEADER_ALIASES,
+    carrier_group_for_fee,
+    carrier_key,
+    carrier_text,
+    detail_rows_from_actions,
+    join_carriers,
+    read_bk_detail_rows,
+    split_carriers,
+    unique_carriers,
+    upsert_bk_detail_rows,
+)
 from .daily_sync import (
     SOURCE_HEADER_ALIASES,
     SYNC_FIELDS,
@@ -60,6 +72,8 @@ BASE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "vessel": ("Tên tàu", "Tàu"),
     "recipient": ("Người nhận", "Khách hàng"),
     "notes": ("Ghi chú", "Ghi Chú"),
+    "carrier_hp": BK_CARRIER_HEADER_ALIASES["HP"],
+    "carrier_nam": BK_CARRIER_HEADER_ALIASES["NAM"],
 }
 
 FEE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
@@ -414,7 +428,16 @@ class ExpensePostingService:
         write_actions = [
             action
             for action in actions
-            if action.get("amount_write") or action.get("invoice_write")
+            if action.get("amount_write")
+            or action.get("invoice_write")
+            or action.get("carrier_write")
+        ]
+        detail_actions = [
+            action
+            for action in actions
+            if action.get("carrier_group") in {"HP", "NAM"}
+            and action.get("status")
+            in {PostingItemStatus.POSTED, PostingItemStatus.ALREADY_EXISTS}
         ]
         already_actions = [
             action
@@ -436,9 +459,10 @@ class ExpensePostingService:
         after = plan.target_fingerprint
         update_timestamp: datetime | None = None
         update_column: int | None = None
+        workbook_replaced = False
         self._update_run(plan.run_id, status=ExcelRunStatus.APPLYING)
         try:
-            if write_actions:
+            if write_actions or detail_actions:
                 with self.lock_service.acquire(plan.target_path):
                     pass
                 self.gateway.assert_unchanged(
@@ -460,6 +484,7 @@ class ExpensePostingService:
                     invoice_columns = self._resolve_invoice_columns(
                         base, fee_columns
                     )
+                    carrier_columns = self._resolve_carrier_columns(base)
                     update_column = self._ensure_update_column(worksheet)
                     update_timestamp = self.clock().replace(
                         tzinfo=None,
@@ -486,6 +511,16 @@ class ExpensePostingService:
                             worksheet.cell(
                                 int(action["target_row"]), invoice_column
                             ).value = action["invoice_value_after"]
+                        if action.get("carrier_write"):
+                            carrier_group = str(action["carrier_group"])
+                            carrier_column = int(action["carrier_target_column"])
+                            if carrier_columns.get(carrier_group) != carrier_column:
+                                raise ExpensePostingError(
+                                    f"Cột bên vận tải {carrier_group} không còn khớp header."
+                                )
+                            worksheet.cell(
+                                int(action["target_row"]), carrier_column
+                            ).value = action["carrier_value_after"]
                         updated_rows.add(int(action["target_row"]))
                     for target_row in updated_rows:
                         update_cell = worksheet.cell(target_row, update_column)
@@ -499,6 +534,14 @@ class ExpensePostingService:
 
                         if find_summary_start(worksheet) is not None:
                             refresh_bk_summary_formulas(worksheet)
+                    detail_rows = detail_rows_from_actions(
+                        detail_actions,
+                        batch_id=plan.batch_id,
+                        batch_hash=plan.batch_hash,
+                        sheet_name=str(selected_sheet),
+                        updated_at=update_timestamp,
+                    )
+                    upsert_bk_detail_rows(write_book, detail_rows)
                     self.gateway.save(write_book, working_path)
                 finally:
                     write_book.close()
@@ -506,6 +549,7 @@ class ExpensePostingService:
                     working_path,
                     selected_sheet,
                     write_actions,
+                    detail_rows=detail_rows,
                     update_column=update_column,
                     update_timestamp=update_timestamp,
                 )
@@ -516,12 +560,13 @@ class ExpensePostingService:
                     expected=plan.target_fingerprint,
                 )
                 working_path = None
+                workbook_replaced = True
                 self._record_carry_forwards(plan, write_actions)
 
             self._record_history(plan, history)
             status = (
                 ExcelRunStatus.SUCCEEDED
-                if write_actions
+                if write_actions or detail_actions
                 else ExcelRunStatus.NO_CHANGES
             )
             posted_count = sum(
@@ -539,6 +584,24 @@ class ExpensePostingService:
             invoice_written_count = sum(
                 bool(action.get("invoice_write")) for action in write_actions
             )
+            carrier_written_count = sum(
+                bool(action.get("carrier_write")) for action in write_actions
+            )
+            carrier_appended_count = sum(
+                bool(action.get("carrier_write"))
+                and action.get("carrier_action") is ResolutionAction.APPEND_CARRIER
+                for action in write_actions
+            )
+            carrier_kept_count = sum(
+                action.get("carrier_action") is ResolutionAction.KEEP_EXISTING
+                for action in actions
+                if action.get("carrier_group") is not None
+            )
+            unmapped_count = sum(
+                len(action.get("source_indices", ()))
+                for action in detail_actions
+                if not action.get("carrier_effective")
+            )
             result = PostingResult(
                 status=status,
                 target_path=plan.target_path,
@@ -546,6 +609,10 @@ class ExpensePostingService:
                 posted_source_items=posted_count,
                 written_cells=amount_written_count,
                 invoice_written_cells=invoice_written_count,
+                carrier_written_cells=carrier_written_count,
+                carrier_appended_cells=carrier_appended_count,
+                carrier_kept_cells=carrier_kept_count,
+                unmapped_carrier_items=unmapped_count,
                 skipped_source_items=skipped_count,
                 already_existing_items=already_count,
                 conflict_count=len(plan.conflicts),
@@ -555,14 +622,34 @@ class ExpensePostingService:
                 run_id=plan.run_id,
                 message=(
                     f"Đã nhập {posted_count} khoản vào {amount_written_count} ô tiền; "
-                    f"cập nhật {invoice_written_count} ô Số HĐ."
-                    if write_actions
+                    f"cập nhật {invoice_written_count} ô Số HĐ và "
+                    f"{carrier_written_count} ô bên vận tải. "
+                    f"VT: ghi đè {carrier_written_count - carrier_appended_count}, "
+                    f"ghi thêm {carrier_appended_count}, giữ nguyên {carrier_kept_count}, "
+                    f"chưa xác định {unmapped_count}."
+                    if write_actions or detail_actions
                     else "Không có ô cần ghi."
                 ),
             )
             self._finish_result(result)
             return result
         except Exception as exc:
+            if workbook_replaced and backup_path is not None:
+                try:
+                    rollback_path = self.backups.create_working_copy(
+                        backup_path,
+                        run_id=f"{plan.run_id}-rollback",
+                    )
+                    try:
+                        self.gateway.atomic_replace(
+                            rollback_path,
+                            plan.target_path,
+                            expected=after,
+                        )
+                    finally:
+                        rollback_path.unlink(missing_ok=True)
+                except Exception as rollback_error:
+                    exc.add_note(f"Khôi phục BK thất bại: {rollback_error}")
             self._finish_failed(plan.run_id, exc)
             raise
         finally:
@@ -614,6 +701,60 @@ class ExpensePostingService:
         items = copy.deepcopy(plan.items)
         for conflict in plan.conflicts:
             value = resolved.get(conflict.conflict_id)
+            if conflict.conflict_type in {
+                ConflictType.MULTIPLE_SOURCE_CARRIERS,
+                ConflictType.CARRIER_VALUE_CONFLICT,
+                ConflictType.CARRIER_COLUMN_MISSING,
+            }:
+                if value is None:
+                    continue
+                action = self._action(value)
+                if action in {ResolutionAction.CANCEL, ResolutionAction.CANCEL_ALL}:
+                    raise ExpensePostingError("Người dùng đã hủy nhập khoản chi.")
+                indexes = tuple(
+                    int(index)
+                    for index in conflict.details.get(
+                        "item_indexes",
+                        (() if conflict.item_index is None else (conflict.item_index,)),
+                    )
+                )
+                selected_carrier = None
+                if action is ResolutionAction.SELECT_CARRIER:
+                    selected_carrier = self._resolution_attr(value, "selected_carrier")
+                    valid = {
+                        carrier_key(candidate)
+                        for candidate in conflict.details.get("carrier_candidates", ())
+                    }
+                    if carrier_key(selected_carrier) not in valid:
+                        raise ExpensePostingError("Bên vận tải được chọn không hợp lệ.")
+                ambiguous_invoices = {
+                    _invoice_key(invoice)
+                    for invoice in conflict.details.get(
+                        "ambiguous_invoice_carriers", {}
+                    )
+                }
+                for index in indexes:
+                    belongs_to_ambiguous_invoice = bool(
+                        ambiguous_invoices.intersection(
+                            _invoice_key(invoice)
+                            for invoice in items[index].invoice_candidates
+                        )
+                    )
+                    items[index].selected_carrier = (
+                        str(selected_carrier)
+                        if selected_carrier is not None
+                        and (
+                            not ambiguous_invoices
+                            or belongs_to_ambiguous_invoice
+                        )
+                        else None
+                    )
+                    items[index].carrier_action = (
+                        ResolutionAction.OVERWRITE
+                        if action is ResolutionAction.SELECT_CARRIER
+                        else action
+                    )
+                continue
             if conflict.conflict_type is ConflictType.MULTIPLE_EXPENSE_SAME_CELL:
                 if value is None:
                     continue
@@ -859,6 +1000,9 @@ class ExpensePostingService:
                 invoice_candidates=_unique_invoice_values(
                     [row.get("invoice_no") for row in group]
                 ),
+                carrier_candidates=unique_carriers(
+                    [row.get("carrier") for row in group]
+                ),
                 force_repost=any(
                     row["source_item_index"] in repost for row in group
                 ),
@@ -933,6 +1077,17 @@ class ExpensePostingService:
             invoice_column = fee_column + 1
             if base.headers.get(invoice_column) in INVOICE_NUMBER_HEADER_NAMES:
                 result[fee] = invoice_column
+        return result
+
+    @staticmethod
+    def _resolve_carrier_columns(base: HeaderResolution) -> dict[str, int]:
+        result: dict[str, int] = {}
+        hp = base.columns.get("carrier_hp")
+        nam = base.columns.get("carrier_nam")
+        if hp is not None:
+            result["HP"] = hp
+        if nam is not None:
+            result["NAM"] = nam
         return result
 
     @staticmethod
@@ -1244,6 +1399,7 @@ class ExpensePostingService:
         base = self._resolve_base_headers(worksheet)
         fee_columns = self._resolve_fee_columns(worksheet, base)
         invoice_columns = self._resolve_invoice_columns(base, fee_columns)
+        carrier_columns = self._resolve_carrier_columns(base)
         index, manual_candidates, target_plan_header = self._window_index(
             workbook, target_sheet
         )
@@ -1276,6 +1432,12 @@ class ExpensePostingService:
             item.current_value = None
             item.cell_state = None
             item.carry_forward_required = False
+            item.carrier_group = carrier_group_for_fee(item.selected_fee)
+            item.carrier_column = None
+            item.carrier_cell = None
+            item.carrier_current_value = None
+            item.carrier_value_after = None
+            item.carrier_action = None
             if item.selected_fee not in FEE_HEADER_ALIASES:
                 item_index = len(analyzed_items)
                 analyzed_items.append(item)
@@ -1483,7 +1645,188 @@ class ExpensePostingService:
             )
             if invoice_conflict is not None:
                 conflicts.append(invoice_conflict)
+        conflicts.extend(
+            self._analyze_carrier_groups(
+                worksheet,
+                analyzed_items,
+                batch_hash=batch_hash,
+                carrier_columns=carrier_columns,
+            )
+        )
         return analyzed_items, conflicts
+
+    def _analyze_carrier_groups(
+        self,
+        worksheet: Any,
+        items: Sequence[PostingItem],
+        *,
+        batch_hash: str,
+        carrier_columns: Mapping[str, int],
+    ) -> list[PostingConflict]:
+        grouped: dict[tuple[int, str], list[int]] = defaultdict(list)
+        conflicts: list[PostingConflict] = []
+        for index, item in enumerate(items):
+            group = carrier_group_for_fee(item.selected_fee)
+            item.carrier_group = group
+            if (
+                group is None
+                or item.target_row is None
+                or item.status not in {PostingItemStatus.PLANNED, PostingItemStatus.ALREADY_EXISTS}
+            ):
+                continue
+            column = carrier_columns.get(group)
+            item.carrier_column = column
+            if column is None:
+                if not item.carrier_candidates:
+                    continue
+                conflicts.append(
+                    self._item_conflict(
+                        batch_hash,
+                        index,
+                        item,
+                        ConflictType.CARRIER_COLUMN_MISSING,
+                        f"Không nhận diện được cột bên vận tải cho nhóm {group}.",
+                        (ResolutionAction.KEEP_EXISTING, ResolutionAction.CANCEL_ALL),
+                        default=ResolutionAction.KEEP_EXISTING,
+                        details={"scope": "carrier", "carrier_group": group},
+                    )
+                )
+                continue
+            cell = worksheet.cell(int(item.target_row), column)
+            item.carrier_cell = cell.coordinate
+            item.carrier_current_value = cell.value
+            grouped[(int(item.target_row), group)].append(index)
+
+        for (row, group), indexes in grouped.items():
+            first = items[indexes[0]]
+            column = int(carrier_columns[group])
+            cell = worksheet.cell(row, column)
+            incoming = unique_carriers(
+                carrier
+                for index in indexes
+                for carrier in (
+                    [items[index].selected_carrier]
+                    if items[index].selected_carrier
+                    else items[index].carrier_candidates
+                )
+            )
+            invoice_carriers: dict[str, list[str]] = defaultdict(list)
+            invoice_labels: dict[str, str] = {}
+            for index in indexes:
+                item = items[index]
+                invoices = item.invoice_candidates or ([item.selected_invoice] if item.selected_invoice else [])
+                for invoice in invoices:
+                    key = _invoice_key(invoice)
+                    if key is None:
+                        continue
+                    invoice_labels[key] = str(invoice)
+                    invoice_carriers[key].extend(
+                        [item.selected_carrier]
+                        if item.selected_carrier
+                        else item.carrier_candidates
+                    )
+            ambiguous = {
+                invoice_labels[key]: unique_carriers(values)
+                for key, values in invoice_carriers.items()
+                if len(unique_carriers(values)) > 1
+            }
+            details = {
+                "scope": "carrier",
+                "carrier_group": group,
+                "item_indexes": list(indexes),
+                "carrier_candidates": incoming,
+                "invoice_carriers": {
+                    invoice_labels[key]: unique_carriers(values)
+                    for key, values in invoice_carriers.items()
+                },
+                "carrier_column": column,
+                "carrier_cell": cell.coordinate,
+                "carrier_current_value": cell.value,
+            }
+            if ambiguous:
+                ambiguous_candidates = unique_carriers(
+                    carrier
+                    for values in ambiguous.values()
+                    for carrier in values
+                )
+                conflicts.append(
+                    self._item_conflict(
+                        batch_hash,
+                        indexes[0],
+                        first,
+                        ConflictType.MULTIPLE_SOURCE_CARRIERS,
+                        "Cùng một Số HĐ có nhiều bên vận tải trong JSON; hãy chọn một mã.",
+                        (ResolutionAction.SELECT_CARRIER,),
+                        default=ResolutionAction.SELECT_CARRIER,
+                        details={
+                            **details,
+                            "carrier_candidates": ambiguous_candidates,
+                            "incoming_carriers": incoming,
+                            "ambiguous_invoice_carriers": ambiguous,
+                        },
+                    )
+                )
+                continue
+            current = split_carriers(cell.value)
+            if not current:
+                for index in indexes:
+                    items[index].carrier_action = (
+                        ResolutionAction.OVERWRITE
+                        if incoming
+                        else ResolutionAction.KEEP_EXISTING
+                    )
+                    items[index].carrier_value_after = join_carriers(incoming)
+                continue
+            if not incoming and len(current) == 1:
+                for index in indexes:
+                    items[index].carrier_action = ResolutionAction.KEEP_EXISTING
+                    items[index].carrier_value_after = cell.value
+                continue
+            if incoming and all(
+                carrier_key(value) in {carrier_key(item) for item in current}
+                for value in incoming
+            ):
+                for index in indexes:
+                    items[index].carrier_action = ResolutionAction.KEEP_EXISTING
+                    items[index].carrier_value_after = cell.value
+                continue
+            current_invoice_keys = {
+                _invoice_key(value)
+                for index in indexes
+                for value in items[index].invoice_candidates
+                if _invoice_key(value) is not None
+                and _invoice_key(value) == _invoice_key(items[index].invoice_current_value)
+            }
+            incoming_invoice_keys = set(invoice_carriers)
+            actions = [ResolutionAction.KEEP_EXISTING]
+            if incoming:
+                actions.append(ResolutionAction.OVERWRITE)
+            if incoming and not current_invoice_keys.intersection(incoming_invoice_keys):
+                actions.insert(1, ResolutionAction.APPEND_CARRIER)
+            requires_existing_selection = (
+                len(current) > 1
+                and not any(
+                    carrier_key(value) in {carrier_key(existing) for existing in current}
+                    for value in incoming
+                )
+            )
+            conflicts.append(
+                self._item_conflict(
+                    batch_hash,
+                    indexes[0],
+                    first,
+                    ConflictType.CARRIER_VALUE_CONFLICT,
+                    f"Ô bên vận tải nhóm {group} đang có mã khác với JSON.",
+                    tuple(actions),
+                    default=ResolutionAction.KEEP_EXISTING,
+                    details={
+                        **details,
+                        "existing_carrier_candidates": current,
+                        "requires_existing_carrier_selection": requires_existing_selection,
+                    },
+                )
+            )
+        return conflicts
 
     def _set_invoice_state(
         self,
@@ -1662,19 +2005,26 @@ class ExpensePostingService:
     ) -> PostingConflict:
         conflict_details = dict(details or {})
         invoice_scope = conflict_details.get("scope") == "invoice"
+        carrier_scope = conflict_details.get("scope") == "carrier"
         target_column = (
             conflict_details.get("invoice_column")
             if invoice_scope
+            else conflict_details.get("carrier_column")
+            if carrier_scope
             else item.target_column
         )
         target_cell = (
             conflict_details.get("invoice_cell")
             if invoice_scope
+            else conflict_details.get("carrier_cell")
+            if carrier_scope
             else item.target_cell
         )
         current_value = (
             conflict_details.get("invoice_current_value")
             if invoice_scope
+            else conflict_details.get("carrier_current_value")
+            if carrier_scope
             else item.current_value
         )
         return PostingConflict(
@@ -1741,6 +2091,11 @@ class ExpensePostingService:
             ConflictType.TARGET_CELL_FORMULA,
             ConflictType.TARGET_CELL_TEXT,
         }
+        carrier_conflict_types = {
+            ConflictType.MULTIPLE_SOURCE_CARRIERS,
+            ConflictType.CARRIER_VALUE_CONFLICT,
+            ConflictType.CARRIER_COLUMN_MISSING,
+        }
         actions: list[dict[str, Any]] = []
         history: list[dict[str, Any]] = []
         for item_index, item in enumerate(items):
@@ -1769,6 +2124,8 @@ class ExpensePostingService:
                 )
                 if action in {ResolutionAction.CANCEL, ResolutionAction.CANCEL_ALL}:
                     raise ExpensePostingError("Người dùng đã hủy nhập khoản chi.")
+                if conflict.conflict_type in carrier_conflict_types:
+                    continue
                 if conflict.conflict_type in invoice_conflict_types:
                     if action is ResolutionAction.SELECT_INVOICE:
                         selected = self._resolution_attr(value, "selected_invoice")
@@ -1917,8 +2274,177 @@ class ExpensePostingService:
                 }
             )
             actions.append(action_record)
-            history.extend(self._history_rows(action_record, item))
+        self._resolve_carrier_actions(
+            worksheet,
+            items,
+            actions,
+            conflicts,
+            resolutions,
+        )
+        for action, item in zip(actions, items, strict=True):
+            history.extend(self._history_rows(action, item))
         return actions, history
+
+    def _resolve_carrier_actions(
+        self,
+        worksheet: Any,
+        items: Sequence[PostingItem],
+        actions: list[dict[str, Any]],
+        conflicts: Sequence[PostingConflict],
+        resolutions: Mapping[str, Any],
+    ) -> None:
+        carrier_conflicts: dict[tuple[int, str], PostingConflict] = {}
+        for conflict in conflicts:
+            if conflict.conflict_type not in {
+                ConflictType.MULTIPLE_SOURCE_CARRIERS,
+                ConflictType.CARRIER_VALUE_CONFLICT,
+                ConflictType.CARRIER_COLUMN_MISSING,
+            }:
+                continue
+            row = conflict.target_row
+            group = conflict.details.get("carrier_group")
+            if row is not None and group in {"HP", "NAM"}:
+                carrier_conflicts[(int(row), str(group))] = conflict
+
+        grouped: dict[tuple[int, str], list[int]] = defaultdict(list)
+        for index, (item, action) in enumerate(zip(items, actions, strict=True)):
+            group = carrier_group_for_fee(action.get("fee_selected"))
+            row = action.get("target_row")
+            if (
+                group is None
+                or row is None
+                or (
+                    item.carrier_column is None
+                    and not item.carrier_candidates
+                )
+            ):
+                continue
+            grouped[(int(row), group)].append(index)
+
+        base = self._resolve_base_headers(worksheet)
+        carrier_columns = self._resolve_carrier_columns(base)
+        for (row, group), indexes in grouped.items():
+            column = carrier_columns.get(group)
+            incoming = unique_carriers(
+                carrier
+                for index in indexes
+                for carrier in (
+                    [items[index].selected_carrier]
+                    if items[index].selected_carrier
+                    else items[index].carrier_candidates
+                )
+            )
+            conflict = carrier_conflicts.get((row, group))
+            selected_carrier: str | None = None
+            chosen: ResolutionAction | None = None
+            if conflict is not None:
+                value = resolutions.get(conflict.conflict_id)
+                chosen = self._action(value) if value is not None else conflict.default_action
+                if chosen in {ResolutionAction.CANCEL, ResolutionAction.CANCEL_ALL}:
+                    raise ExpensePostingError("Người dùng đã hủy nhập khoản chi.")
+                if chosen is ResolutionAction.SELECT_CARRIER:
+                    selected_carrier = self._resolution_attr(value, "selected_carrier")
+                    if carrier_key(selected_carrier) not in {
+                        carrier_key(candidate)
+                        for candidate in conflict.details.get("carrier_candidates", ())
+                    }:
+                        raise ExpensePostingError("Bên vận tải được chọn không hợp lệ.")
+                    ambiguous_invoices = {
+                        _invoice_key(invoice)
+                        for invoice in conflict.details.get(
+                            "ambiguous_invoice_carriers", {}
+                        )
+                    }
+                    incoming = unique_carriers(
+                        carrier
+                        for index in indexes
+                        for carrier in (
+                            [selected_carrier]
+                            if ambiguous_invoices.intersection(
+                                _invoice_key(invoice)
+                                for invoice in items[index].invoice_candidates
+                            )
+                            else items[index].carrier_candidates
+                        )
+                    )
+                    chosen = ResolutionAction.OVERWRITE
+            if column is None:
+                for index in indexes:
+                    actions[index].update(
+                        {
+                            "carrier_group": group,
+                            "carrier_source": join_carriers(items[index].carrier_candidates),
+                            "carrier_effective": None,
+                            "carrier_action": ResolutionAction.KEEP_EXISTING,
+                            "carrier_write": False,
+                        }
+                    )
+                continue
+            cell = worksheet.cell(row, column)
+            before = cell.value
+            if chosen is None:
+                if not split_carriers(before):
+                    chosen = ResolutionAction.OVERWRITE
+                elif all(
+                    carrier_key(value) in {carrier_key(current) for current in split_carriers(before)}
+                    for value in incoming
+                ):
+                    chosen = ResolutionAction.KEEP_EXISTING
+                else:
+                    chosen = ResolutionAction.KEEP_EXISTING
+            if chosen is ResolutionAction.OVERWRITE:
+                after = join_carriers(incoming)
+            elif chosen is ResolutionAction.APPEND_CARRIER:
+                after = join_carriers(before, incoming)
+            else:
+                after = before
+            write = carrier_text(after) != carrier_text(before)
+            current_parts = split_carriers(before)
+            selected_existing_carrier = None
+            if (
+                conflict is not None
+                and chosen is ResolutionAction.KEEP_EXISTING
+                and conflict.details.get("requires_existing_carrier_selection")
+            ):
+                value = resolutions.get(conflict.conflict_id)
+                selected_existing_carrier = self._resolution_attr(
+                    value, "selected_carrier"
+                )
+                if carrier_key(selected_existing_carrier) not in {
+                    carrier_key(candidate) for candidate in current_parts
+                }:
+                    raise ExpensePostingError(
+                        "Phải chọn một bên vận tải hiện có khi giữ nguyên ô có nhiều mã."
+                    )
+            for position, index in enumerate(indexes):
+                source_carrier = (
+                    items[index].selected_carrier
+                    or join_carriers(items[index].carrier_candidates)
+                )
+                if chosen in {ResolutionAction.OVERWRITE, ResolutionAction.APPEND_CARRIER}:
+                    effective = source_carrier
+                elif len(current_parts) == 1:
+                    effective = current_parts[0]
+                elif carrier_key(source_carrier) in {carrier_key(value) for value in current_parts}:
+                    effective = source_carrier
+                elif selected_existing_carrier is not None:
+                    effective = str(selected_existing_carrier)
+                else:
+                    effective = None
+                actions[index].update(
+                    {
+                        "source_items": [dict(value) for value in items[index].source_items],
+                        "carrier_group": group,
+                        "carrier_source": source_carrier,
+                        "carrier_effective": effective,
+                        "carrier_target_column": column,
+                        "carrier_target_cell": cell.coordinate,
+                        "carrier_value_before": before,
+                        "carrier_value_after": after,
+                        "carrier_action": chosen,
+                        "carrier_write": bool(write and position == 0),
+                    }
+                )
 
     @staticmethod
     def _action_record(
@@ -1952,6 +2478,7 @@ class ExpensePostingService:
             "value_after": after,
             "action": action,
             "status": status,
+            "source_items": [dict(value) for value in item.source_items],
         }
 
     @staticmethod
@@ -1987,6 +2514,14 @@ class ExpensePostingService:
                     "invoice_value_before": action.get("invoice_value_before"),
                     "invoice_value_after": action.get("invoice_value_after"),
                     "invoice_action": action.get("invoice_action"),
+                    "carrier_source": source.get("carrier"),
+                    "carrier_effective": action.get("carrier_effective"),
+                    "carrier_group": action.get("carrier_group"),
+                    "carrier_target_column": action.get("carrier_target_column"),
+                    "carrier_target_cell": action.get("carrier_target_cell"),
+                    "carrier_value_before": action.get("carrier_value_before"),
+                    "carrier_value_after": action.get("carrier_value_after"),
+                    "carrier_action": action.get("carrier_action"),
                     "status": action["status"],
                 }
             )
@@ -2085,6 +2620,7 @@ class ExpensePostingService:
         sheet_name: str,
         actions: Sequence[Mapping[str, Any]],
         *,
+        detail_rows: Sequence[Mapping[str, Any]] = (),
         update_column: int | None = None,
         update_timestamp: datetime | None = None,
     ) -> None:
@@ -2094,6 +2630,7 @@ class ExpensePostingService:
             base = self._resolve_base_headers(worksheet)
             fee_columns = self._resolve_fee_columns(worksheet, base)
             invoice_columns = self._resolve_invoice_columns(base, fee_columns)
+            carrier_columns = self._resolve_carrier_columns(base)
             target_plan_header = (
                 self._plan_header(worksheet)
                 if any(action.get("carry_forward_required") for action in actions)
@@ -2132,19 +2669,62 @@ class ExpensePostingService:
                         raise ExpensePostingError(
                             f"Ô {action['invoice_target_cell']} không có Số HĐ dự kiến."
                         )
-            if update_column is None or update_timestamp is None:
-                raise ExpensePostingError("Bản lưu thiếu thông tin Date cập nhật.")
-            actual_update_column = self._update_column(base)
-            if actual_update_column != update_column:
-                raise ExpensePostingError("Cột Date cập nhật không qua verify.")
-            for target_row in {
-                int(action["target_row"]) for action in actions
-            }:
-                actual = worksheet.cell(target_row, update_column).value
-                if actual != update_timestamp:
-                    raise ExpensePostingError(
-                        f"Date cập nhật tại dòng {target_row} không đúng."
+                if action.get("carrier_write"):
+                    carrier_group = str(action["carrier_group"])
+                    carrier_column = int(action["carrier_target_column"])
+                    if carrier_columns.get(carrier_group) != carrier_column:
+                        raise ExpensePostingError(
+                            f"Cột bên vận tải {carrier_group} không qua verify."
+                        )
+                    carrier_actual = worksheet.cell(
+                        int(action["target_row"]), carrier_column
+                    ).value
+                    if carrier_text(carrier_actual) != carrier_text(
+                        action.get("carrier_value_after")
+                    ):
+                        raise ExpensePostingError(
+                            f"Ô {action['carrier_target_cell']} không có bên vận tải dự kiến."
+                        )
+            if actions:
+                if update_column is None or update_timestamp is None:
+                    raise ExpensePostingError("Bản lưu thiếu thông tin Date cập nhật.")
+                actual_update_column = self._update_column(base)
+                if actual_update_column != update_column:
+                    raise ExpensePostingError("Cột Date cập nhật không qua verify.")
+                for target_row in {
+                    int(action["target_row"]) for action in actions
+                }:
+                    actual = worksheet.cell(target_row, update_column).value
+                    if actual != update_timestamp:
+                        raise ExpensePostingError(
+                            f"Date cập nhật tại dòng {target_row} không đúng."
+                        )
+            if detail_rows:
+                actual_details = read_bk_detail_rows(workbook, sheet_name)
+                actual_by_key = {
+                    (str(row["Batch hash"]), int(row["Dòng JSON"])): row
+                    for row in actual_details
+                }
+                for expected in detail_rows:
+                    key = (
+                        str(expected["batch_hash"]),
+                        int(expected["source_item_index"]),
                     )
+                    actual_detail = actual_by_key.get(key)
+                    if actual_detail is None:
+                        raise ExpensePostingError(
+                            "Thiếu dòng chi tiết bên vận tải sau khi lưu BK."
+                        )
+                    if (
+                        carrier_text(actual_detail["Carrier hiệu lực"])
+                        != carrier_text(
+                            expected.get("carrier_effective") or "CHƯA XÁC ĐỊNH"
+                        )
+                        or actual_detail["Số tiền"] != expected.get("amount")
+                    ):
+                        raise ExpensePostingError(
+                            "Chi tiết bên vận tải không đúng sau khi lưu BK."
+                        )
         finally:
             workbook.close()
 
@@ -2286,6 +2866,7 @@ class ExpensePostingService:
                 ResolutionAction.SELECT_ROW,
                 ResolutionAction.SELECT_FEE,
                 ResolutionAction.SELECT_INVOICE,
+                ResolutionAction.SELECT_CARRIER,
                 ResolutionAction.SELECT_SOURCE_ITEM,
             }:
                 return True

@@ -961,7 +961,14 @@ class MainWindow(QMainWindow):
             if (
                 operation == "posting"
                 and selector_actions.intersection(
-                    {"SELECT_ROW", "SELECT_FEE", "SELECT_INVOICE"}
+                    {
+                        "SELECT_SHEET",
+                        "SELECT_ROW",
+                        "SELECT_FEE",
+                        "SELECT_INVOICE",
+                        "SELECT_SOURCE_ITEM",
+                        "SELECT_CARRIER",
+                    }
                 )
             ):
                 self._excel_tasks.refine_plan(
@@ -1137,6 +1144,29 @@ class MainWindow(QMainWindow):
                     )
                 )
             result_target_detail = "\n\n".join(result_sections)
+            carrier_summary = _attribute(result, "carrier_summary", default=None)
+            carrier_summary_detail = ""
+            if carrier_summary is not None:
+                summary_total = _attribute(
+                    carrier_summary, "selected_period_total", default=0
+                )
+                try:
+                    summary_total_text = f"{float(summary_total):,.0f}".replace(
+                        ",", "."
+                    )
+                except (TypeError, ValueError):
+                    summary_total_text = str(summary_total)
+                carrier_summary_detail = (
+                    "\n\nTổng hợp theo hóa đơn và bên vận tải\n"
+                    f"- Kỳ: {_attribute(carrier_summary, 'period', default='—')}\n"
+                    f"- Bên vận tải: {_attribute(carrier_summary, 'carrier_count', default=0)}\n"
+                    f"- Số hóa đơn: {_attribute(carrier_summary, 'invoice_count', default=0)}\n"
+                    f"- Tổng tiền kỳ: {summary_total_text}\n"
+                    f"- Khoản chưa có HĐ: {_attribute(carrier_summary, 'missing_invoice_items', default=0)}\n"
+                    f"- Khoản chưa xác định vận tải: {_attribute(carrier_summary, 'unmapped_carrier_items', default=0)}\n"
+                    f"- Hóa đơn thuộc nhiều bên: {_attribute(carrier_summary, 'cross_carrier_invoices', default=0)}\n"
+                    f"- Khoản nghi trùng: {_attribute(carrier_summary, 'suspected_duplicate_items', default=0)}"
+                )
             detail = (
                 f"{message}\n\n"
                 f"{result_target_detail}\n\n"
@@ -1149,6 +1179,7 @@ class MainWindow(QMainWindow):
                 f"Ô Số HĐ đã ghi: {_attribute(result, 'invoice_written_cells', default=0) or 0}\n"
                 f"Không đổi: {_attribute(result, 'unchanged_rows', default=0)} dòng\n"
                 f"Bỏ qua: {_attribute(result, 'skipped_rows', default=0)} dòng"
+                f"{carrier_summary_detail}"
             )
             completion_message = QMessageBox(self)
             completion_message.setIcon(QMessageBox.Icon.Information)

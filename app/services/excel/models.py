@@ -65,6 +65,9 @@ class ConflictType(str, Enum):
     INVOICE_COLUMN_MISSING = "INVOICE_COLUMN_MISSING"
     MULTIPLE_EXPENSE_SAME_CELL = "MULTIPLE_EXPENSE_SAME_CELL"
     CARRY_FORWARD_MAPPING_INVALID = "CARRY_FORWARD_MAPPING_INVALID"
+    MULTIPLE_SOURCE_CARRIERS = "MULTIPLE_SOURCE_CARRIERS"
+    CARRIER_VALUE_CONFLICT = "CARRIER_VALUE_CONFLICT"
+    CARRIER_COLUMN_MISSING = "CARRIER_COLUMN_MISSING"
 
 
 class ResolutionAction(str, Enum):
@@ -78,10 +81,12 @@ class ResolutionAction(str, Enum):
     SELECT_FEE = "SELECT_FEE"
     SELECT_INVOICE = "SELECT_INVOICE"
     SELECT_SOURCE_ITEM = "SELECT_SOURCE_ITEM"
+    SELECT_CARRIER = "SELECT_CARRIER"
     KEEP_EXISTING = "KEEP_EXISTING"
     KEEP_FORMULA = "KEEP_FORMULA"
     OVERWRITE = "OVERWRITE"
     ADD = "ADD"
+    APPEND_CARRIER = "APPEND_CARRIER"
     SKIP = "SKIP"
     SKIP_INVOICE = "SKIP_INVOICE"
     POST_UNPOSTED_ONLY = "POST_UNPOSTED_ONLY"
@@ -399,6 +404,14 @@ class PostingItem:
     invoice_current_value: Any = None
     invoice_value_after: Any = None
     invoice_action: ResolutionAction | None = None
+    carrier_candidates: list[str] = field(default_factory=list)
+    selected_carrier: str | None = None
+    carrier_group: str | None = None
+    carrier_column: int | None = None
+    carrier_cell: str | None = None
+    carrier_current_value: Any = None
+    carrier_value_after: Any = None
+    carrier_action: ResolutionAction | None = None
 
     @property
     def fee(self) -> str:
@@ -465,6 +478,7 @@ class PostingResolution:
     selected_source_item_index: int | None = None
     selected_fee: str | None = None
     selected_invoice: str | None = None
+    selected_carrier: str | None = None
 
 
 @dataclass(slots=True)
@@ -521,6 +535,10 @@ class PostingResult:
     posted_source_items: int = 0
     written_cells: int = 0
     invoice_written_cells: int = 0
+    carrier_written_cells: int = 0
+    carrier_appended_cells: int = 0
+    carrier_kept_cells: int = 0
+    unmapped_carrier_items: int = 0
     skipped_source_items: int = 0
     already_existing_items: int = 0
     conflict_count: int = 0
@@ -555,6 +573,9 @@ class PaymentSyncItem:
     selected_invoices: dict[str, str] = field(default_factory=dict)
     invoice_actions: dict[str, ResolutionAction] = field(default_factory=dict)
     invoice_differences: dict[str, tuple[Any, str]] = field(default_factory=dict)
+    carrier_value: str | None = None
+    carrier_action: ResolutionAction | None = None
+    carrier_difference: tuple[Any, str] | None = None
 
     @property
     def is_new(self) -> bool:
@@ -758,6 +779,27 @@ class PaymentTargetResult:
     skipped_rows: int = 0
     conflict_count: int = 0
     invoice_written_cells: int = 0
+    carrier_written_cells: int = 0
+    carrier_appended_cells: int = 0
+    carrier_kept_cells: int = 0
+    unmapped_carrier_items: int = 0
+
+
+@dataclass(slots=True)
+class CarrierSummaryResult:
+    """Kết quả dựng bảng tổng hợp vận tải từ sổ chi tiết tích lũy."""
+
+    changed: bool = False
+    source_sheet_name: str = ""
+    period: str = ""
+    carrier_count: int = 0
+    invoice_count: int = 0
+    selected_period_total: int | float = 0
+    missing_invoice_items: int = 0
+    unmapped_carrier_items: int = 0
+    cross_carrier_invoices: int = 0
+    suspected_duplicate_items: int = 0
+    detail_count: int = 0
 
 
 @dataclass(slots=True)
@@ -773,6 +815,7 @@ class PaymentSyncResult:
     fingerprint_after: WorkbookFingerprint | None = None
     source_fingerprint_after: WorkbookFingerprint | None = None
     vba_preserved: bool = True
+    carrier_summary: CarrierSummaryResult | None = None
     run_id: int | None = None
     message: str = ""
 
@@ -808,6 +851,31 @@ class PaymentSyncResult:
     @property
     def unchanged_rows(self) -> int:
         return sum(result.unchanged_rows for result in self.target_results.values())
+
+    @property
+    def carrier_written_cells(self) -> int:
+        return sum(
+            result.carrier_written_cells for result in self.target_results.values()
+        )
+
+    @property
+    def carrier_appended_cells(self) -> int:
+        return sum(
+            result.carrier_appended_cells for result in self.target_results.values()
+        )
+
+    @property
+    def carrier_kept_cells(self) -> int:
+        return sum(
+            result.carrier_kept_cells for result in self.target_results.values()
+        )
+
+    @property
+    def unmapped_carrier_items(self) -> int:
+        return sum(
+            result.unmapped_carrier_items
+            for result in self.target_results.values()
+        )
 
     @property
     def skipped_rows(self) -> int:

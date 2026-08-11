@@ -195,6 +195,83 @@ def test_sync_analysis_always_shows_full_sheet_confirmation(
     assert "Thiếu SQT, được bỏ qua: 3 dòng" in captured["text"]
 
 
+@pytest.mark.parametrize("selector_action", ["SELECT_SOURCE_ITEM", "SELECT_SHEET"])
+def test_posting_selector_resolution_is_refined_before_apply(
+    monkeypatch,
+    selector_action: str,
+) -> None:
+    conflict = SimpleNamespace(conflict_id="selector-conflict")
+    plan = SimpleNamespace(
+        operation="posting",
+        conflicts=[conflict],
+        selected_sheet="T07 26",
+        previously_posted_items=[],
+    )
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.refine_calls: list[Any] = []
+            self.apply_calls: list[Any] = []
+            self.cancel_calls = 0
+
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "posting"
+
+        def refine_plan(
+            self,
+            value: Any,
+            resolutions: Any,
+            *,
+            operation: str,
+        ) -> None:
+            self.refine_calls.append((value, resolutions, operation))
+
+        def apply_plan(
+            self,
+            value: Any,
+            resolutions: Any,
+            *,
+            operation: str,
+        ) -> None:
+            self.apply_calls.append((value, resolutions, operation))
+
+        def cancel_waiting(self) -> None:
+            self.cancel_calls += 1
+
+    class Dialog:
+        def __init__(self, _conflicts: Any, _parent: Any) -> None:
+            pass
+
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        @staticmethod
+        def resolution_map() -> dict[str, Any]:
+            return {
+                "selector-conflict": {
+                    "conflict_id": "selector-conflict",
+                    "action": selector_action,
+                }
+            }
+
+    monkeypatch.setattr(main_window_module, "ConflictResolutionDialog", Dialog)
+    tasks = Tasks()
+    owner = SimpleNamespace(
+        _excel_tasks=tasks,
+        _excel_operation="posting",
+        _show_excel_error=lambda *_args, **_kwargs: None,
+    )
+
+    MainWindow._excel_analysis_ready(owner, plan)
+
+    assert len(tasks.refine_calls) == 1
+    assert tasks.refine_calls[0][1]["selector-conflict"]["action"] == selector_action
+    assert tasks.apply_calls == []
+    assert tasks.cancel_calls == 0
+
+
 def test_payment_sync_confirmation_discloses_new_sheet_template(
     monkeypatch,
 ) -> None:
@@ -379,6 +456,94 @@ def test_bk_completion_can_open_the_written_bk_file(
     assert message.open_button is not None
     assert expected_detail in message.text
     assert opened == [bk_path]
+
+
+def test_payment_completion_displays_carrier_invoice_summary(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    payment_path = tmp_path / "Thanh toan.xlsm"
+    payment_path.touch()
+    opened: list[Path] = []
+
+    class CompletionMessage:
+        class Icon:
+            Information = object()
+
+        class ButtonRole:
+            ActionRole = object()
+
+        class StandardButton:
+            Ok = object()
+
+        instance: Any = None
+
+        def __init__(self, _parent: Any) -> None:
+            CompletionMessage.instance = self
+            self.text = ""
+            self.open_button = None
+
+        def setIcon(self, _icon: Any) -> None:
+            pass
+
+        def setWindowTitle(self, _title: str) -> None:
+            pass
+
+        def setText(self, text: str) -> None:
+            self.text = text
+
+        def addButton(self, button: Any, _role: Any = None) -> Any:
+            if button == "Mở file Thanh toán":
+                self.open_button = object()
+                return self.open_button
+            return object()
+
+        def exec(self) -> None:
+            pass
+
+        def clickedButton(self) -> Any:
+            return self.open_button
+
+    class Tasks:
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "payment_sync"
+
+    monkeypatch.setattr(main_window_module, "QMessageBox", CompletionMessage)
+    owner = SimpleNamespace(
+        _excel_context="workflow",
+        _excel_operation="payment_sync",
+        _excel_tasks=Tasks(),
+        workflow_page=SimpleNamespace(set_excel_result=lambda *_args: None),
+        _load_excel_history=lambda: None,
+        _open_workbook_path=lambda path, **_kwargs: opened.append(Path(path)),
+    )
+    result = SimpleNamespace(
+        operation="payment_sync",
+        message="Hoàn tất.",
+        target_path=payment_path,
+        source_sheet_name="T07 26",
+        sheet_name="T07 26 HP, T07 26 NAM",
+        target_results={},
+        carrier_summary=SimpleNamespace(
+            period="T07/2026",
+            carrier_count=2,
+            invoice_count=3,
+            selected_period_total=1_700_000,
+            missing_invoice_items=1,
+            unmapped_carrier_items=0,
+            cross_carrier_invoices=1,
+            suspected_duplicate_items=1,
+        ),
+    )
+
+    MainWindow._excel_completed(owner, result)
+
+    assert "Tổng hợp theo hóa đơn và bên vận tải" in CompletionMessage.instance.text
+    assert "Số hóa đơn: 3" in CompletionMessage.instance.text
+    assert "Tổng tiền kỳ: 1.700.000" in CompletionMessage.instance.text
+    assert "Hóa đơn thuộc nhiều bên: 1" in CompletionMessage.instance.text
+    assert opened == [payment_path]
 
 
 def test_open_bk_workbook_uses_the_default_desktop_application(

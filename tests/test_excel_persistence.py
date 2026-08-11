@@ -147,6 +147,14 @@ def test_posting_repository_round_trips_items_and_filters_successful_sources(
                 "invoice_value_before": None,
                 "invoice_value_after": "INV-001",
                 "invoice_action": "OVERWRITE",
+                "carrier_source": "NHS",
+                "carrier_effective": "NHS / TP",
+                "carrier_group": "NAM",
+                "carrier_target_column": 23,
+                "carrier_target_cell": "W42",
+                "carrier_value_before": "TP",
+                "carrier_value_after": "NHS / TP",
+                "carrier_action": "APPEND_CARRIER",
                 "status": "POSTED",
             },
             {
@@ -172,6 +180,14 @@ def test_posting_repository_round_trips_items_and_filters_successful_sources(
     assert records[0].invoice_target_cell == "R42"
     assert records[0].invoice_value_after == "INV-001"
     assert records[0].invoice_action == "OVERWRITE"
+    assert records[0].carrier_source == "NHS"
+    assert records[0].carrier_effective == "NHS / TP"
+    assert records[0].carrier_group == "NAM"
+    assert records[0].carrier_target_column == 23
+    assert records[0].carrier_target_cell == "W42"
+    assert records[0].carrier_value_before == "TP"
+    assert records[0].carrier_value_after == "NHS / TP"
+    assert records[0].carrier_action == "APPEND_CARRIER"
     assert repository.successful_source_indices("e" * 64) == {0, 1}
     assert repository.batch_has_successful_items("e" * 64)
     assert repository.is_source_item_posted("e" * 64, 1)
