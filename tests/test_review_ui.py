@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QDialogButtonBox, QMessageBox
 
 from app.ui.edit_row_dialog import EditRowDialog
 from app.ui.review_window import ReviewWindow
 from app.ui.review_table_model import ReviewRow, ReviewTableModel
+from app.ui.sea_freight_center import ReconciliationPeriodDialog
 
 
 def _review_payload() -> dict[str, Any]:
@@ -31,10 +32,38 @@ def _review_payload() -> dict[str, Any]:
                     "Vận tải ABC",
                     13_554_000,
                 ],
-                [None, "BL123456789", "CB", "HD", None, None, 27_500_000],
+                ["VSGU2250713", "BL123456789", "CB", "HD", None, None, 27_500_000],
             ],
         },
     }
+
+
+def test_reconciliation_period_uses_existing_bk_sheets_without_default_selection(
+    qtbot,
+) -> None:
+    dialog = ReconciliationPeriodDialog(
+        sheet_names=("Ghi chú", "T01 26", "T07 26", "T12 25"),
+        month=1,
+        year=2026,
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.table.rowCount() == 3
+    assert [dialog.table.item(row, 0).text() for row in range(3)] == [
+        "T07 26",
+        "T01 26",
+        "T12 25",
+    ]
+    assert dialog.table.currentRow() == -1
+    assert not dialog.buttons.button(
+        QDialogButtonBox.StandardButton.Ok
+    ).isEnabled()
+
+    dialog.table.selectRow(1)
+
+    assert dialog.selected_sheet_name == "T01 26"
+    assert dialog.period() == (1, 2026)
+    assert dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
 
 
 def test_delete_selected_row_requires_confirmation(qtbot, monkeypatch) -> None:
@@ -71,6 +100,11 @@ def test_ctrl_s_saves_once_and_clears_dirty(qtbot, monkeypatch) -> None:
         QMessageBox,
         "information",
         lambda *args, **kwargs: QMessageBox.StandardButton.Ok,
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
     )
     window = ReviewWindow(_review_payload(), confirm_handler=confirm)
     qtbot.addWidget(window)
@@ -137,6 +171,14 @@ def test_review_table_hides_only_the_four_redundant_columns(qtbot) -> None:
         } == hidden_columns
         assert window.status_filter.isVisibleTo(window)
         assert window.status_value.text() == "Đang kiểm tra"
+        assert not hasattr(window, "bk_sheet_combo")
+        assert (
+            window.model.headerData(
+                ReviewTableModel.COLUMN_LOOKUP_ACTION,
+                Qt.Orientation.Horizontal,
+            )
+            == "Đối soát số cont"
+        )
     finally:
         window.close()
 
@@ -234,6 +276,11 @@ def test_save_button_writes_once_and_shows_simple_success_message(
         QMessageBox,
         "information",
         information,
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
     )
     window = ReviewWindow(
         _review_payload(),

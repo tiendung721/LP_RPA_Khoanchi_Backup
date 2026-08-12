@@ -1140,6 +1140,7 @@ def _analyze_target(
                     source_row=item.source_row,
                     sqt=item.sqt,
                     container=item.container,
+                    carrier=item.carrier_value,
                     row_candidates=row_candidates,
                     details={"sheet_name": worksheet.title},
                 )
@@ -2360,12 +2361,18 @@ def _analyze_profile_target(
                     source_row=item.source_row,
                     sqt=item.sqt,
                     container=item.container,
+                    carrier=item.carrier_value,
                     row_candidates=[
                         RowCandidate(
                             row=row,
                             sqt=_parse_sqt(worksheet.cell(row, resolved.columns["sqt"]).value),
                             container=_container_key(
                                 worksheet.cell(row, resolved.columns["container"]).value
+                            ),
+                            carrier=(
+                                worksheet.cell(row, resolved.columns["carrier"]).value
+                                if "carrier" in resolved.columns
+                                else None
                             ),
                         )
                         for row in candidate_rows

@@ -91,7 +91,6 @@ def test_settings_round_trip_utf8(tmp_path: Path) -> None:
         output_dir=tmp_path / "Kết quả",
         daily_workbook_path=root / "Hàng ngày 2026.xlsx",
         bk_workbook_path=root / "BK Tổng hợp 2026.xlsm",
-        container_gpt_bat_path=str(root / "Mở GPT số container.bat"),
         rpa_expense_bat_path=str(root / "Chạy PAD quyết toán.bat"),
     )
 
@@ -102,7 +101,6 @@ def test_settings_round_trip_utf8(tmp_path: Path) -> None:
     assert loaded.output_dir == settings.output_dir
     assert loaded.daily_workbook_path == settings.daily_workbook_path
     assert loaded.bk_workbook_path == settings.bk_workbook_path
-    assert loaded.container_gpt_bat_path == settings.container_gpt_bat_path
     assert loaded.rpa_expense_bat_path == settings.rpa_expense_bat_path
     assert manager.settings_path.read_bytes().startswith(b"{")
 
@@ -132,6 +130,25 @@ def test_database_migration_and_active_batch_restore(tmp_path: Path) -> None:
     assert restored is not None
     assert restored.id == batch.id
     assert repository.get_app_state("active_batch_id") == str(batch.id)
+    group_columns = {
+        str(row[1])
+        for row in database.query_all(
+            "PRAGMA table_info(sea_freight_reconciliation_groups)"
+        )
+    }
+    contribution_columns = {
+        str(row[1])
+        for row in database.query_all(
+            "PRAGMA table_info(sea_freight_invoice_contributions)"
+        )
+    }
+    assert {
+        "reconciliation_month", "reconciliation_year", "bk_issue",
+        "bk_invalid_container_count", "bk_duplicate_container_count",
+        "revision_no", "supersedes_group_id", "is_current",
+        "primary_source_batch_id", "primary_source_item_index",
+    }.issubset(group_columns)
+    assert "source_kind" in contribution_columns
     database.close()
 
 
@@ -167,7 +184,6 @@ def test_legacy_settings_are_rewritten_without_browser_or_inbox_keys(
         "daily_workbook_path",
         "bk_workbook_path",
         "payment_workbook_path",
-        "container_gpt_bat_path",
         "rpa_expense_bat_path",
     }
 

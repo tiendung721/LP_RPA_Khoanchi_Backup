@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from .log_page import LogPage
 from .review_window import ReviewWindow
 from .settings_page import SettingsPage
 from .workflow_page import WorkflowPage
+from .sea_freight_center import SeaFreightReconciliationDialog
 from .rpa_expense_dialog import RpaSqtSelectionDialog
 from .excel_dialogs import (
     ConflictResolutionDialog,
@@ -39,6 +41,13 @@ from .excel_dialogs import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _AssistantSession:
+    session_id: str
+    context: str
+    reconciliation_group_id: int | None = None
 
 
 def _attribute(source: Any, *names: str, default: Any = None) -> Any:
@@ -99,7 +108,7 @@ class MainWindow(QMainWindow):
         excel_task_controller: Any | None = None,
         excel_configuration_service: Any | None = None,
         excel_run_repository: Any | None = None,
-        container_load_controller: Any | None = None,
+        sea_freight_service: Any | None = None,
         rpa_expense_controller: Any | None = None,
     ) -> None:
         if isinstance(controller, QWidget) and parent is None:
@@ -134,9 +143,8 @@ class MainWindow(QMainWindow):
         self._excel_run_repository = excel_run_repository or _attribute(
             controller, "excel_run_repository"
         )
-        self._container_load_controller = (
-            container_load_controller
-            or _attribute(controller, "container_load_controller")
+        self._sea_freight_service = sea_freight_service or _attribute(
+            controller, "sea_freight_service"
         )
         self._rpa_expense = (
             rpa_expense_controller
@@ -148,6 +156,8 @@ class MainWindow(QMainWindow):
         self._settings = settings or _attribute(controller, "settings")
         self._active_batch: Any | None = None
         self._review_windows: dict[Any, ReviewWindow] = {}
+        self._sea_freight_dialog: SeaFreightReconciliationDialog | None = None
+        self._assistant_sessions: list[_AssistantSession] = []
         self._closing = False
         self._watcher_connected = False
 
@@ -269,7 +279,6 @@ class MainWindow(QMainWindow):
         self.workflow_page.run_rpa_expense_requested.connect(
             self.start_rpa_expense
         )
-
         self.history_page.refresh_requested.connect(self.refresh_history)
         self.history_page.open_batch_requested.connect(self.open_review)
         self.history_page.open_path_requested.connect(self.open_containing_folder)
@@ -412,7 +421,14 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def open_assistant(self) -> None:
-        self._launch_assistant(self._settings)
+        self._launch_assistant(self._settings, context="home")
+
+    def open_reconciliation_assistant(self, group_id: int) -> None:
+        self._launch_assistant(
+            self._settings,
+            context="reconciliation",
+            reconciliation_group_id=group_id,
+        )
 
     def _missing_excel_configuration(
         self,
@@ -510,7 +526,12 @@ class MainWindow(QMainWindow):
             return
         self._excel_context = "workflow"
         try:
-            self._excel_tasks.start_posting()
+            batch_id = _batch_id(self._active_batch)
+            if batch_id is None:
+                raise RuntimeError(
+                    "Chưa có file bóc tách hiện hành đã xác nhận để nhập khoản chi."
+                )
+            self._excel_tasks.start_posting(batch_id=int(batch_id))
         except Exception as exc:
             self._show_excel_error(exc, operation="posting")
 
@@ -786,7 +807,10 @@ class MainWindow(QMainWindow):
                 sheet_name = dialog.selected_sheet_name
                 self._excel_tasks.cancel_waiting()
                 self._excel_context = "workflow"
-                self._excel_tasks.start_posting(sheet_name=sheet_name)
+                self._excel_tasks.start_posting(
+                    batch_id=_attribute(plan, "batch_id", default=None),
+                    sheet_name=sheet_name,
+                )
                 return
 
             previously_posted = list(
@@ -809,6 +833,7 @@ class MainWindow(QMainWindow):
                 self._excel_tasks.cancel_waiting()
                 self._excel_context = "workflow"
                 self._excel_tasks.start_posting(
+                    batch_id=_attribute(plan, "batch_id", default=None),
                     sheet_name=str(selected_sheet),
                     repost_source_indices=repost_indices,
                 )
@@ -877,6 +902,38 @@ class MainWindow(QMainWindow):
                     self._excel_tasks.cancel_waiting()
                     return
                 resolutions.update(dialog.resolution_map())
+            if (
+                operation == "posting"
+                and bool(_attribute(plan, "confirmation_required", default=False))
+                and not bool(_attribute(plan, "confirmation_done", default=False))
+            ):
+                normal_count = int(
+                    _attribute(plan, "original_source_count", default=0) or 0
+                )
+                reconciliation_count = int(
+                    _attribute(plan, "reconciliation_source_count", default=0) or 0
+                )
+                previous_count = len(
+                    list(_attribute(plan, "previously_posted_items", default=()) or ())
+                )
+                answer = QMessageBox.question(
+                    self,
+                    "Xác nhận nhập khoản chi",
+                    (
+                        f"Khoản từ file gốc: {normal_count}\n"
+                        f"Dòng cont từ hồ sơ đối soát: {reconciliation_count}\n"
+                        f"Đã nhập trước đó: {previous_count}\n"
+                        f"Còn cần xử lý: {len(list(_attribute(plan, 'items', default=()) or ()))}\n\n"
+                        "Toàn bộ dữ liệu sẽ được ghi trong một lần và dùng chung một bản backup. "
+                        "Tiếp tục ghi file BK?"
+                    ),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    self._excel_tasks.cancel_waiting()
+                    return
+                plan.confirmation_done = True
             if operation == "sync":
                 candidate = next(
                     (
@@ -1379,14 +1436,6 @@ class MainWindow(QMainWindow):
                 settings_data.get("assistant_bat_path"),
                 settings_data.get("output_dir"),
             )
-            container_gpt_bat = str(
-                settings_data.get("container_gpt_bat_path") or ""
-            ).strip()
-            if container_gpt_bat:
-                launcher.validate_configuration(
-                    container_gpt_bat,
-                    settings_data.get("output_dir"),
-                )
             rpa_expense_bat = str(
                 settings_data.get("rpa_expense_bat_path") or ""
             ).strip()
@@ -1434,7 +1483,13 @@ class MainWindow(QMainWindow):
             self.settings_page.set_checking(False)
             self.settings_page.show_check_result(False, str(exc))
 
-    def _launch_assistant(self, settings: Any) -> None:
+    def _launch_assistant(
+        self,
+        settings: Any,
+        *,
+        context: str,
+        reconciliation_group_id: int | None = None,
+    ) -> None:
         launcher = self._assistant_launcher
         if launcher is None:
             QMessageBox.warning(
@@ -1443,11 +1498,31 @@ class MainWindow(QMainWindow):
                 "Ứng dụng chưa khởi tạo được dịch vụ mở Trợ lý ảo.",
             )
             return
+        active_session = self._next_assistant_session()
+        if active_session is not None:
+            QMessageBox.information(
+                self,
+                "Trợ lý ảo đang mở",
+                "Đang có một cửa sổ Trợ lý chờ nhận file. "
+                "Hãy hoàn tất hoặc đóng cửa sổ đó trước khi mở phiên mới.",
+            )
+            return
         try:
             result = launcher.launch(
                 bat_path=_attribute(settings, "assistant_bat_path", default=""),
                 output_dir=_attribute(settings, "output_dir", default=""),
+                context=context,
+                reconciliation_group_id=reconciliation_group_id,
             )
+            session_id = str(_attribute(result, "session_id", default="") or "")
+            if session_id:
+                self._assistant_sessions.append(
+                    _AssistantSession(
+                        session_id=session_id,
+                        context=context,
+                        reconciliation_group_id=reconciliation_group_id,
+                    )
+                )
             self.statusBar().showMessage(
                 str(_attribute(result, "message", default="Đã mở Trợ lý ảo.")),
                 7000,
@@ -1610,7 +1685,66 @@ class MainWindow(QMainWindow):
                 8000,
             )
         if automatic and not duplicate and review is not None:
-            self._open_new_download(review)
+            session = self._next_assistant_session()
+            dialog = self._sea_freight_dialog
+            if (
+                session is not None
+                and session.context == "reconciliation"
+                and self._sea_freight_service is not None
+            ):
+                group_id = session.reconciliation_group_id
+                if group_id is None:
+                    return
+                metadata = _attribute(review, "metadata", default=batch)
+                document = _attribute(review, "document")
+                rows = list(_attribute(document, "rows", "data", "d", default=[]) or [])
+                import_result = self._sea_freight_service.import_supplement(
+                    group_id,
+                    rows,
+                    source_batch_id=_batch_id(metadata),
+                    source_sha256=str(_attribute(metadata, "sha256", default="") or ""),
+                )
+                if (
+                    dialog is not None
+                    and dialog.isVisible()
+                    and dialog.group_id == group_id
+                ):
+                    dialog.supplement_received(import_result)
+                self._refresh_reconciliation_groups()
+                if int(_attribute(import_result, "added_count", default=0) or 0) > 0:
+                    self._complete_assistant_session(session)
+            else:
+                self._open_new_download(review)
+                if session is not None and session.context == "home":
+                    self._complete_assistant_session(session)
+
+    def _next_assistant_session(self) -> _AssistantSession | None:
+        is_active = getattr(self._assistant_launcher, "is_session_active", None)
+        while self._assistant_sessions:
+            session = self._assistant_sessions[0]
+            if not callable(is_active):
+                return session
+            try:
+                if is_active(session.session_id):
+                    return session
+            except Exception:
+                LOGGER.exception("Không thể kiểm tra phiên Trợ lý ảo.")
+                return session
+            self._assistant_sessions.pop(0)
+        return None
+
+    def _complete_assistant_session(self, session: _AssistantSession) -> None:
+        complete = getattr(self._assistant_launcher, "complete_session", None)
+        if callable(complete):
+            try:
+                complete(session.session_id)
+            except Exception:
+                LOGGER.exception("Không thể yêu cầu đóng cửa sổ Trợ lý ảo.")
+                return
+        try:
+            self._assistant_sessions.remove(session)
+        except ValueError:
+            pass
 
     def _open_new_download(self, review: Any) -> None:
         """Bỏ cửa sổ cũ và đưa dữ liệu vừa tải lên màn hình kiểm tra."""
@@ -1662,16 +1796,58 @@ class MainWindow(QMainWindow):
             parent=self,
             batch_service=self._batch_service,
             validator=self._validator,
-            container_load_controller=self._container_load_controller,
+            sea_freight_service=self._sea_freight_service,
+            settings=self._settings,
         )
         key = batch_identifier if batch_identifier is not None else id(window)
         self._review_windows[key] = window
         window.batchUpdated.connect(self._review_batch_updated)
+        window.reconciliationChanged.connect(self._refresh_reconciliation_groups)
+        window.reconciliationOpenRequested.connect(self.open_reconciliation)
         window.closed.connect(lambda key=key: self._review_windows.pop(key, None))
         window.show()
         window.raise_()
         window.activateWindow()
         return window
+
+    def _refresh_reconciliation_groups(self) -> None:
+        for window in list(self._review_windows.values()):
+            window._restore_reconciliation_presentations()
+
+    @Slot(int)
+    def open_reconciliation(self, group_id: int) -> None:
+        if self._sea_freight_service is None:
+            QMessageBox.warning(self, "Chưa thể mở", "Dịch vụ đối soát chưa được khởi tạo.")
+            return
+        if self._sea_freight_dialog is None:
+            dialog = SeaFreightReconciliationDialog(
+                self._sea_freight_service,
+                batch_service=self._batch_service,
+                open_assistant=lambda: self.open_reconciliation_assistant(
+                    self._sea_freight_dialog.group_id
+                ),
+                group_id=group_id,
+                parent=self,
+            )
+            dialog.changed.connect(self._refresh_reconciliation_groups)
+            dialog.confirmed.connect(self._open_reconciliation_result)
+            self._sea_freight_dialog = dialog
+        else:
+            self._sea_freight_dialog.load_group(group_id)
+        self._sea_freight_dialog.showNormal()
+        self._sea_freight_dialog.raise_()
+        self._sea_freight_dialog.activateWindow()
+
+    @Slot(object)
+    def _open_reconciliation_result(self, review: Any) -> None:
+        if self._sea_freight_dialog is not None:
+            self._sea_freight_dialog.hide()
+        self.refresh_history(silent=True)
+        self._refresh_reconciliation_groups()
+        self.statusBar().showMessage(
+            "Đã xác nhận hồ sơ đối soát. File bóc tách gốc vẫn là phiên làm việc hiện hành.",
+            8000,
+        )
 
     def _load_batch_review(self, batch_identifier: Any, *, show_error: bool = True) -> Any:
         if self._batch_service is None or batch_identifier is None:
@@ -1765,7 +1941,13 @@ class MainWindow(QMainWindow):
                     )
                 return
             break
-        self.history_page.set_batches(batches or [])
+        visible = [
+            batch
+            for batch in (batches or [])
+            if str(_attribute(batch, "source_kind", default="ASSISTANT"))
+            != "SEA_FREIGHT_RECONCILIATION"
+        ]
+        self.history_page.set_batches(visible)
 
     @Slot(object)
     def save_settings(self, data: Mapping[str, Any]) -> None:
@@ -1782,16 +1964,6 @@ class MainWindow(QMainWindow):
             update_launcher = getattr(self._assistant_launcher, "update_settings", None)
             if callable(update_launcher):
                 update_launcher(new_settings)
-            load_controller = self._container_load_controller
-            if (
-                load_controller is not None
-                and _attribute(load_controller, "settings") is not new_settings
-            ):
-                update_container_load = getattr(
-                    load_controller, "update_settings", None
-                )
-                if callable(update_container_load):
-                    update_container_load(new_settings)
             if self._batch_service is not None and hasattr(
                 self._batch_service, "max_file_size_bytes"
             ):

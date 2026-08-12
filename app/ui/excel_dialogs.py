@@ -120,6 +120,16 @@ def _sheet_name(candidate: Any) -> str:
     )
 
 
+def _enable_user_sorting(table: QTableWidget) -> None:
+    """Bật sort theo header nhưng giữ nguyên thứ tự nghiệp vụ ban đầu."""
+
+    header = table.horizontalHeader()
+    header.setSectionsClickable(True)
+    header.setSortIndicatorShown(True)
+    header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+    table.setSortingEnabled(True)
+
+
 class MonthSelectionDialog(QDialog):
     """Chọn đúng một sheet khi analyze tìm thấy nhiều tháng phù hợp."""
 
@@ -304,7 +314,7 @@ class ManualRowPickerDialog(QDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
 
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setObjectName("manualRowCandidateTable")
         self.table.setHorizontalHeaderLabels(
             [
@@ -315,6 +325,7 @@ class ManualRowPickerDialog(QDialog):
                 "Ngày đóng",
                 "Tàu",
                 "Người nhận",
+                "Bên vận tải",
             ]
         )
         self.table.setSelectionBehavior(
@@ -342,6 +353,7 @@ class ManualRowPickerDialog(QDialog):
                 _value(candidate, "closing_date", "ngay_dong"),
                 _value(candidate, "vessel", "ship", "ten_tau"),
                 _value(candidate, "recipient", "nguoi_nhan"),
+                _value(candidate, "carrier", "transport_provider", "transport"),
             )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(_display(value))
@@ -359,6 +371,7 @@ class ManualRowPickerDialog(QDialog):
             self.table.setVerticalHeaderItem(
                 row, QTableWidgetItem(str(workbook_row))
             )
+        _enable_user_sorting(self.table)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -603,6 +616,8 @@ class RepostSelectionDialog(QDialog):
             for column, value in enumerate(values, 1):
                 self.table.setItem(row, column, QTableWidgetItem(_display(value)))
 
+        _enable_user_sorting(self.table)
+
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel
@@ -680,6 +695,7 @@ class ConflictResolutionDialog(QDialog):
         "Dòng",
         "Cột / ô",
         "Số HĐ từ JSON",
+        "Bên vận tải",
         "Giá trị hiện tại",
         "Vấn đề",
         "Cách xử lý",
@@ -745,12 +761,13 @@ class ConflictResolutionDialog(QDialog):
             QHeaderView.ResizeMode.ResizeToContents
         )
         self.table.horizontalHeader().setSectionResizeMode(
-            10, QHeaderView.ResizeMode.Stretch
+            11, QHeaderView.ResizeMode.Stretch
         )
         layout.addWidget(self.table, 1)
 
         for index, conflict in enumerate(self.conflicts):
             self._add_conflict(index, conflict)
+        _enable_user_sorting(self.table)
 
         self.validation_label = QLabel()
         self.validation_label.setObjectName("conflictValidationLabel")
@@ -793,13 +810,19 @@ class ConflictResolutionDialog(QDialog):
         carrier_candidates = _sequence(
             _value(details, "carrier_candidates", default=())
         )
-        if carrier_candidates:
-            carrier_display = ", ".join(str(value) for value in carrier_candidates)
-            invoice_display = (
-                f"{invoice_display} | VT: {carrier_display}"
-                if invoice_display
-                else f"VT: {carrier_display}"
+        carrier_value = _value(conflict, "carrier", "carrier_value")
+        if carrier_value in (None, ""):
+            carrier_value = _value(
+                details,
+                "carrier_incoming",
+                "incoming_carrier",
+                default=None,
             )
+        carrier_display = (
+            str(carrier_value)
+            if carrier_value not in (None, "")
+            else ", ".join(str(value) for value in carrier_candidates)
+        )
         values = (
             _value(conflict, "container", "container_number"),
             _value(conflict, "bl", "bill_of_lading"),
@@ -810,6 +833,7 @@ class ConflictResolutionDialog(QDialog):
             _value(conflict, "target_row", "row", "row_number"),
             column_cell,
             invoice_display or None,
+            carrier_display or None,
             _value(
                 conflict,
                 "current_value",
@@ -860,13 +884,13 @@ class ConflictResolutionDialog(QDialog):
         default_index = action_combo.findData(default_action)
         action_combo.setCurrentIndex(max(0, default_index))
         self._action_combos[conflict_id] = action_combo
-        self.table.setCellWidget(row, 11, action_combo)
+        self.table.setCellWidget(row, 12, action_combo)
 
         selector = self._selector_for(row, conflict, conflict_id, conflict_type)
         if selector is not None:
-            self.table.setCellWidget(row, 12, selector)
+            self.table.setCellWidget(row, 13, selector)
         else:
-            self.table.setItem(row, 12, QTableWidgetItem("—"))
+            self.table.setItem(row, 13, QTableWidgetItem("—"))
 
     def _selector_for(
         self,
@@ -1280,6 +1304,8 @@ class PaymentNewRowsDialog(QDialog):
                 item = QTableWidgetItem(_display(value))
                 item.setToolTip(_display(value))
                 self.table.setItem(row, column, item)
+
+        _enable_user_sorting(self.table)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok

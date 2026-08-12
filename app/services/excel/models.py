@@ -368,6 +368,7 @@ class RowCandidate:
     closing_date: Any = None
     vessel: Any = None
     recipient: Any = None
+    carrier: Any = None
     is_ron: bool = False
 
 
@@ -441,6 +442,7 @@ class PostingConflict:
     sqt: int | None = None
     fee: str | None = None
     amount: int | None = None
+    carrier: str | None = None
     sheet_name: str | None = None
     target_row: int | None = None
     target_column: int | None = None
@@ -498,6 +500,12 @@ class PostingPlan:
     repost_source_indices: set[int] = field(default_factory=set)
     repost_selection_done: bool = False
     run_id: int | None = None
+    source_members: list[dict[str, Any]] = field(default_factory=list)
+    reconciliation_members: list[dict[str, Any]] = field(default_factory=list)
+    original_source_count: int = 0
+    reconciliation_source_count: int = 0
+    confirmation_required: bool = False
+    confirmation_done: bool = False
 
     @property
     def operation(self) -> ExcelOperation:
@@ -506,6 +514,8 @@ class PostingPlan:
     @property
     def requires_user_input(self) -> bool:
         return (
+            (self.confirmation_required and not self.confirmation_done)
+            or
             self.selected_sheet is None
             or (
                 bool(self.previously_posted_items)
@@ -599,6 +609,7 @@ class PaymentSyncConflict:
     source_row: int
     sqt: int
     container: str
+    carrier: str | None = None
     allowed_actions: tuple[ResolutionAction, ...] = (
         ResolutionAction.SKIP,
         ResolutionAction.SELECT_ROW,

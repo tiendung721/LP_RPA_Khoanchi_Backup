@@ -87,8 +87,8 @@ class WorkflowPage(QWidget):
     def _build_ui(self) -> None:
         self.setObjectName("workflowPage")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 12, 18, 14)
-        layout.setSpacing(4)
+        layout.setContentsMargins(22, 16, 22, 18)
+        layout.setSpacing(6)
 
         title = QLabel("Tác vụ quyết toán")
         title.setObjectName("pageTitle")
@@ -101,15 +101,17 @@ class WorkflowPage(QWidget):
         layout.addWidget(subtitle)
 
         workflow_grid = QGridLayout()
-        workflow_grid.setContentsMargins(0, 6, 0, 0)
-        workflow_grid.setHorizontalSpacing(10)
-        workflow_grid.setVerticalSpacing(10)
+        workflow_grid.setContentsMargins(0, 8, 0, 0)
+        workflow_grid.setHorizontalSpacing(12)
+        workflow_grid.setVerticalSpacing(12)
         workflow_grid.setColumnStretch(0, 1)
         workflow_grid.setRowStretch(0, 1)
         workflow_grid.setRowStretch(1, 1)
-        workflow_grid.setRowStretch(2, 1)
+        workflow_grid.setRowStretch(2, 2)
         workflow_grid.setRowStretch(3, 1)
         layout.addLayout(workflow_grid, 1)
+
+        primary_button_width = 205
 
         self.step1_card = QFrame()
         self.step1_card.setProperty("card", True)
@@ -150,7 +152,7 @@ class WorkflowPage(QWidget):
         self.open_assistant_button = QPushButton("Mở Trợ lý ảo")
         self.open_assistant_button.setObjectName("openAssistantButton")
         self.open_assistant_button.setProperty("primary", True)
-        self.open_assistant_button.setFixedWidth(180)
+        self.open_assistant_button.setFixedWidth(primary_button_width)
         step1_controls.addWidget(
             self.open_assistant_button,
             0,
@@ -204,7 +206,7 @@ class WorkflowPage(QWidget):
         self.review_button = QPushButton("Xem file bóc tách")
         self.review_button.setObjectName("openReviewButton")
         self.review_button.setProperty("primary", True)
-        self.review_button.setFixedWidth(180)
+        self.review_button.setFixedWidth(primary_button_width)
         step2_controls.addWidget(
             self.review_button,
             0,
@@ -394,7 +396,7 @@ class WorkflowPage(QWidget):
         self.run_rpa_expense_button = QPushButton("Nhập PM quyết toán")
         self.run_rpa_expense_button.setObjectName("runRpaExpenseButton")
         self.run_rpa_expense_button.setProperty("primary", True)
-        self.run_rpa_expense_button.setFixedWidth(220)
+        self.run_rpa_expense_button.setFixedWidth(primary_button_width)
         step4_controls.addWidget(self.run_rpa_expense_button)
         self.rpa_loading_bar = LinearLoadingBar()
         self.rpa_loading_bar.setAccessibleName("Tiến trình chuẩn bị RPA")

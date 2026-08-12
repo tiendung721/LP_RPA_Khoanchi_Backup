@@ -275,7 +275,8 @@ def test_reapplying_same_output_keeps_review_sync_enabled(tmp_path: Path) -> Non
     output = json.loads(
         _current_json(settings).read_text(encoding="utf-8")
     )
-    assert output["d"][0][-1] == 88
+    assert output["v"] == 2
+    assert output["d"][0]["amount"] == 88
     service.close()
 
 
@@ -332,7 +333,8 @@ def test_restart_identifies_current_output_before_watcher_scan(
     output = json.loads(
         _current_json(settings).read_text(encoding="utf-8")
     )
-    assert output["d"][0][-1] == 77
+    assert output["v"] == 2
+    assert output["d"][0]["amount"] == 77
     restarted.close()
 
 

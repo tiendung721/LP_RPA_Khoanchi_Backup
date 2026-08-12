@@ -548,6 +548,42 @@ class ExpensePostingRepository:
         )
         return {int(row["source_item_index"]) for row in rows}
 
+    def successful_source_indices_for_batch(self, batch_id: int) -> set[int]:
+        """Dòng logic đã nhập, ổn định ngay cả khi file của batch được lưu lại."""
+
+        rows = self.database.query_all(
+            """
+            SELECT DISTINCT source_item_index
+            FROM expense_posting_items
+            WHERE batch_id = ?
+              AND status IN ('POSTED', 'ALREADY_EXISTS')
+            """,
+            (batch_id,),
+        )
+        return {int(row["source_item_index"]) for row in rows}
+
+    def latest_successful_items_for_batch(
+        self, batch_id: int
+    ) -> list[ExpensePostingItemRecord]:
+        rows = self.database.query_all(
+            """
+            SELECT item.*
+            FROM expense_posting_items AS item
+            WHERE item.batch_id = ?
+              AND item.status IN ('POSTED', 'ALREADY_EXISTS')
+              AND NOT EXISTS (
+                    SELECT 1 FROM expense_posting_items AS newer
+                    WHERE newer.batch_id = item.batch_id
+                      AND newer.source_item_index = item.source_item_index
+                      AND newer.status IN ('POSTED', 'ALREADY_EXISTS')
+                      AND newer.id > item.id
+              )
+            ORDER BY item.source_item_index
+            """,
+            (batch_id,),
+        )
+        return [self._to_record(row) for row in rows]
+
     def latest_successful_items(
         self,
         batch_hash: str,

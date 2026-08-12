@@ -513,9 +513,11 @@ def test_real_workbooks_analyze_and_apply_only_on_temporary_copies(tmp_path: Pat
         written.close()
     with zipfile.ZipFile(target) as package:
         assert any(name.lower().endswith("vbaproject.bin") for name in package.namelist())
-    assert [path.name for path in (tmp_path / "runtime" / "Backup").glob("*")] == [
-        "THANH_TOAN_NANG_HA_VS_DO_latest.xlsm"
-    ]
+    backups = [path.name for path in (tmp_path / "runtime" / "Backup").glob("*")]
+    if plan.has_changes:
+        assert backups == ["THANH_TOAN_NANG_HA_VS_DO_latest.xlsm"]
+    else:
+        assert backups == []
     assert (_sha(source_fixture), _sha(target_fixture)) == original_hashes
 
 

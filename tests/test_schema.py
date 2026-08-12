@@ -23,7 +23,7 @@ def test_parse_valid_json_object_keeps_row_order() -> None:
 
     document = parse_document(raw)
 
-    assert document.v == 1
+    assert document.v == 2
     assert [row.to_list() for row in document.rows] == raw["d"]
     assert list(document_to_dict(document)) == ["v", "d"]
 
@@ -46,11 +46,14 @@ def test_parse_v1_keeps_invoice_and_carrier_fields() -> None:
 
     document = parse_document(raw)
 
-    assert document.v == 1
+    assert document.v == 2
     assert document.rows[0].invoice_no == "000130/HD"
     assert document.rows[0].carrier == "Công ty vận tải ABC"
     assert document.rows[0].amount == 13_554_000
-    assert document_to_dict(document) == raw
+    serialized = document_to_dict(document)
+    assert serialized["v"] == 2
+    assert serialized["d"][0]["invoice_no"] == "000130/HD"
+    assert serialized["d"][0]["container_count_basis"] == "UNKNOWN"
 
 
 def test_parse_real_custom_assistant_fixture() -> None:
@@ -85,8 +88,8 @@ def test_root_must_have_exact_keys(raw: object) -> None:
     assert exc_info.value.code == "root_keys"
 
 
-@pytest.mark.parametrize("version", [0, 2, 3, True, 1.0, "1"])
-def test_version_must_be_integer_one(version: object) -> None:
+@pytest.mark.parametrize("version", [0, 3, True, 1.0, "1"])
+def test_version_must_be_integer_one_or_two(version: object) -> None:
     with pytest.raises(SchemaError) as exc_info:
         parse_document({"v": version, "d": []})
     assert exc_info.value.code == "invalid_version"
@@ -115,7 +118,7 @@ def test_each_v1_row_must_be_seven_element_array(row: object, code: str) -> None
     assert exc_info.value.code == code
 
 
-def test_document_serializes_back_as_positional_arrays() -> None:
+def test_document_serializes_as_v2_objects() -> None:
     document = BatchDocument(
         rows=[
             DataRow("DRYU3026167", None, "VTN", "CV", 13_554_000),
@@ -123,12 +126,34 @@ def test_document_serializes_back_as_positional_arrays() -> None:
         ]
     )
     assert document_to_dict(document) == {
-        "v": 1,
+        "v": 2,
         "d": [
-            ["DRYU3026167", None, "VTN", "CV", None, None, 13_554_000],
-            [None, "BL123", "CB", "HD", None, None, 27_500_000],
+            DataRow("DRYU3026167", None, "VTN", "CV", 13_554_000).to_object(),
+            DataRow(None, "BL123", "CB", "HD", 27_500_000).to_object(),
         ],
     }
+
+
+def test_parse_v2_sea_freight_fields() -> None:
+    row = DataRow(
+        cont=None,
+        bl="OOLU1234567890",
+        fee="CB",
+        rule="HD",
+        amount=32_000_000,
+        invoice_no="INV-001",
+        carrier="HÃNG TÀU",
+        vessel_voyage_raw="PROSPER 2625S",
+        vessel_name="PROSPER",
+        voyage_no="2625S",
+        invoice_container_count=4,
+        container_count_basis="EXPLICIT",
+        invoice_date="2026-07-15",
+    )
+    document = parse_document({"v": 2, "d": [row.to_object()]})
+    assert document.rows[0].voyage_no == "2625S"
+    assert document.rows[0].invoice_container_count == 4
+    assert document_to_dict(document) == {"v": 2, "d": [row.to_object()]}
 
 
 def test_v1_rejects_six_field_rows() -> None:

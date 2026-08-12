@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -24,7 +25,7 @@ from app.models import (
     ValidationResult,
 )
 from app.repositories.batch_repository import BatchRepository, local_now_iso
-from app.schema import coerce_document
+from app.schema import coerce_document, document_to_dict
 from app.services.file_stability import file_sha256, is_temporary_file
 from app.services.json_codec import JsonCodec, JsonCodecError
 from app.services.validation_service import ValidationService
@@ -100,12 +101,53 @@ class BatchService:
         if self.max_file_size_bytes <= 0:
             raise ValueError("Giới hạn kích thước file phải lớn hơn 0.")
         self._output_write_callback = output_write_callback
+        self._repair_reconciliation_batches()
         self._current_output_batch_id = self._find_current_output_batch_id()
 
     def set_output_write_callback(
         self, callback: Callable[[Path], None] | None
     ) -> None:
         self._output_write_callback = callback
+
+    def _repair_reconciliation_batches(self) -> None:
+        """Chuẩn hóa batch con beta mà không biến nó thành file Output hiện hành."""
+
+        rows = self.repository.database.query_all(
+            """
+            SELECT b.id, b.ready_path, b.status, g.is_current, g.status AS group_status
+            FROM batches AS b
+            JOIN sea_freight_reconciliation_groups AS g
+              ON g.id = b.reconciliation_group_id
+            WHERE b.source_kind = 'SEA_FREIGHT_RECONCILIATION'
+            """
+        )
+        for row in rows:
+            batch_id = int(row["id"])
+            if not bool(row["is_current"]) or str(row["group_status"]) == "CANCELLED":
+                if str(row["status"]) != BatchStatus.ARCHIVED.value:
+                    self.repository.update_batch(batch_id, status=BatchStatus.ARCHIVED)
+                continue
+            path = Path(str(row["ready_path"] or ""))
+            if not path.is_file():
+                continue
+            try:
+                document = self.codec.load(path)
+                validation = self.validation_service.validate_document(document)
+            except Exception:
+                continue
+            if not validation.has_errors and str(row["status"]) != BatchStatus.READY.value:
+                self.repository.update_batch(
+                    batch_id,
+                    status=BatchStatus.READY,
+                    ready_path=path,
+                    working_path=path,
+                    row_count=validation.summary.total_rows,
+                    valid_count=validation.summary.valid_count,
+                    warning_count=validation.summary.warning_count,
+                    error_count=validation.error_count,
+                    total_amount=validation.summary.total_amount,
+                    last_error=None,
+                )
 
     def update_paths(self, paths: AppPaths) -> None:
         paths.ensure_directories()
@@ -413,6 +455,79 @@ class BatchService:
 
     confirm = confirm_batch
     finalize_batch = confirm_batch
+
+    def create_reconciliation_batch(
+        self, group_id: int, rows: Iterable[DataRow]
+    ) -> BatchReview:
+        """Tạo một batch READY bất biến từ kết quả phân bổ cước biển."""
+
+        document = BatchDocument(v=2, rows=list(rows))
+        validation = self.validation_service.validate_document(document)
+        if validation.has_errors:
+            raise BatchValidationError(
+                "Batch phân bổ cước biển không hợp lệ.", validation
+            )
+        existing = self.repository.database.query_one(
+            "SELECT id FROM batches WHERE reconciliation_group_id = ? LIMIT 1",
+            (group_id,),
+        )
+        if existing is not None:
+            batch_id = int(existing["id"])
+            current = self.load_batch(batch_id)
+            if document_to_dict(current.document) == document_to_dict(document):
+                return current
+            if current.metadata.status is not BatchStatus.READY:
+                raise BatchServiceError(
+                    "Batch phân bổ đã được sử dụng; không thể cập nhật lại tự động."
+                )
+            target = current.metadata.ready_path or current.metadata.working_path
+            self.codec.dump_atomic(target, document, create_backup=True)
+            timestamp = local_now_iso()
+            metadata = self.repository.update_batch(
+                batch_id,
+                sha256=self._reconciliation_sha(target, group_id),
+                last_saved_at=timestamp,
+                confirmed_at=timestamp,
+                row_count=validation.summary.total_rows,
+                valid_count=validation.summary.valid_count,
+                warning_count=validation.summary.warning_count,
+                error_count=validation.error_count,
+                total_amount=validation.summary.total_amount,
+            )
+            return BatchReview(metadata, document, validation)
+        target = self.paths.ready_dir / f"sea_freight_group_{group_id}.json"
+        self.codec.dump_atomic(target, document, create_backup=False)
+        digest = self._reconciliation_sha(target, group_id)
+        timestamp = local_now_iso()
+        metadata = self.repository.create_batch(
+            source_filename=target.name,
+            source_output_path=None,
+            original_archive_path=target,
+            working_path=target,
+            ready_path=target,
+            sha256=digest,
+            status=BatchStatus.READY,
+            received_at=timestamp,
+            source_kind="SEA_FREIGHT_RECONCILIATION",
+            reconciliation_group_id=group_id,
+        )
+        metadata = self.repository.update_batch(
+            metadata.id,
+            last_saved_at=timestamp,
+            confirmed_at=timestamp,
+            row_count=validation.summary.total_rows,
+            valid_count=validation.summary.valid_count,
+            warning_count=validation.summary.warning_count,
+            error_count=validation.error_count,
+            total_amount=validation.summary.total_amount,
+        )
+        return BatchReview(metadata, document, validation)
+
+    @staticmethod
+    def _reconciliation_sha(path: Path, group_id: int) -> str:
+        return hashlib.sha256(
+            f"SEA_FREIGHT_RECONCILIATION:{group_id}:{calculate_sha256(path)}".encode("ascii")
+        ).hexdigest()
 
     def reopen_batch(self, batch_id: int) -> BatchReview:
         review = self.load_batch(batch_id)

@@ -109,7 +109,7 @@ class EditRowDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title or ("Thêm dòng dữ liệu" if row is None else "Sửa dòng dữ liệu"))
         self.setModal(True)
-        self.resize(640, 560)
+        self.resize(680, 760)
         self._editing = row is not None
         self._original_rule: Any = None
         self._validator = validator
@@ -156,6 +156,31 @@ class EditRowDialog(QDialog):
         self.bl_edit.setClearButtonEnabled(True)
         form.addRow("Số B/L:", self.bl_edit)
 
+        self.vessel_voyage_raw_edit = QLineEdit()
+        self.vessel_voyage_raw_edit.setPlaceholderText("Ví dụ: PROSPER 2625S")
+        self.vessel_voyage_raw_edit.setClearButtonEnabled(True)
+        form.addRow("Tàu/chuyến gốc:", self.vessel_voyage_raw_edit)
+
+        self.vessel_name_edit = QLineEdit()
+        self.vessel_name_edit.setPlaceholderText("Ví dụ: PROSPER")
+        self.vessel_name_edit.setClearButtonEnabled(True)
+        form.addRow("Tên tàu:", self.vessel_name_edit)
+
+        self.voyage_no_edit = QLineEdit()
+        self.voyage_no_edit.setPlaceholderText("Ví dụ: 2625S")
+        self.voyage_no_edit.setClearButtonEnabled(True)
+        form.addRow("Số chuyến:", self.voyage_no_edit)
+
+        self.invoice_container_count_edit = QLineEdit()
+        self.invoice_container_count_edit.setPlaceholderText("Số nguyên dương")
+        form.addRow("SL cont HĐ:", self.invoice_container_count_edit)
+
+        self.container_count_basis_combo = QComboBox()
+        self.container_count_basis_combo.addItem("UNKNOWN – Chưa xác định", "UNKNOWN")
+        self.container_count_basis_combo.addItem("EXPLICIT – Ghi rõ trên HĐ", "EXPLICIT")
+        self.container_count_basis_combo.addItem("CALCULATED – Tính từ HĐ", "CALCULATED")
+        form.addRow("Căn cứ SL:", self.container_count_basis_combo)
+
         self.fee_combo = QComboBox()
         self.fee_combo.setObjectName("feeCombo")
         self.fee_combo.addItem("— Chọn loại cước —", None)
@@ -178,6 +203,11 @@ class EditRowDialog(QDialog):
         self.invoice_no_edit.setMaxLength(200)
         self.invoice_no_edit.setClearButtonEnabled(True)
         form.addRow("Số HĐ:", self.invoice_no_edit)
+
+        self.invoice_date_edit = QLineEdit()
+        self.invoice_date_edit.setPlaceholderText("YYYY-MM-DD")
+        self.invoice_date_edit.setClearButtonEnabled(True)
+        form.addRow("Ngày HĐ:", self.invoice_date_edit)
 
         self.carrier_edit = QLineEdit()
         self.carrier_edit.setObjectName("carrierEdit")
@@ -227,9 +257,15 @@ class EditRowDialog(QDialog):
     def _connect_signals(self) -> None:
         self.container_edit.textChanged.connect(self._validate_realtime)
         self.bl_edit.textChanged.connect(self._validate_realtime)
+        self.vessel_voyage_raw_edit.textChanged.connect(self._validate_realtime)
+        self.vessel_name_edit.textChanged.connect(self._validate_realtime)
+        self.voyage_no_edit.textChanged.connect(self._validate_realtime)
+        self.invoice_container_count_edit.textChanged.connect(self._validate_realtime)
+        self.container_count_basis_combo.currentIndexChanged.connect(self._validate_realtime)
         self.fee_combo.currentIndexChanged.connect(self._validate_realtime)
         self.rule_combo.currentIndexChanged.connect(self._validate_realtime)
         self.invoice_no_edit.textChanged.connect(self._validate_realtime)
+        self.invoice_date_edit.textChanged.connect(self._validate_realtime)
         self.carrier_edit.textChanged.connect(self._validate_realtime)
         self.amount_edit.textChanged.connect(self._validate_realtime)
         self.amount_edit.editingFinished.connect(self._format_amount_on_finish)
@@ -240,11 +276,31 @@ class EditRowDialog(QDialog):
         value = coerce_review_row(row)
         self.container_edit.setText(value.cont if isinstance(value.cont, str) else "")
         self.bl_edit.setText(value.bl if isinstance(value.bl, str) else "")
+        self.vessel_voyage_raw_edit.setText(
+            value.vessel_voyage_raw if isinstance(value.vessel_voyage_raw, str) else ""
+        )
+        self.vessel_name_edit.setText(
+            value.vessel_name if isinstance(value.vessel_name, str) else ""
+        )
+        self.voyage_no_edit.setText(
+            value.voyage_no if isinstance(value.voyage_no, str) else ""
+        )
+        self.invoice_container_count_edit.setText(
+            str(value.invoice_container_count)
+            if type(value.invoice_container_count) is int
+            else ""
+        )
+        self._select_combo_data(
+            self.container_count_basis_combo, value.container_count_basis or "UNKNOWN"
+        )
         self._select_combo_data(self.fee_combo, value.fee)
         self._original_rule = value.rule
         self._select_combo_data(self.rule_combo, value.rule)
         self.invoice_no_edit.setText(
             value.invoice_no if isinstance(value.invoice_no, str) else ""
+        )
+        self.invoice_date_edit.setText(
+            value.invoice_date if isinstance(value.invoice_date, str) else ""
         )
         self.carrier_edit.setText(
             value.carrier if isinstance(value.carrier, str) else ""
@@ -279,6 +335,13 @@ class EditRowDialog(QDialog):
             amount = parse_amount(self.amount_edit.text())
         except ValueError as exc:
             amount_error = str(exc)
+        count_text = self.invoice_container_count_edit.text().strip()
+        count: int | None = None
+        if count_text:
+            if count_text.isdigit() and int(count_text) > 0:
+                count = int(count_text)
+            else:
+                amount_error = "SL cont HĐ phải là số nguyên dương."
         row = ReviewRow(
             cont=normalize_container(self.container_edit.text()),
             bl=normalize_bl(self.bl_edit.text()),
@@ -287,6 +350,14 @@ class EditRowDialog(QDialog):
             amount=amount,
             invoice_no=normalize_optional_text(self.invoice_no_edit.text()),
             carrier=normalize_optional_text(self.carrier_edit.text()),
+            vessel_voyage_raw=normalize_optional_text(
+                self.vessel_voyage_raw_edit.text()
+            ),
+            vessel_name=normalize_optional_text(self.vessel_name_edit.text()),
+            voyage_no=normalize_optional_text(self.voyage_no_edit.text()),
+            invoice_container_count=count,
+            container_count_basis=self.container_count_basis_combo.currentData(),
+            invoice_date=normalize_optional_text(self.invoice_date_edit.text()),
         )
         return row, amount_error
 
@@ -388,7 +459,7 @@ class EditRowDialog(QDialog):
         """Trả về bản sao dòng đã lưu (hoặc dữ liệu hợp lệ đang nhập)."""
 
         if self._result_row is not None:
-            return ReviewRow.from_sequence(self._result_row.as_array())
+            return ReviewRow.from_mapping(self._result_row.to_object())
         row, error = self._collect_row()
         if error:
             raise ValueError(error)

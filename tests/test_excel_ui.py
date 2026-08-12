@@ -18,6 +18,7 @@ from app.ui.excel_dialogs import (
     ConflictResolutionDialog,
     ManualRowPickerDialog,
     MonthSelectionDialog,
+    PaymentNewRowsDialog,
     RepostSelectionDialog,
 )
 from app.ui.excel_task_controller import ExcelTaskController
@@ -1008,6 +1009,7 @@ def test_manual_row_picker_returns_source_sheet_and_workbook_row(qtbot) -> None:
                 "closing_date": "28/07/2026",
                 "vessel": "Tàu A",
                 "recipient": "Công ty B",
+                "carrier": "Vận tải ABC",
             }
         ],
         sheet_name="T07 26",
@@ -1017,8 +1019,68 @@ def test_manual_row_picker_returns_source_sheet_and_workbook_row(qtbot) -> None:
 
     assert dialog.selected_row == 12
     assert dialog.selected_source_sheet == "T06 26"
-    assert dialog.table.columnCount() == 7
+    assert dialog.table.columnCount() == 8
+    assert dialog.table.item(0, 7).text() == "Vận tải ABC"
     assert "Cột" not in [
         dialog.table.horizontalHeaderItem(column).text()
         for column in range(dialog.table.columnCount())
     ]
+
+
+def test_decision_tables_sort_by_container_and_preserve_initial_order(qtbot) -> None:
+    conflicts = ConflictResolutionDialog(
+        [
+            {
+                "conflict_id": "b",
+                "type": "TARGET_CELL_OCCUPIED",
+                "container": "VSCU0000002",
+                "carrier": "Vận tải B",
+            },
+            {
+                "conflict_id": "a",
+                "type": "TARGET_CELL_OCCUPIED",
+                "container": "DRYU0000001",
+                "carrier": "Vận tải A",
+            },
+        ]
+    )
+    picker = ManualRowPickerDialog(
+        [
+            {"row_number": 2, "container": "VSCU0000002"},
+            {"row_number": 3, "container": "DRYU0000001"},
+        ]
+    )
+    reposts = RepostSelectionDialog(
+        [
+            {"source_item_index": 0, "container": "VSCU0000002"},
+            {"source_item_index": 1, "container": "DRYU0000001"},
+        ]
+    )
+    new_rows = PaymentNewRowsDialog(
+        [
+            {"item_id": "b", "container": "VSCU0000002", "values": {}},
+            {"item_id": "a", "container": "DRYU0000001", "values": {}},
+        ]
+    )
+    dialogs = (conflicts, picker, reposts, new_rows)
+    for dialog in dialogs:
+        qtbot.addWidget(dialog)
+
+    tables_and_columns = (
+        (conflicts.table, 0),
+        (picker.table, 2),
+        (reposts.table, 2),
+        (new_rows.table, 4),
+    )
+    for table, container_column in tables_and_columns:
+        assert table.isSortingEnabled()
+        assert table.horizontalHeader().sortIndicatorSection() == -1
+        assert table.item(0, container_column).text() == "VSCU0000002"
+        table.sortItems(container_column, Qt.SortOrder.AscendingOrder)
+        assert table.item(0, container_column).text() == "DRYU0000001"
+
+    carrier_column = conflicts.COLUMNS.index("Bên vận tải")
+    assert conflicts.table.item(0, carrier_column).text() == "Vận tải A"
+    assert conflicts.table.cellWidget(
+        0, conflicts.COLUMNS.index("Cách xử lý")
+    ) is conflicts._action_combos["a"]

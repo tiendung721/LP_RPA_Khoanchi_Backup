@@ -12,6 +12,8 @@ from typing import Any, Mapping
 
 from PySide6.QtCore import QProcess
 
+from app.services.assistant_close_bridge import AssistantCloseBridge
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -26,6 +28,10 @@ class AssistantLaunchResult:
     bat_path: Path
     output_dir: Path
     process_id: int | None = None
+    session_id: str | None = None
+    bridge_port: int | None = None
+    context: str = "home"
+    reconciliation_group_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,8 +47,14 @@ class AssistantBundle:
 class AssistantBatLauncher:
     """Adapter duy nhất giữa ứng dụng và bundle BAT của Trợ lý ảo."""
 
-    def __init__(self, settings: object | Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        settings: object | Mapping[str, Any] | None = None,
+        *,
+        close_bridge: AssistantCloseBridge | None = None,
+    ) -> None:
         self._settings = settings
+        self._close_bridge = close_bridge or AssistantCloseBridge()
 
     def update_settings(self, settings: object | Mapping[str, Any]) -> None:
         self._settings = settings
@@ -89,6 +101,7 @@ class AssistantBatLauncher:
             raise AssistantLaunchError(
                 f"Không tìm thấy extension của bundle: {extension_dir}"
             )
+        self._validate_extension_bundle(extension_dir)
         self._ensure_output_writable(raw_output)
         return AssistantBundle(
             bat_path=bat.resolve(),
@@ -142,6 +155,9 @@ class AssistantBatLauncher:
         self,
         bat_path: str | Path | None = None,
         output_dir: str | Path | None = None,
+        *,
+        context: str = "home",
+        reconciliation_group_id: int | None = None,
     ) -> AssistantLaunchResult:
         raw_output = (
             self._setting("output_dir", default="")
@@ -151,13 +167,28 @@ class AssistantBatLauncher:
         bundle = self.validate_configuration(bat_path, raw_output)
         selected_output = Path(raw_output).expanduser()
         self.configure_download_directory(bundle, selected_output)
+        try:
+            session = self._close_bridge.create_session()
+        except OSError as exc:
+            raise AssistantLaunchError(
+                "Không thể khởi tạo kết nối nội bộ để tự đóng cửa sổ Trợ lý."
+            ) from exc
         command = os.environ.get("COMSPEC", "cmd.exe")
         started, process_id = QProcess.startDetached(
             command,
-            ["/d", "/s", "/c", "call", str(bundle.bat_path)],
+            [
+                "/d",
+                "/s",
+                "/c",
+                "call",
+                str(bundle.bat_path),
+                session.session_id,
+                str(session.port),
+            ],
             str(bundle.bat_path.parent),
         )
         if not started:
+            self._close_bridge.discard_session(session.session_id)
             raise AssistantLaunchError(
                 "Windows không thể khởi chạy file BAT mở Trợ lý ảo."
             )
@@ -168,9 +199,27 @@ class AssistantBatLauncher:
             bat_path=bundle.bat_path,
             output_dir=selected_output.resolve(),
             process_id=int(process_id) if process_id else None,
+            session_id=session.session_id,
+            bridge_port=session.port,
+            context=context,
+            reconciliation_group_id=reconciliation_group_id,
         )
 
     open_assistant = launch
+
+    def complete_session(self, session_id: str) -> bool:
+        """Cho phép extension đóng cửa sổ sau khi dữ liệu đã được tiếp nhận."""
+
+        return self._close_bridge.request_close(session_id)
+
+    def discard_session(self, session_id: str) -> None:
+        self._close_bridge.discard_session(session_id)
+
+    def is_session_active(self, session_id: str) -> bool:
+        return self._close_bridge.is_session_active(session_id)
+
+    def close(self) -> None:
+        self._close_bridge.close()
 
     def _setting(self, name: str, *, default: object) -> object:
         settings = self._settings
@@ -179,6 +228,29 @@ class AssistantBatLauncher:
         if isinstance(settings, Mapping):
             return settings.get(name, default)
         return getattr(settings, name, default)
+
+    @staticmethod
+    def _validate_extension_bundle(extension_dir: Path) -> None:
+        manifest_path = extension_dir / "manifest.json"
+        required_scripts = (
+            extension_dir / "window-manager.js",
+            extension_dir / "title-cleaner.js",
+        )
+        if not manifest_path.is_file() or not all(
+            path.is_file() for path in required_scripts
+        ):
+            raise AssistantLaunchError(
+                "Extension Trợ lý thiếu thành phần tự đóng cửa sổ."
+            )
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+            version = tuple(int(part) for part in str(manifest["version"]).split("."))
+        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, ValueError) as exc:
+            raise AssistantLaunchError("Manifest của extension Trợ lý không hợp lệ.") from exc
+        if version < (2, 2, 0):
+            raise AssistantLaunchError(
+                "Extension Trợ lý đã cũ; cần phiên bản 2.2.0 trở lên."
+            )
 
     @staticmethod
     def _ensure_output_writable(output_dir: str | Path) -> Path:

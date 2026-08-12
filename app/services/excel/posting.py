@@ -209,6 +209,8 @@ class ExpensePostingService:
         year_resolver: YearResolver | None = None,
         run_repository: Any | None = None,
         posting_repository: Any | None = None,
+        sea_freight_repository: Any | None = None,
+        sea_freight_service: Any | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.provider = reviewed_batch_provider or provider
@@ -234,6 +236,8 @@ class ExpensePostingService:
         self.years = year_resolver or YearResolver()
         self.run_repository = run_repository
         self.posting_repository = posting_repository
+        self.sea_freight_repository = sea_freight_repository
+        self.sea_freight_service = sea_freight_service
         self.clock = clock or (lambda: datetime.now().astimezone().replace(tzinfo=None))
         # Working copy nằm cạnh BK để atomic replace không bao giờ cross-volume.
         self.backups = ExcelBackupService(self.backup_dir)
@@ -248,17 +252,15 @@ class ExpensePostingService:
         target = ensure_supported_workbook(self.bk_path)
         if not target.is_file():
             raise ExpensePostingError(f"Không tìm thấy file BK: {target}")
-        batch_path = self._ready_path(batch_id)
-        if batch_path is None:
-            raise ExpensePostingError(
-                "Không có JSON hiện hành đã xác nhận để nhập khoản chi."
-            )
-        batch_path = Path(batch_path)
-        raw = batch_path.read_bytes()
-        batch_hash = hashlib.sha256(raw).hexdigest()
-        resolved_batch_id = batch_id or self._batch_id_for_path(batch_path)
-        document_rows = self._validate_json(raw)
-        already_posted = self._successful_indices(batch_hash)
+        bundle = self._posting_bundle(batch_id)
+        batch_path = bundle["batch_path"]
+        raw = bundle["raw"]
+        batch_hash = bundle["bundle_hash"]
+        resolved_batch_id = bundle["batch_id"]
+        document_rows = bundle["rows"]
+        source_members = bundle["source_members"]
+        reconciliation_members = bundle["reconciliation_members"]
+        already_posted = self._successful_bundle_indices(document_rows)
         repost_indices = set(repost_source_indices or ())
         invalid_reposts = repost_indices.difference(already_posted)
         if invalid_reposts:
@@ -267,9 +269,7 @@ class ExpensePostingService:
             )
         repost_selection_done = repost_source_indices is not None
         previously_posted = self._previously_posted_items(
-            batch_hash,
-            document_rows,
-            already_posted,
+            batch_hash, document_rows, already_posted,
         )
         run_id = self._create_run(batch_path, target)
         try:
@@ -289,6 +289,7 @@ class ExpensePostingService:
                     document_rows,
                     already_posted,
                     repost_indices,
+                    set(),
                 )
                 candidates = [
                     MonthCandidate(
@@ -331,6 +332,11 @@ class ExpensePostingService:
                 repost_source_indices=repost_indices,
                 repost_selection_done=repost_selection_done,
                 run_id=run_id,
+                source_members=source_members,
+                reconciliation_members=reconciliation_members,
+                original_source_count=int(bundle["original_source_count"]),
+                reconciliation_source_count=int(bundle["reconciliation_source_count"]),
+                confirmation_required=True,
             )
             status = (
                 ExcelRunStatus.WAITING_USER
@@ -343,7 +349,7 @@ class ExpensePostingService:
                 run_id,
                 status=status,
                 source_fingerprint={
-                    "size": len(raw),
+                    "size": sum(int(member["size"]) for member in source_members),
                     "mtime_ns": batch_path.stat().st_mtime_ns,
                     "sha256": batch_hash,
                 },
@@ -382,13 +388,7 @@ class ExpensePostingService:
             self.gateway.assert_unchanged(
                 plan.target_path, plan.target_fingerprint, label="File BK"
             )
-            if (
-                hashlib.sha256(plan.batch_path.read_bytes()).hexdigest()
-                != plan.batch_hash
-            ):
-                raise ExpensePostingError(
-                    "JSON đã xác nhận đã thay đổi sau khi phân tích."
-                )
+            self._assert_source_members_unchanged(plan)
 
             workbook = self.gateway.load(plan.target_path, read_only=False)
             try:
@@ -564,6 +564,7 @@ class ExpensePostingService:
                 self._record_carry_forwards(plan, write_actions)
 
             self._record_history(plan, history)
+            self._mark_completed_reconciliations(plan)
             status = (
                 ExcelRunStatus.SUCCEEDED
                 if write_actions or detail_actions
@@ -890,6 +891,12 @@ class ExpensePostingService:
             repost_source_indices=plan.repost_source_indices,
             repost_selection_done=plan.repost_selection_done,
             run_id=plan.run_id,
+            source_members=plan.source_members,
+            reconciliation_members=plan.reconciliation_members,
+            original_source_count=plan.original_source_count,
+            reconciliation_source_count=plan.reconciliation_source_count,
+            confirmation_required=plan.confirmation_required,
+            confirmation_done=plan.confirmation_done,
         )
         self._update_run(
             plan.run_id,
@@ -951,6 +958,227 @@ class ExpensePostingService:
             )
         return result
 
+    def _posting_bundle(self, batch_id: int | None) -> dict[str, Any]:
+        """Ghép file nguồn với các batch con đối soát thành một nguồn logic."""
+
+        batch_path = self._ready_path(batch_id)
+        if batch_path is None:
+            raise ExpensePostingError(
+                "Không có JSON hiện hành đã xác nhận để nhập khoản chi."
+            )
+        batch_path = Path(batch_path)
+        raw = batch_path.read_bytes()
+        resolved_batch_id = batch_id or self._batch_id_for_path(batch_path)
+        source_hash = hashlib.sha256(raw).hexdigest()
+        source_rows = self._validate_json(raw)
+        repository = getattr(self.provider, "repository", None)
+        metadata = (
+            repository.get_by_id(resolved_batch_id)
+            if repository is not None and resolved_batch_id is not None
+            else None
+        )
+        source_kind = str(getattr(metadata, "source_kind", "ASSISTANT"))
+        members: list[dict[str, Any]] = [
+            {
+                "batch_id": resolved_batch_id,
+                "path": batch_path,
+                "sha256": source_hash,
+                "size": len(raw),
+                "kind": source_kind,
+            }
+        ]
+
+        # Fallback tương thích provider độc lập và trường hợp caller chủ động
+        # yêu cầu chính batch kết quả đối soát.
+        if (
+            resolved_batch_id is None
+            or self.sea_freight_repository is None
+            or source_kind == "SEA_FREIGHT_RECONCILIATION"
+        ):
+            rows = []
+            group_id = self._reconciliation_group_id(resolved_batch_id)
+            if group_id is not None and self.sea_freight_service is not None:
+                group = self.sea_freight_repository.get_group(group_id)
+                if group is not None and str(group.status.value) == "ALLOCATED":
+                    self.sea_freight_service.prepare_allocation(group_id)
+            for index, row in enumerate(source_rows):
+                rows.append(
+                    {
+                        **row,
+                        "source_item_index": index,
+                        "origin_batch_id": resolved_batch_id,
+                        "origin_batch_hash": source_hash,
+                        "origin_source_item_index": index,
+                        "reconciliation_group_id": group_id,
+                    }
+                )
+            return {
+                "batch_id": resolved_batch_id,
+                "batch_path": batch_path,
+                "raw": raw,
+                "bundle_hash": source_hash,
+                "rows": rows,
+                "source_members": members,
+                "reconciliation_members": (
+                    [{"group_id": group_id, "batch_id": resolved_batch_id, "row_count": len(rows)}]
+                    if group_id is not None
+                    else []
+                ),
+                "original_source_count": 0 if group_id is not None else len(rows),
+                "reconciliation_source_count": len(rows) if group_id is not None else 0,
+            }
+
+        managed = self.sea_freight_repository.groups_for_source_batch(
+            resolved_batch_id
+        )
+        incomplete = [
+            group
+            for group in managed.values()
+            if str(group.status.value) not in {"ALLOCATED", "POSTED"}
+        ]
+        if incomplete:
+            raise ExpensePostingError(
+                f"Còn {len(incomplete)} hồ sơ cước biển chưa xác nhận; "
+                "hãy hoàn tất đối soát trước khi nhập BK."
+            )
+
+        combined: list[dict[str, Any]] = []
+        for source_index, row in enumerate(source_rows):
+            if source_index in managed:
+                continue
+            combined.append(
+                {
+                    **row,
+                    "origin_batch_id": resolved_batch_id,
+                    "origin_batch_hash": source_hash,
+                    "origin_source_item_index": source_index,
+                    "reconciliation_group_id": None,
+                }
+            )
+        original_count = len(combined)
+        reconciliation_members: list[dict[str, Any]] = []
+        for group in self.sea_freight_repository.posting_groups_for_source_batch(
+            resolved_batch_id
+        ):
+            status = str(group.status.value)
+            if status not in {"ALLOCATED", "POSTED"}:
+                raise ExpensePostingError(
+                    f"Hồ sơ đối soát lần {group.revision_no} chưa được xác nhận."
+                )
+            if status == "ALLOCATED" and self.sea_freight_service is not None:
+                self.sea_freight_service.prepare_allocation(group.id)
+            if group.generated_batch_id is None or repository is None:
+                raise ExpensePostingError(
+                    f"Hồ sơ đối soát #{group.id} chưa có batch kết quả."
+                )
+            child = repository.get_by_id(int(group.generated_batch_id))
+            child_path = getattr(child, "ready_path", None) if child is not None else None
+            if child_path is None or not Path(child_path).is_file():
+                raise ExpensePostingError(
+                    f"Thiếu JSON kết quả của hồ sơ đối soát #{group.id}."
+                )
+            child_path = Path(child_path)
+            child_raw = child_path.read_bytes()
+            child_hash = hashlib.sha256(child_raw).hexdigest()
+            child_rows = self._validate_json(child_raw)
+            if len(child_rows) != group.bk_container_count:
+                raise ExpensePostingError(
+                    f"Batch kết quả hồ sơ #{group.id} không còn đủ số cont."
+                )
+            members.append(
+                {
+                    "batch_id": int(group.generated_batch_id),
+                    "path": child_path,
+                    "sha256": child_hash,
+                    "size": len(child_raw),
+                    "kind": "SEA_FREIGHT_RECONCILIATION",
+                }
+            )
+            reconciliation_members.append(
+                {
+                    "group_id": group.id,
+                    "batch_id": int(group.generated_batch_id),
+                    "row_count": len(child_rows),
+                }
+            )
+            for child_index, row in enumerate(child_rows):
+                combined.append(
+                    {
+                        **row,
+                        "origin_batch_id": int(group.generated_batch_id),
+                        "origin_batch_hash": child_hash,
+                        "origin_source_item_index": child_index,
+                        "reconciliation_group_id": group.id,
+                    }
+                )
+
+        for index, row in enumerate(combined):
+            row["source_item_index"] = index
+        digest_payload = [
+            (member["batch_id"], member["sha256"])
+            for member in members
+        ]
+        bundle_hash = hashlib.sha256(
+            json.dumps(digest_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return {
+            "batch_id": resolved_batch_id,
+            "batch_path": batch_path,
+            "raw": raw,
+            "bundle_hash": bundle_hash,
+            "rows": combined,
+            "source_members": members,
+            "reconciliation_members": reconciliation_members,
+            "original_source_count": original_count,
+            "reconciliation_source_count": len(combined) - original_count,
+        }
+
+    def _successful_bundle_indices(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> set[int]:
+        if self.posting_repository is None:
+            return set()
+        cache: dict[int, set[int]] = {}
+        hash_cache: dict[str, set[int]] = {}
+        result: set[int] = set()
+        lookup = getattr(
+            self.posting_repository, "successful_source_indices_for_batch", None
+        )
+        for row in rows:
+            origin_batch = row.get("origin_batch_id")
+            if origin_batch is None:
+                origin_hash = str(row.get("origin_batch_hash") or "")
+                if origin_hash:
+                    hash_cache.setdefault(
+                        origin_hash, self._successful_indices(origin_hash)
+                    )
+                    if int(row["origin_source_item_index"]) in hash_cache[origin_hash]:
+                        result.add(int(row["source_item_index"]))
+                continue
+            if not callable(lookup):
+                continue
+            origin_batch = int(origin_batch)
+            cache.setdefault(origin_batch, set(lookup(origin_batch)))
+            if int(row["origin_source_item_index"]) in cache[origin_batch]:
+                result.add(int(row["source_item_index"]))
+        return result
+
+    @staticmethod
+    def _assert_source_members_unchanged(plan: PostingPlan) -> None:
+        members = plan.source_members
+        if not members:
+            if hashlib.sha256(plan.batch_path.read_bytes()).hexdigest() != plan.batch_hash:
+                raise ExpensePostingError(
+                    "JSON đã xác nhận đã thay đổi sau khi phân tích."
+                )
+            return
+        for member in members:
+            path = Path(member["path"])
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != member["sha256"]:
+                raise ExpensePostingError(
+                    "Một JSON nguồn của gói nhập BK đã thay đổi sau khi phân tích."
+                )
+
     def cancel(self, plan: PostingPlan) -> None:
         """Đánh dấu lần nhập đang chờ lựa chọn là đã hủy, không sửa BK."""
 
@@ -970,16 +1198,32 @@ class ExpensePostingService:
         rows: Sequence[dict[str, Any]],
         already_posted: set[int],
         repost_source_indices: set[int] | None = None,
+        managed_source_indices: set[int] | None = None,
     ) -> list[list[dict[str, Any]]]:
         repost = repost_source_indices or set()
+        managed = managed_source_indices or set()
         # Mỗi dòng hóa đơn phải còn độc lập cho tới khi xác định được dòng BK.
         # Cùng container/mã phí chưa đủ để kết luận các khoản thuộc cùng một SQT.
         return [
             [row]
             for row in rows
-            if row["source_item_index"] not in already_posted
-            or row["source_item_index"] in repost
+            if row["source_item_index"] not in managed
+            and (
+                row["source_item_index"] not in already_posted
+                or row["source_item_index"] in repost
+            )
         ]
+
+    def _reconciliation_group_id(self, batch_id: int | None) -> int | None:
+        if self.sea_freight_repository is None or batch_id is None:
+            return None
+        row = self.sea_freight_repository.database.query_one(
+            "SELECT reconciliation_group_id FROM batches WHERE id = ?",
+            (batch_id,),
+        )
+        if row is None or row["reconciliation_group_id"] is None:
+            return None
+        return int(row["reconciliation_group_id"])
 
     @staticmethod
     def _items_from_groups(
@@ -1158,6 +1402,13 @@ class ExpensePostingService:
                 if plan_header is not None
                 else ()
             )
+            carrier = join_carriers(
+                *(
+                    worksheet.cell(row, columns[field]).value
+                    for field in ("carrier_hp", "carrier_nam")
+                    if field in columns
+                )
+            )
             result[container].append(
                 RowCandidate(
                     row=row,
@@ -1185,6 +1436,7 @@ class ExpensePostingService:
                         if "recipient" in columns
                         else None
                     ),
+                    carrier=carrier,
                     is_ron="ron" in normalize_header(cargo),
                 )
             )
@@ -2043,6 +2295,7 @@ class ExpensePostingService:
             bl=item.bl,
             fee=item.selected_fee,
             amount=item.amount,
+            carrier=join_carriers(item.carrier_candidates),
             sheet_name=item.sheet_name,
             target_row=item.target_row,
             target_column=target_column,
@@ -2494,6 +2747,14 @@ class ExpensePostingService:
             result.append(
                 {
                     "source_item_index": source_index,
+                    "origin_batch_id": source.get("origin_batch_id"),
+                    "origin_batch_hash": source.get("origin_batch_hash"),
+                    "origin_source_item_index": source.get(
+                        "origin_source_item_index", source_index
+                    ),
+                    "reconciliation_group_id": source.get(
+                        "reconciliation_group_id"
+                    ),
                     "container": source.get("container", item.container),
                     "bl": source.get("bl", item.bl),
                     "fee_original": source.get("fee", item.original_fee),
@@ -2738,12 +2999,48 @@ class ExpensePostingService:
             or not history
         ):
             return
-        self.posting_repository.create_items(
-            history,
-            run_id=plan.run_id,
-            batch_id=plan.batch_id,
-            batch_hash=plan.batch_hash,
+        grouped: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
+        for raw in history:
+            payload = dict(raw)
+            origin_batch = payload.pop("origin_batch_id", None)
+            origin_hash = payload.pop("origin_batch_hash", None)
+            origin_index = payload.pop("origin_source_item_index", None)
+            payload.pop("reconciliation_group_id", None)
+            effective_batch = int(origin_batch or plan.batch_id)
+            effective_hash = str(origin_hash or plan.batch_hash)
+            if origin_index is not None:
+                payload["source_item_index"] = int(origin_index)
+            grouped[(effective_batch, effective_hash)].append(payload)
+        for (origin_batch, origin_hash), payloads in grouped.items():
+            self.posting_repository.create_items(
+                payloads,
+                run_id=plan.run_id,
+                batch_id=origin_batch,
+                batch_hash=origin_hash,
+            )
+
+    def _mark_completed_reconciliations(self, plan: PostingPlan) -> None:
+        if (
+            self.sea_freight_repository is None
+            or self.posting_repository is None
+            or plan.run_id is None
+        ):
+            return
+        lookup = getattr(
+            self.posting_repository, "successful_source_indices_for_batch", None
         )
+        if not callable(lookup):
+            return
+        for member in plan.reconciliation_members:
+            group_id = int(member["group_id"])
+            child_batch_id = int(member["batch_id"])
+            row_count = int(member["row_count"])
+            successful = set(lookup(child_batch_id))
+            if not set(range(row_count)).issubset(successful):
+                continue
+            group = self.sea_freight_repository.get_group(group_id)
+            if group is not None and str(group.status.value) == "ALLOCATED":
+                self.sea_freight_repository.mark_posted(group_id, plan.run_id)
 
     def _ready_path(self, batch_id: int | None) -> Path | None:
         if batch_id is None:
@@ -2756,7 +3053,7 @@ class ExpensePostingService:
             return None
         resolved = path.resolve()
         for metadata in list_method():
-            current_path = getattr(metadata, "source_output_path", None)
+            current_path = getattr(metadata, "ready_path", None)
             if current_path is not None and Path(current_path).resolve() == resolved:
                 return int(getattr(metadata, "id", getattr(metadata, "batch_id")))
         return None
@@ -2773,6 +3070,50 @@ class ExpensePostingService:
         successful_indices: set[int],
     ) -> list[dict[str, Any]]:
         records: Sequence[Any] = ()
+        if document_rows and any(
+            row.get("origin_batch_id") is not None for row in document_rows
+        ):
+            lookup = getattr(
+                self.posting_repository,
+                "latest_successful_items_for_batch",
+                None,
+            )
+            cache: dict[int, dict[int, Any]] = {}
+            result: list[dict[str, Any]] = []
+            for source_index in sorted(successful_indices):
+                if source_index >= len(document_rows):
+                    continue
+                source = document_rows[source_index]
+                origin_batch = source.get("origin_batch_id")
+                if origin_batch is None or not callable(lookup):
+                    continue
+                origin_batch = int(origin_batch)
+                if origin_batch not in cache:
+                    cache[origin_batch] = {
+                        int(getattr(record, "source_item_index")): record
+                        for record in lookup(origin_batch)
+                    }
+                record = cache[origin_batch].get(
+                    int(source.get("origin_source_item_index", source_index))
+                )
+
+                def previous(name: str, default: Any = None) -> Any:
+                    return getattr(record, name, default) if record is not None else default
+
+                result.append(
+                    {
+                        "source_item_index": source_index,
+                        "container": previous("container", source.get("container")),
+                        "bl": previous("bl", source.get("bl")),
+                        "fee": previous("fee_selected", source.get("fee")) or source.get("fee"),
+                        "amount": previous("amount", source.get("amount")),
+                        "sheet_name": previous("sheet_name"),
+                        "target_row": previous("target_row"),
+                        "target_cell": previous("target_cell"),
+                        "created_at": previous("created_at"),
+                    }
+                )
+            return result
         latest = getattr(
             self.posting_repository,
             "latest_successful_items",

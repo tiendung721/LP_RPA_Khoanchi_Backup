@@ -6,6 +6,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from datetime import date
 from typing import Any
 
 from app.constants import (
@@ -31,6 +32,7 @@ _COLLAPSE_WHITESPACE_RE = re.compile(r"\s+", flags=re.UNICODE)
 _AMOUNT_ALLOWED_RE = re.compile(r"^[0-9][0-9.,\s]*$", flags=re.UNICODE)
 _AMOUNT_GROUPED_RE = re.compile(r"^[0-9]{1,3}(?:([.,\s])[0-9]{3})(?:\1[0-9]{3})*$")
 _MAX_SIGNED_64 = 9_223_372_036_854_775_807
+_CONTAINER_COUNT_BASES = frozenset({"EXPLICIT", "CALCULATED", "UNKNOWN"})
 
 
 class AmountParseError(ValueError):
@@ -142,6 +144,12 @@ class ValidationService:
         rule: str | None = None,
         invoice_no: str | None = None,
         carrier: str | None = None,
+        vessel_voyage_raw: str | None = None,
+        vessel_name: str | None = None,
+        voyage_no: str | None = None,
+        invoice_container_count: int | None = None,
+        container_count_basis: str = "UNKNOWN",
+        invoice_date: str | None = None,
         amount: int | str | None = None,
     ) -> DataRow:
         if row is not None:
@@ -151,6 +159,12 @@ class ValidationService:
             rule = row.rule
             invoice_no = row.invoice_no
             carrier = row.carrier
+            vessel_voyage_raw = row.vessel_voyage_raw
+            vessel_name = row.vessel_name
+            voyage_no = row.voyage_no
+            invoice_container_count = row.invoice_container_count
+            container_count_basis = row.container_count_basis
+            invoice_date = row.invoice_date
             amount = row.amount
         if fee is None:
             raise ValueError("Vui lòng chọn mã loại cước.")
@@ -162,6 +176,14 @@ class ValidationService:
             amount=parse_amount(amount),
             invoice_no=normalize_optional_text(invoice_no, field_name="Số HĐ"),
             carrier=normalize_optional_text(carrier, field_name="Bên vận tải"),
+            vessel_voyage_raw=normalize_optional_text(
+                vessel_voyage_raw, field_name="Tàu/chuyến nguyên văn"
+            ),
+            vessel_name=normalize_optional_text(vessel_name, field_name="Tên tàu"),
+            voyage_no=normalize_optional_text(voyage_no, field_name="Số chuyến"),
+            invoice_container_count=invoice_container_count,
+            container_count_basis=(container_count_basis or "UNKNOWN").strip().upper(),
+            invoice_date=normalize_optional_text(invoice_date, field_name="Ngày HĐ"),
         )
 
     def validate_row(self, row: DataRow, index: int = 0) -> RowValidation:
@@ -188,6 +210,24 @@ class ValidationService:
         )
         carrier_valid_type = row.carrier is None or isinstance(row.carrier, str)
         amount_valid_type = row.amount is None or type(row.amount) is int
+        raw_valid_type = row.vessel_voyage_raw is None or isinstance(
+            row.vessel_voyage_raw, str
+        )
+        vessel_valid_type = row.vessel_name is None or isinstance(
+            row.vessel_name, str
+        )
+        voyage_valid_type = row.voyage_no is None or isinstance(row.voyage_no, str)
+        count_valid_type = (
+            row.invoice_container_count is None
+            or type(row.invoice_container_count) is int
+        )
+        basis_valid = (
+            isinstance(row.container_count_basis, str)
+            and row.container_count_basis in _CONTAINER_COUNT_BASES
+        )
+        invoice_date_valid_type = row.invoice_date is None or isinstance(
+            row.invoice_date, str
+        )
 
         if not cont_valid_type:
             error(
@@ -224,6 +264,60 @@ class ValidationService:
 
         if not carrier_valid_type:
             error("carrier_type", "Bên vận tải phải là chuỗi hoặc null.", "carrier")
+
+        if not raw_valid_type:
+            error(
+                "vessel_voyage_raw_type",
+                "Tàu/chuyến nguyên văn phải là chuỗi hoặc null.",
+                "vessel_voyage_raw",
+            )
+        if not vessel_valid_type:
+            error("vessel_name_type", "Tên tàu phải là chuỗi hoặc null.", "vessel_name")
+        if not voyage_valid_type:
+            error("voyage_no_type", "Số chuyến phải là chuỗi hoặc null.", "voyage_no")
+        if not count_valid_type:
+            error(
+                "invoice_container_count_type",
+                "SL cont HĐ phải là số nguyên hoặc null.",
+                "invoice_container_count",
+            )
+        elif isinstance(row.invoice_container_count, int) and row.invoice_container_count <= 0:
+            error(
+                "invoice_container_count_positive",
+                "SL cont HĐ phải lớn hơn 0.",
+                "invoice_container_count",
+            )
+        if not basis_valid:
+            error(
+                "container_count_basis_unknown",
+                "Căn cứ SL cont phải là EXPLICIT, CALCULATED hoặc UNKNOWN.",
+                "container_count_basis",
+            )
+        elif row.invoice_container_count is None and row.container_count_basis != "UNKNOWN":
+            error(
+                "container_count_basis_without_count",
+                "Không có SL cont thì căn cứ phải là UNKNOWN.",
+                "container_count_basis",
+            )
+        elif row.invoice_container_count is not None and row.container_count_basis == "UNKNOWN":
+            error(
+                "container_count_missing_basis",
+                "Có SL cont thì phải chỉ rõ EXPLICIT hoặc CALCULATED.",
+                "container_count_basis",
+            )
+        if not invoice_date_valid_type:
+            error("invoice_date_type", "Ngày HĐ phải là chuỗi hoặc null.", "invoice_date")
+        elif isinstance(row.invoice_date, str):
+            try:
+                parsed_invoice_date = date.fromisoformat(row.invoice_date)
+            except ValueError:
+                parsed_invoice_date = None
+            if parsed_invoice_date is None or parsed_invoice_date.isoformat() != row.invoice_date:
+                error(
+                    "invoice_date_format",
+                    "Ngày HĐ phải đúng định dạng YYYY-MM-DD.",
+                    "invoice_date",
+                )
 
         if not amount_valid_type:
             if isinstance(row.amount, bool):
@@ -290,6 +384,24 @@ class ValidationService:
                 "Dòng cước biển chưa có B/L.",
                 "bl",
             )
+        if fee_valid and row.fee == "CB" and row.cont is None:
+            required_reconciliation = (
+                ("vessel_voyage_raw", row.vessel_voyage_raw, "tàu/chuyến nguyên văn"),
+                ("vessel_name", row.vessel_name, "tên tàu"),
+                ("voyage_no", row.voyage_no, "số chuyến"),
+                (
+                    "invoice_container_count",
+                    row.invoice_container_count,
+                    "SL cont hóa đơn",
+                ),
+            )
+            for field_name, value, label in required_reconciliation:
+                if value in (None, ""):
+                    warning(
+                        f"cb_missing_{field_name}",
+                        f"Dòng cước biển thiếu container chưa có {label} để đối soát BK.",
+                        field_name,
+                    )
         return RowValidation(row_index=index, issues=issues)
 
     def validate_document(self, value: BatchDocument | object) -> ValidationResult:
@@ -299,7 +411,7 @@ class ValidationService:
                 issue = ValidationIssue(
                     Severity.ERROR,
                     "invalid_version",
-                    "Khóa v phải là số nguyên 1.",
+                    "Khóa v nội bộ phải là số nguyên 2.",
                     field="v",
                 )
                 return ValidationResult(

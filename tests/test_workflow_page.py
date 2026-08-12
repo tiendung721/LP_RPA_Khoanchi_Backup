@@ -13,6 +13,8 @@ def test_workflow_only_exposes_assistant_action_in_step_one(qtbot) -> None:
     assert page.open_assistant_button.text() == "Mở Trợ lý ảo"
     assert not hasattr(page, "open_inbox_button")
     assert not hasattr(page, "choose_file_button")
+    assert not hasattr(page, "pending_card")
+    assert not hasattr(page, "pending_groups_button")
     assert page.review_button.isEnabled() is False
 
 
@@ -79,6 +81,12 @@ def test_four_workflow_groups_fit_minimum_window_without_scroll(qtbot) -> None:
     assert [card.geometry().top() for card in cards] == sorted(
         card.geometry().top() for card in cards
     )
+    assert all(
+        following.geometry().top() - previous.geometry().bottom() <= 16
+        for previous, following in zip(cards, cards[1:])
+    )
+    assert page.open_assistant_button.width() == page.review_button.width()
+    assert page.review_button.width() == page.run_rpa_expense_button.width()
     assert all(
         row.rect().contains(button.geometry())
         for row, button in (

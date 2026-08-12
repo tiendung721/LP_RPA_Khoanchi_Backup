@@ -5,6 +5,5 @@
   "daily_workbook_path": "C:/Users/Admin/Desktop/test/khoanchi_pm_project/Output/Hàng ngày 2026.xlsx",
   "bk_workbook_path": "C:/Users/Admin/Desktop/test/khoanchi_pm_project/Output/BK_TONG_HOP_TT_NOI_DIA_2026.xlsx",
   "payment_workbook_path": "C:/Users/Admin/Desktop/test/khoanchi_pm_project/Output/THANH_TOAN_NANG_HA_VS_DO.xlsm",
-  "container_gpt_bat_path": "C:/Users/Admin/Desktop/test/tool_so_cong/RPA_ChatGPT_Launcher/Mo_Tro_Ly_RPA.bat",
   "rpa_expense_bat_path": "C:/Users/Admin/Desktop/test/khoanchi_pm_project/Launcher/Chay_Flow4_Nhap_Khoan_Chi.bat"
 }

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from threading import RLock
@@ -29,8 +28,7 @@ from app.repositories.excel_run_repository import ExcelRunRepository
 from app.repositories.expense_posting_repository import ExpensePostingRepository
 from app.services.batch_service import BatchService
 from app.services.assistant_bat_launcher import AssistantBatLauncher
-from app.container_load.service import ContainerLoadService
-from app.container_load.validation import is_container_result_document
+from app.sea_freight import SeaFreightReconciliationService, SeaFreightRepository
 from app.rpa_expense import RpaExpenseBatLauncher, RpaExpenseService
 from app.services.excel import (
     DailySyncService,
@@ -43,7 +41,6 @@ from app.services.json_codec import JsonCodec
 from app.services.reviewed_batch_provider import ReviewedBatchProvider
 from app.services.validation_service import ValidationService
 from app.ui.excel_task_controller import ExcelTaskController
-from app.ui.container_load_controller import ContainerLoadController
 from app.ui.rpa_expense_controller import RpaExpenseController
 
 LOGGER = logging.getLogger(__name__)
@@ -66,16 +63,6 @@ class ApplicationRuntime:
         self.paths = self.settings.paths
         moved_roots = migrate_legacy_runtime_layout(self.paths)
         self.paths.ensure_directories()
-        legacy_lookup_dir = self.paths.system_dir / "ContainerLookup"
-        if legacy_lookup_dir.is_dir():
-            try:
-                shutil.rmtree(legacy_lookup_dir)
-                LOGGER.info("Đã xóa artifact tra cứu container cũ: %s", legacy_lookup_dir)
-            except OSError:
-                LOGGER.exception(
-                    "Không thể xóa artifact tra cứu container cũ: %s",
-                    legacy_lookup_dir,
-                )
         self.log_path = setup_logging(self.paths)
 
         self.database = Database(self.paths.database_path)
@@ -108,6 +95,10 @@ class ApplicationRuntime:
         self.reviewed_batch_provider = ReviewedBatchProvider(self.batch_service)
         self.excel_run_repository = ExcelRunRepository(self.database)
         self.expense_posting_repository = ExpensePostingRepository(self.database)
+        self.sea_freight_repository = SeaFreightRepository(self.database)
+        self.sea_freight_service = SeaFreightReconciliationService(
+            self.sea_freight_repository
+        )
         self._configure_excel_services(self.settings)
         removed_excel_artifacts = self.daily_sync_service.cleanup_stale_files()
         if removed_excel_artifacts:
@@ -128,14 +119,6 @@ class ApplicationRuntime:
         )
         self.assistant_launcher = AssistantBatLauncher(self.settings)
         self.launcher = self.assistant_launcher
-        self.container_load_service = ContainerLoadService(
-            self.settings,
-            self.assistant_launcher,
-        )
-        self.container_load_controller = ContainerLoadController(
-            self.container_load_service,
-            self.settings,
-        )
         self.watcher = OutputWatcher(
             self.settings,
             on_file_ready=self._receive_watcher_file,
@@ -153,15 +136,6 @@ class ApplicationRuntime:
     def _receive_watcher_file(self, path: Path) -> object:
         """Nhận callback đã được watcher chuyển an toàn về Qt owner thread."""
 
-        if (
-            self.container_load_controller.is_busy
-            or is_container_result_document(path)
-        ):
-            LOGGER.info(
-                "Bỏ qua JSON thuộc lượt Load số container ở watcher khoản chi: %s",
-                path.name,
-            )
-            return None
         LOGGER.info("Watcher chuyển file ổn định sang BatchService: %s", path.name)
         return self.batch_service.receive_file(path)
 
@@ -177,6 +151,8 @@ class ApplicationRuntime:
             settings,
             run_repository=self.excel_run_repository,
             posting_repository=self.expense_posting_repository,
+            sea_freight_repository=self.sea_freight_repository,
+            sea_freight_service=self.sea_freight_service,
         )
         self.payment_sync_service = PaymentSyncService(
             settings,
@@ -199,11 +175,6 @@ class ApplicationRuntime:
         task_controller = getattr(self, "excel_task_controller", None)
         if task_controller is not None and task_controller.is_busy:
             raise ValueError("Không thể đổi cấu hình khi tác vụ Excel đang chạy.")
-        load_controller = getattr(self, "container_load_controller", None)
-        if load_controller is not None and load_controller.is_busy:
-            raise ValueError(
-                "Không thể đổi cấu hình khi đang chờ kết quả số container."
-            )
         rpa_controller = getattr(self, "rpa_expense_controller", None)
         if rpa_controller is not None and rpa_controller.is_busy:
             raise ValueError(
@@ -216,7 +187,6 @@ class ApplicationRuntime:
         self.batch_service.update_paths(new_paths)
         self.batch_service.max_file_size_bytes = settings.max_file_size_bytes
         self.assistant_launcher.update_settings(settings)
-        self.container_load_controller.update_settings(settings)
         self._configure_excel_services(settings)
         if task_controller is not None:
             task_controller.update_services(
@@ -288,13 +258,13 @@ class ApplicationRuntime:
         except Exception:
             LOGGER.exception("Không thể dừng worker Excel sạch")
         try:
-            self.container_load_controller.shutdown()
-        except Exception:
-            LOGGER.exception("Không thể dừng watcher Load số container sạch")
-        try:
             self.rpa_expense_controller.shutdown(wait=True)
         except Exception:
             LOGGER.exception("Không thể dừng worker RPA sạch")
+        try:
+            self.assistant_launcher.close()
+        except Exception:
+            LOGGER.exception("Không thể dừng kết nối Trợ lý ảo sạch")
         try:
             self.database.close()
         except Exception:

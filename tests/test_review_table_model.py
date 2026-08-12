@@ -49,20 +49,11 @@ def test_v1_fields_are_serialized_and_searchable(qtbot) -> None:
     proxy = ReviewFilterProxyModel()
     proxy.setSourceModel(model)
 
-    assert model.to_document() == {
-        "v": 1,
-        "d": [
-            [
-                "DRYU3026167",
-                None,
-                "VTN",
-                "CV",
-                "HD-000130",
-                "Vận tải Ánh Dương",
-                13_554_000,
-            ]
-        ],
-    }
+    serialized = model.to_document()
+    assert serialized["v"] == 2
+    assert serialized["d"][0]["container"] == "DRYU3026167"
+    assert serialized["d"][0]["invoice_no"] == "HD-000130"
+    assert serialized["d"][0]["container_count_basis"] == "UNKNOWN"
     assert model.data(model.index(0, ReviewTableModel.COLUMN_INVOICE_NO)) == "HD-000130"
     assert model.data(model.index(0, ReviewTableModel.COLUMN_CARRIER)) == "Vận tải Ánh Dương"
 

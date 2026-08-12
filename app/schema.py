@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from app.constants import SCHEMA_VERSION
+from app.constants import LEGACY_SCHEMA_VERSION, SCHEMA_VERSION
 from app.models import BatchDocument, DataRow
 
 
@@ -56,9 +56,12 @@ def parse_document(raw: object) -> BatchDocument:
         )
 
     version = raw["v"]
-    if type(version) is not int or version != SCHEMA_VERSION:
+    if type(version) is not int or version not in {
+        LEGACY_SCHEMA_VERSION,
+        SCHEMA_VERSION,
+    }:
         raise SchemaError(
-            "Khóa v phải là số nguyên 1.",
+            "Khóa v phải là số nguyên 1 hoặc 2.",
             code="invalid_version",
             field="v",
         )
@@ -72,33 +75,61 @@ def parse_document(raw: object) -> BatchDocument:
         )
 
     rows: list[DataRow] = []
+    v2_keys = set(DataRow(None, None, "CXD", None, None).to_object())
     for index, item in enumerate(data):
-        if not isinstance(item, list):
+        if version == LEGACY_SCHEMA_VERSION:
+            if not isinstance(item, list):
+                raise SchemaError(
+                    f"Dòng {index + 1} của schema v1 phải là mảng.",
+                    code="row_not_array",
+                    row_index=index,
+                )
+            if len(item) != 7:
+                raise SchemaError(
+                    f"Dòng {index + 1} của schema v1 phải là mảng 7 phần tử.",
+                    code="row_length",
+                    row_index=index,
+                )
+            rows.append(DataRow.from_sequence(item))
+            continue
+        if not isinstance(item, Mapping):
             raise SchemaError(
-                f"Dòng {index + 1} phải là một mảng.",
-                code="row_not_array",
+                f"Dòng {index + 1} của schema v2 phải là object.",
+                code="row_not_object",
                 row_index=index,
             )
-        if len(item) != 7:
+        keys = set(item)
+        if keys != v2_keys:
+            missing = sorted(v2_keys - keys)
+            extra = sorted(str(key) for key in keys - v2_keys)
+            details = []
+            if missing:
+                details.append("thiếu " + ", ".join(missing))
+            if extra:
+                details.append("thừa " + ", ".join(extra))
             raise SchemaError(
-                f"Dòng {index + 1} của schema v1 phải có đúng 7 phần tử.",
-                code="row_length",
+                f"Dòng {index + 1} của schema v2 không đúng trường"
+                + (f" ({'; '.join(details)})" if details else "."),
+                code="row_keys",
                 row_index=index,
             )
-        rows.append(DataRow.from_sequence(item))
+        rows.append(DataRow.from_mapping(item))
     return BatchDocument(v=SCHEMA_VERSION, rows=rows)
 
 
 def document_to_dict(document: BatchDocument) -> dict[str, Any]:
-    """Trả đúng root ``v`` rồi ``d`` và mỗi dòng là mảng 7 phần tử."""
+    """Luôn serialize thành schema v2 dạng object."""
 
-    if type(document.v) is not int or document.v != SCHEMA_VERSION:
+    if type(document.v) is not int or document.v not in {
+        LEGACY_SCHEMA_VERSION,
+        SCHEMA_VERSION,
+    }:
         raise SchemaError(
-            "Phiên bản tài liệu phải là số nguyên 1.",
+            "Phiên bản tài liệu phải là số nguyên 1 hoặc 2.",
             code="invalid_version",
             field="v",
         )
-    rows: list[list[Any]] = []
+    rows: list[dict[str, Any]] = []
     for index, row in enumerate(document.rows):
         if not isinstance(row, DataRow):
             raise SchemaError(
@@ -106,15 +137,8 @@ def document_to_dict(document: BatchDocument) -> dict[str, Any]:
                 code="invalid_internal_row",
                 row_index=index,
             )
-        values = row.to_list()
-        if len(values) != 7:
-            raise SchemaError(
-                f"Dòng {index + 1} phải có đúng 7 phần tử.",
-                code="row_length",
-                row_index=index,
-            )
-        rows.append(values)
-    return {"v": document.v, "d": rows}
+        rows.append(row.to_object())
+    return {"v": SCHEMA_VERSION, "d": rows}
 
 
 def coerce_document(
@@ -138,7 +162,12 @@ def coerce_document(
     rows: list[DataRow] = []
     for index, item in enumerate(iterator):
         try:
-            row = item if isinstance(item, DataRow) else DataRow.from_sequence(item)
+            if isinstance(item, DataRow):
+                row = item
+            elif isinstance(item, Mapping):
+                row = DataRow.from_mapping(item)
+            else:
+                row = DataRow.from_sequence(item)
         except (TypeError, ValueError) as exc:
             raise SchemaError(
                 f"Dòng {index + 1} phải là một mảng có đúng 7 phần tử.",

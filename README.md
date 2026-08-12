@@ -34,13 +34,37 @@ Bước 1 hoặc chọn JSON thủ công.
   vẫn được phép chạy lại.
 - Mọi lần ghi BK đều dùng backup, working copy, kiểm tra lại và thay file
   nguyên tử; tác vụ chạy nền để không khóa giao diện.
-- Dòng thiếu container nhưng có B/L luôn có nút **Load số cont** để mở Custom
-  GPT bằng một BAT riêng, chờ JSON kết quả và áp dụng lại vào bảng.
-- Mỗi thời điểm chỉ có một lượt Load số cont. Nhấn nút ở dòng khác trong lúc
-  chờ chỉ hiện thông báo đang bận.
-- Trên dòng đang chờ, nút **Load số cont** đổi thành **Hủy Load**. Sau khi xác
-  nhận hủy, watcher dừng và phần mềm cho phép bắt đầu lượt mới; cửa sổ Custom
-  GPT đã mở không bị cưỡng chế đóng.
+- Dòng cước biển thiếu số cont có một hành động duy nhất **Đối soát số cont**.
+  Người dùng chọn tháng/năm, ứng dụng tự chọn sheet `TMM YY` và tìm cont bằng
+  **tên tàu + số chuyến**.
+- Cửa sổ đối soát hiển thị đồng thời danh sách HĐ, cont tìm được trong BK và
+  bảng kết quả dự kiến. HĐ có thể thêm, sửa, xóa và lưu trực tiếp; hồ sơ chưa
+  hoàn tất được giữ qua các lần khởi động mà không cần trung tâm chờ riêng.
+- Khi mở Trợ lý bóc tách trong hồ sơ, JSON mới tải về `Output` được tự kiểm tra.
+  Chỉ HĐ cước biển cùng tàu/chuyến được thêm vào hồ sơ; HĐ trùng bị bỏ qua và
+  các dòng khác vẫn nằm trong batch bóc tách mới.
+- Mỗi lần mở Trợ lý tạo một phiên riêng và chỉ cho phép một phiên hoạt động. Khi
+  JSON hợp lệ đã được tiếp nhận từ trang chủ, hoặc có ít nhất một HĐ phù hợp đã
+  được thêm vào hồ sơ đối soát, phần mềm yêu cầu extension đóng đúng cửa sổ GPT
+  của phiên đó. File lỗi hoặc file không có HĐ phù hợp không làm đóng cửa sổ.
+- Chỉ khi tổng số cont trên HĐ bằng số cont hợp lệ duy nhất trong BK, phần mềm
+  mới cho xác nhận. Tổng tiền của mọi HĐ được chia đều; phần lẻ dồn vào cont
+  cuối. Mọi dòng kết quả ghi chung danh sách số HĐ, B/L và bên vận tải.
+- Sau khi xác nhận đối soát, file bóc tách gốc vẫn là phiên làm việc hiện hành.
+  Dòng cước biển gốc vẫn giữ nguyên một dòng và có nút **Xem hồ sơ**; JSON cont
+  được lưu như batch con nội bộ trong `Output\_system\Ready`, không tự mở lên
+  màn hình kiểm tra và không xuất hiện như một file bóc tách độc lập trong Lịch sử.
+- Khi nhập khoản chi vào BK, ứng dụng tạo một gói dữ liệu duy nhất: giữ các khoản
+  bình thường của file gốc, bỏ dòng cước biển nguyên bản đã được hồ sơ quản lý và
+  ghép các dòng cont từ batch con hiện hành. Toàn bộ gói dùng chung một lần phân
+  tích, một backup và một lần thay file BK; nguồn batch/dòng vẫn được lưu riêng để
+  chống nhập trùng.
+- Hồ sơ đã hoàn tất hoặc đã ghi BK được phép **Đối soát lại**. Mỗi lần tạo một
+  phiên mới, giữ nguyên phiên và nhật ký cũ. Nếu BK đã có giá trị khác, mặc định
+  giữ nguyên và chỉ ghi đè khi người dùng chọn rõ trong màn hình xử lý xung đột.
+- Khi một hồ sơ bị hủy, các HĐ được giải phóng để có thể đối soát lại và tạo
+  kết quả mới. Hồ sơ, HĐ và nhật ký cũ vẫn được giữ trong SQLite để tra cứu;
+  batch kết quả của hồ sơ đã hủy được lưu trữ và không còn được phép ghi BK.
 
 ## Yêu cầu
 
@@ -104,22 +128,15 @@ PAD gọi sau khi web lưu thành công được mô tả tại
 Nút **Kiểm tra cấu hình** chỉ đọc workbook/bản sao tạm, không lưu thử vào file
 gốc. Định dạng Excel cũ `.xls` không được hỗ trợ.
 
-Để dùng **Load số cont**, chọn thêm **BAT Load số container** trong Cài đặt.
-Đây là đường dẫn riêng, không dùng chung với BAT **Mở Trợ lý ảo**. BAT phải
-thuộc một bundle launcher tương thích như BAT chính để ứng dụng cấu hình thư
-mục tải về là `Output`.
+Không còn BAT hoặc Custom GPT riêng để bóc số container. Khi cần bổ sung hóa
+đơn, nút trong hồ sơ **Đối soát số cont** mở lại **Trợ lý ảo chính**; JSON mới
+tiếp tục qua watcher và chỉ các HĐ đúng tàu/chuyến được nhập vào hồ sơ.
 
-Khi nhấn **Load số cont**, ứng dụng xóa các JSON container cũ nhận diện được
-bằng schema, ghi nhận trạng thái các file đang có, mở Custom GPT qua BAT và bắt
-đầu chờ. Người dùng tải PDF lên Custom GPT rồi tải file kết quả về. Tên file là
-tùy ý, chỉ cần có đuôi `.json`.
-
-Ứng dụng chỉ xét file mới hoặc file đã được cập nhật sau khi lượt Load bắt đầu.
-JSON không mang schema container được bỏ qua và phần mềm tiếp tục chờ, nhờ đó
-không xử lý nhầm file dữ liệu khoản chi đang có trong `Output`.
-
-Ứng dụng không sửa file BAT, PowerShell, extension hay file ZIP. Chỉ Chrome
-`Preferences` trong `RPA_ChatGPT_Profile\Default` được cập nhật để đặt:
+Bundle BAT/PowerShell và extension phối hợp với phần mềm bằng một mã phiên ngẫu
+nhiên qua kết nối nội bộ `127.0.0.1`. Phần mềm quyết định khi nào dữ liệu đã được
+tiếp nhận; extension dùng mã phiên để đóng đúng cửa sổ GPT, không tắt các cửa sổ
+Chrome khác. Chrome `Preferences` trong `RPA_ChatGPT_Profile\Default` vẫn được cập
+nhật để đặt:
 
 ```json
 {
@@ -135,51 +152,45 @@ Các khóa khác trong `Preferences` được giữ nguyên.
 
 ## Hợp đồng JSON
 
-Ứng dụng chỉ hỗ trợ một schema v1 duy nhất:
+Schema ghi công khai hiện tại là v2:
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "d": [
-    ["DRYU3026167", null, "VTN", "CV", "HD-130", "Vận tải ABC", 13554000]
+    {
+      "container": null,
+      "bl": "OOLU1234567890",
+      "vessel_voyage_raw": "PROSPER 2625S",
+      "vessel_name": "PROSPER",
+      "voyage_no": "2625S",
+      "invoice_container_count": 4,
+      "container_count_basis": "EXPLICIT",
+      "fee": "CB",
+      "rule": "HD",
+      "invoice_no": "INV-001",
+      "invoice_date": "2026-07-15",
+      "carrier": "HÃNG TÀU",
+      "amount": 32000000
+    }
   ]
 }
 ```
 
-Root chỉ có `v` và `d`. Mỗi dòng trong `d` có đúng bảy vị trí:
+Root chỉ có `v` và `d`; mỗi object v2 phải có đủ các khóa trên, dữ liệu thiếu
+dùng `null`. `voyage_no` luôn là chuỗi; `invoice_container_count` là số nguyên
+dương hoặc `null`; căn cứ nhận `EXPLICIT`, `CALCULATED`, `UNKNOWN`.
 
-```text
-[container, bl, fee, rule, invoice_no, carrier, amount]
-```
-
-Định dạng v1 cũ gồm năm vị trí và mọi định dạng sáu vị trí đều không được hỗ
-trợ.
+Schema v1 mảng 7 vị trí vẫn được đọc để tương thích. Sau khi user lưu/chỉnh sửa,
+phần mềm luôn serialize thành v2.
 
 Không dùng các root `metadata`, `du_lieu_boc_tach`, `canh_bao` hoặc
 `raw_data`.
 
-Kết quả riêng của **Load số cont** phải có đúng schema:
-
-```json
-{
-  "containers": ["VSGU2250713"]
-}
-```
-
-`containers` phải là mảng không rỗng. Ứng dụng chuẩn hóa, loại số trùng và kiểm
-tra ISO 6346. Khi file ổn định, popup tự mở để xem số container và khoản tiền
-được phân bổ:
-
-- Một container thay trực tiếp dòng gốc.
-- Nhiều container thay dòng gốc bằng nhiều dòng, giữ nguyên B/L, loại phí,
-  quy tắc, số HĐ và bên vận tải.
-- Khoản tiền nguyên không âm được chia bằng `divmod`; phần dư cộng lần lượt từ
-  dòng đầu nên tổng sau chia luôn bằng tổng ban đầu.
-- Nếu khoản tiền không hợp lệ, popup vẫn hiển thị nhưng nút **Xác nhận** bị
-  khóa.
-
-Sau khi xác nhận, dữ liệu chỉ được đánh dấu đã thay đổi; người dùng vẫn bấm
-**Lưu** theo quy trình hiện có.
+Khi đối soát, phần mềm tự đọc sheet BK theo tháng đã chọn, kiểm tra ISO 6346,
+bỏ trùng container và lưu snapshot. Số cont sai/trùng được báo bằng tiếng Việt.
+Trước khi xác nhận và trước khi ghi dữ liệu, BK được đọc lại; nếu workbook hoặc
+danh sách container đổi, hồ sơ bị khóa và yêu cầu người dùng kiểm tra lại.
 
 ## Vòng đời file Output
 
@@ -259,16 +270,11 @@ Kiểm tra tên file khớp `ket_qua_boc_tach*.json`, file đã tải xong và O
 trong Cài đặt đúng với thư mục đang được theo dõi. Các hậu tố `.crdownload`,
 `.part`, `.tmp` và `.download` được xem là file tạm.
 
-Với **Load số cont**, mọi tên file `.json` đều được chấp nhận. File không mang
-schema container được bỏ qua. Nếu đã có root `containers` nhưng dữ liệu bên
-trong sai hoặc số container sai ISO 6346, ứng dụng báo lỗi và tiếp tục chờ một
-file đã sửa trong chính lượt đang chạy.
-
 ### JSON sai schema
 
-File phải có đúng root `{v, d}`, `v` là integer `1` và mỗi dòng có đúng năm
-phần tử. Bước 2 sẽ hiển thị lỗi cấu trúc và khóa nút xem/sửa cho đến khi có file
-mới đọc được.
+File phải có đúng root `{v, d}` và tuân theo schema v2 object hoặc schema v1
+mảng 7 vị trí tương thích. Bước 2 hiển thị lỗi cấu trúc và khóa xem/sửa cho đến
+khi có file mới đọc được.
 
 ### Không có quyền ghi
 

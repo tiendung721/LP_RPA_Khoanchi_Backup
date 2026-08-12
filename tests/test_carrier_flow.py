@@ -92,6 +92,30 @@ def test_posting_routes_carriers_and_writes_hidden_detail(tmp_path: Path) -> Non
         workbook.close()
 
 
+def test_posting_row_picker_candidates_include_json_and_bk_carriers(
+    tmp_path: Path,
+) -> None:
+    bk = tmp_path / "bk.xlsx"
+    ready = tmp_path / "ready.json"
+    _posting_book(bk, hp_carrier="BK-HP", nam_carrier="BK-NAM")
+    _ready(ready, [[None, "BL-01", "CB", "CV", "HD-01", "JSON-VT", 500_000]])
+    service = ExpensePostingService(
+        _Provider(ready), bk_path=bk, backup_dir=tmp_path / "Backup"
+    )
+
+    plan = service.analyze(batch_id=1, sheet_name="T07 26")
+    conflict = next(
+        value
+        for value in plan.conflicts
+        if value.conflict_type is ConflictType.BL_ONLY_NO_CONTAINER
+    )
+
+    assert conflict.carrier == "JSON-VT"
+    assert [candidate.carrier for candidate in conflict.row_candidates] == [
+        "BK-HP / BK-NAM"
+    ]
+
+
 def test_posting_carrier_conflict_append_only_for_different_invoice(tmp_path: Path) -> None:
     bk = tmp_path / "bk.xlsx"
     ready = tmp_path / "ready.json"

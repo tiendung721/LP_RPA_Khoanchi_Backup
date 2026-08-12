@@ -101,6 +101,23 @@ class Database:
                 self._migration_9(connection)
                 connection.execute("PRAGMA user_version = 9")
                 current_version = 9
+            if current_version < 10:
+                self._migration_10(connection)
+                connection.execute("PRAGMA user_version = 10")
+                current_version = 10
+            if current_version < 11:
+                self._migration_11(connection)
+                connection.execute("PRAGMA user_version = 11")
+                current_version = 11
+            if current_version < 12:
+                self._migration_12(connection)
+                connection.execute("PRAGMA user_version = 12")
+                current_version = 12
+            if current_version < 13:
+                self._migration_13(connection)
+                connection.execute("PRAGMA user_version = 13")
+                current_version = 13
+            self._ensure_schema_13(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -372,6 +389,441 @@ class Database:
                     f"ALTER TABLE expense_posting_items ADD COLUMN {name} {column_type}"
                 )
 
+    @staticmethod
+    def _migration_10(connection: sqlite3.Connection) -> None:
+        """Nhóm đối soát cước biển theo tàu/chuyến và hóa đơn đóng góp."""
+
+        batch_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(batches)").fetchall()
+        }
+        # Một số bản thử nghiệm rất cũ có user_version nhưng thiếu bảng lõi.
+        # Tạo lại cấu trúc nền theo cách idempotent trước khi thêm metadata v10.
+        if not batch_columns:
+            Database._migration_1(connection)
+            Database._migration_2(connection)
+            batch_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(batches)").fetchall()
+            }
+        if "source_kind" not in batch_columns:
+            connection.execute(
+                "ALTER TABLE batches ADD COLUMN source_kind TEXT NOT NULL "
+                "DEFAULT 'ASSISTANT'"
+            )
+        if "reconciliation_group_id" not in batch_columns:
+            connection.execute(
+                "ALTER TABLE batches ADD COLUMN reconciliation_group_id INTEGER"
+            )
+
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS sea_freight_reconciliation_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bk_path TEXT NOT NULL,
+                bk_sheet TEXT NOT NULL,
+                vessel_voyage_raw TEXT NOT NULL,
+                vessel_key TEXT NOT NULL,
+                voyage_key TEXT NOT NULL,
+                combined_key TEXT NOT NULL,
+                bk_container_count INTEGER NOT NULL DEFAULT 0 CHECK (bk_container_count >= 0),
+                received_container_count INTEGER NOT NULL DEFAULT 0 CHECK (received_container_count >= 0),
+                total_amount INTEGER NOT NULL DEFAULT 0 CHECK (total_amount >= 0),
+                status TEXT NOT NULL CHECK (status IN (
+                    'PENDING','READY','OVER_COUNT','BK_NOT_FOUND',
+                    'METADATA_CONFLICT','NEEDS_RECHECK','ALLOCATED',
+                    'POSTED','CANCELLED'
+                )),
+                bk_fingerprint TEXT,
+                container_snapshot_hash TEXT,
+                output_carrier TEXT,
+                invoice_conflict_accepted INTEGER NOT NULL DEFAULT 0,
+                generated_batch_id INTEGER,
+                posted_run_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                posted_at TEXT,
+                FOREIGN KEY (generated_batch_id) REFERENCES batches(id) ON DELETE SET NULL,
+                FOREIGN KEY (posted_run_id) REFERENCES excel_runs(id) ON DELETE SET NULL
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_sea_freight_open_group
+            ON sea_freight_reconciliation_groups(
+                bk_path, bk_sheet, vessel_key, voyage_key
+            )
+            WHERE status NOT IN ('POSTED','CANCELLED')
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS sea_freight_invoice_contributions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                source_batch_id INTEGER,
+                source_item_index INTEGER NOT NULL CHECK (source_item_index >= 0),
+                source_sha256 TEXT NOT NULL,
+                invoice_no TEXT,
+                invoice_date TEXT,
+                bl TEXT,
+                vessel_voyage_raw TEXT NOT NULL,
+                vessel_name TEXT NOT NULL,
+                voyage_no TEXT NOT NULL,
+                invoice_container_count INTEGER NOT NULL CHECK (invoice_container_count > 0),
+                container_count_basis TEXT NOT NULL CHECK (
+                    container_count_basis IN ('EXPLICIT','CALCULATED')
+                ),
+                carrier TEXT,
+                amount INTEGER NOT NULL CHECK (amount >= 0),
+                fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('ACTIVE','REMOVED','DUPLICATE')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                removed_at TEXT,
+                FOREIGN KEY (group_id) REFERENCES sea_freight_reconciliation_groups(id) ON DELETE CASCADE,
+                FOREIGN KEY (source_batch_id) REFERENCES batches(id) ON DELETE SET NULL
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_sea_freight_contribution_fingerprint
+            ON sea_freight_invoice_contributions(fingerprint)
+            WHERE status != 'REMOVED'
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_sea_freight_contribution_group
+            ON sea_freight_invoice_contributions(group_id, status, id)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS sea_freight_group_containers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                container TEXT NOT NULL,
+                source_sheet TEXT NOT NULL,
+                source_row INTEGER NOT NULL CHECK (source_row > 0),
+                source_sqt INTEGER,
+                departure_date TEXT,
+                allocation_order INTEGER NOT NULL CHECK (allocation_order >= 0),
+                FOREIGN KEY (group_id) REFERENCES sea_freight_reconciliation_groups(id) ON DELETE CASCADE,
+                UNIQUE(group_id, container)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS sea_freight_reconciliation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (group_id) REFERENCES sea_freight_reconciliation_groups(id) ON DELETE CASCADE
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_sea_freight_group_status
+            ON sea_freight_reconciliation_groups(status, updated_at DESC, id DESC)
+            """,
+        )
+        for statement in statements:
+            connection.execute(statement)
+
+    @staticmethod
+    def _ensure_schema_10(connection: sqlite3.Connection) -> None:
+        """Bổ sung cột v10 nhỏ theo cách idempotent cho các bản beta đã migrate."""
+
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(sea_freight_reconciliation_groups)"
+            ).fetchall()
+        }
+        if columns and "invoice_conflict_accepted" not in columns:
+            connection.execute(
+                "ALTER TABLE sea_freight_reconciliation_groups "
+                "ADD COLUMN invoice_conflict_accepted INTEGER NOT NULL DEFAULT 0"
+            )
+
+    @staticmethod
+    def _migration_11(connection: sqlite3.Connection) -> None:
+        """Bổ sung kỳ đối soát và nguồn HĐ cho cửa sổ đối soát thống nhất."""
+
+        Database._ensure_schema_10(connection)
+        group_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(sea_freight_reconciliation_groups)"
+            ).fetchall()
+        }
+        for name, definition in (
+            ("reconciliation_month", "INTEGER CHECK (reconciliation_month BETWEEN 1 AND 12)"),
+            ("reconciliation_year", "INTEGER CHECK (reconciliation_year BETWEEN 2000 AND 2999)"),
+            ("bk_issue", "TEXT"),
+            ("bk_invalid_container_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("bk_duplicate_container_count", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if name not in group_columns:
+                connection.execute(
+                    f"ALTER TABLE sea_freight_reconciliation_groups ADD COLUMN {name} {definition}"
+                )
+        contribution_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(sea_freight_invoice_contributions)"
+            ).fetchall()
+        }
+        if "source_kind" not in contribution_columns:
+            connection.execute(
+                "ALTER TABLE sea_freight_invoice_contributions "
+                "ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'INITIAL'"
+            )
+        connection.execute(
+            """
+            UPDATE sea_freight_reconciliation_groups
+            SET reconciliation_month = CAST(SUBSTR(TRIM(bk_sheet), 2, 2) AS INTEGER),
+                reconciliation_year = 2000 + CAST(SUBSTR(TRIM(bk_sheet), 5, 2) AS INTEGER)
+            WHERE reconciliation_month IS NULL
+              AND TRIM(bk_sheet) GLOB 'T[0-1][0-9] [0-9][0-9]'
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sea_freight_group_period "
+            "ON sea_freight_reconciliation_groups(reconciliation_year, reconciliation_month, updated_at DESC)"
+        )
+
+    @staticmethod
+    def _ensure_schema_11(connection: sqlite3.Connection) -> None:
+        """Tự sửa các database beta v11 bị tạo thiếu cột."""
+
+        Database._migration_11(connection)
+
+    @staticmethod
+    def _migration_12(connection: sqlite3.Connection) -> None:
+        """Giải phóng HĐ của hồ sơ đã hủy nhưng vẫn giữ nguyên lịch sử."""
+
+        Database._ensure_schema_11(connection)
+        connection.execute(
+            """
+            UPDATE sea_freight_invoice_contributions
+            SET status = 'REMOVED',
+                removed_at = COALESCE(
+                    removed_at,
+                    (SELECT g.updated_at
+                     FROM sea_freight_reconciliation_groups AS g
+                     WHERE g.id = sea_freight_invoice_contributions.group_id)
+                ),
+                updated_at = COALESCE(
+                    (SELECT g.updated_at
+                     FROM sea_freight_reconciliation_groups AS g
+                     WHERE g.id = sea_freight_invoice_contributions.group_id),
+                    updated_at
+                )
+            WHERE status = 'ACTIVE'
+              AND group_id IN (
+                  SELECT id FROM sea_freight_reconciliation_groups
+                  WHERE status = 'CANCELLED'
+              )
+            """
+        )
+        batch_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(batches)").fetchall()
+        }
+        if {"status", "reconciliation_group_id"}.issubset(batch_columns):
+            connection.execute(
+                """
+                UPDATE batches
+                SET status = 'ARCHIVED'
+                WHERE reconciliation_group_id IN (
+                    SELECT id FROM sea_freight_reconciliation_groups
+                    WHERE status = 'CANCELLED'
+                )
+                  AND status IN ('RECEIVED','REVIEWING','READY')
+                """
+            )
+
+    @staticmethod
+    def _ensure_schema_12(connection: sqlite3.Connection) -> None:
+        Database._migration_12(connection)
+
+    @staticmethod
+    def _migration_13(connection: sqlite3.Connection) -> None:
+        """Phiên đối soát bất biến và liên kết rõ với dòng file nguồn."""
+
+        Database._ensure_schema_12(connection)
+        group_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(sea_freight_reconciliation_groups)"
+            ).fetchall()
+        }
+        additions = (
+            ("revision_no", "INTEGER NOT NULL DEFAULT 1 CHECK (revision_no > 0)"),
+            ("supersedes_group_id", "INTEGER"),
+            ("is_current", "INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0,1))"),
+            ("primary_source_batch_id", "INTEGER"),
+            ("primary_source_item_index", "INTEGER"),
+        )
+        for name, definition in additions:
+            if name not in group_columns:
+                connection.execute(
+                    f"ALTER TABLE sea_freight_reconciliation_groups ADD COLUMN {name} {definition}"
+                )
+
+        revision_rows = connection.execute(
+            """
+            SELECT id, bk_path, bk_sheet, vessel_key, voyage_key
+            FROM sea_freight_reconciliation_groups
+            ORDER BY bk_path, bk_sheet, vessel_key, voyage_key, id
+            """
+        ).fetchall()
+        previous_key: tuple[str, str, str, str] | None = None
+        previous_id: int | None = None
+        revision_no = 0
+        for row in revision_rows:
+            key = (str(row[1]), str(row[2]), str(row[3]), str(row[4]))
+            if key != previous_key:
+                previous_key = key
+                previous_id = None
+                revision_no = 1
+            else:
+                revision_no += 1
+            connection.execute(
+                """
+                UPDATE sea_freight_reconciliation_groups
+                SET revision_no = ?, supersedes_group_id = ?
+                WHERE id = ?
+                """,
+                (revision_no, previous_id, int(row[0])),
+            )
+            previous_id = int(row[0])
+
+        # Hồ sơ mới nhất chưa hủy của cùng tàu/chuyến là phiên hiện hành.
+        connection.execute(
+            "UPDATE sea_freight_reconciliation_groups SET is_current = 0"
+        )
+        connection.execute(
+            """
+            UPDATE sea_freight_reconciliation_groups AS current
+            SET is_current = 1
+            WHERE current.id = (
+                SELECT candidate.id
+                FROM sea_freight_reconciliation_groups AS candidate
+                WHERE candidate.bk_path = current.bk_path
+                  AND candidate.bk_sheet = current.bk_sheet
+                  AND candidate.vessel_key = current.vessel_key
+                  AND candidate.voyage_key = current.voyage_key
+                  AND candidate.status != 'CANCELLED'
+                ORDER BY candidate.id DESC
+                LIMIT 1
+            )
+            """
+        )
+        connection.execute(
+            """
+            UPDATE sea_freight_reconciliation_groups
+            SET primary_source_batch_id = (
+                    SELECT c.source_batch_id
+                    FROM sea_freight_invoice_contributions AS c
+                    WHERE c.group_id = sea_freight_reconciliation_groups.id
+                      AND c.source_batch_id IS NOT NULL
+                    ORDER BY CASE c.source_kind WHEN 'INITIAL' THEN 0 ELSE 1 END, c.id
+                    LIMIT 1
+                ),
+                primary_source_item_index = (
+                    SELECT c.source_item_index
+                    FROM sea_freight_invoice_contributions AS c
+                    WHERE c.group_id = sea_freight_reconciliation_groups.id
+                      AND c.source_batch_id IS NOT NULL
+                    ORDER BY CASE c.source_kind WHEN 'INITIAL' THEN 0 ELSE 1 END, c.id
+                    LIMIT 1
+                )
+            WHERE primary_source_batch_id IS NULL
+            """
+        )
+
+        # Phiên mới được phép giữ cùng fingerprint HĐ; chống trùng trong từng hồ sơ.
+        connection.execute("DROP INDEX IF EXISTS ux_sea_freight_contribution_fingerprint")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_sea_freight_group_contribution_fingerprint
+            ON sea_freight_invoice_contributions(group_id, fingerprint)
+            WHERE status != 'REMOVED'
+            """
+        )
+        connection.execute("DROP INDEX IF EXISTS ux_sea_freight_open_group")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_sea_freight_current_open_group
+            ON sea_freight_reconciliation_groups(
+                bk_path, bk_sheet, vessel_key, voyage_key
+            )
+            WHERE is_current = 1 AND status != 'CANCELLED'
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sea_freight_source_owner
+            ON sea_freight_reconciliation_groups(
+                primary_source_batch_id, is_current, status, id
+            )
+            """
+        )
+        posting_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(expense_posting_items)"
+            ).fetchall()
+        }
+        if {"batch_id", "source_item_index", "status", "id"}.issubset(posting_columns):
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_expense_posting_origin
+                ON expense_posting_items(batch_id, source_item_index, status, id)
+                """
+            )
+
+        # Batch con không còn là file làm việc hiện hành và phiên cũ không được
+        # tự xuất hiện trong danh sách READY để ghi nhầm.
+        batch_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(batches)").fetchall()
+        }
+        if {"status", "reconciliation_group_id"}.issubset(batch_columns):
+            connection.execute(
+                """
+                UPDATE batches
+                SET status = 'ARCHIVED'
+                WHERE reconciliation_group_id IN (
+                    SELECT id FROM sea_freight_reconciliation_groups
+                    WHERE is_current = 0 OR status = 'CANCELLED'
+                )
+                  AND status IN ('RECEIVED','REVIEWING','READY','INVALID')
+                """
+            )
+            active_row = connection.execute(
+                "SELECT value FROM app_state WHERE key = 'active_batch_id'"
+            ).fetchone()
+            if active_row is not None and active_row[0] not in (None, ""):
+                try:
+                    active_batch_id = int(active_row[0])
+                except (TypeError, ValueError):
+                    active_batch_id = 0
+                owner = connection.execute(
+                    """
+                    SELECT g.primary_source_batch_id
+                    FROM batches AS b
+                    JOIN sea_freight_reconciliation_groups AS g
+                      ON g.id = b.reconciliation_group_id
+                    WHERE b.id = ?
+                    """,
+                    (active_batch_id,),
+                ).fetchone()
+                if owner is not None and owner[0] is not None:
+                    connection.execute(
+                        "UPDATE app_state SET value = ? WHERE key = 'active_batch_id'",
+                        (str(int(owner[0])),),
+                    )
+
+    @staticmethod
+    def _ensure_schema_13(connection: sqlite3.Connection) -> None:
+        Database._migration_13(connection)
+
     @contextmanager
     def transaction(
         self,
@@ -463,6 +915,21 @@ class Database:
                     (rebased, int(row["id"])),
                 )
                 changed_rows += 1
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sea_freight_reconciliation_groups'"
+            ).fetchone():
+                group_rows = connection.execute(
+                    "SELECT id, bk_path FROM sea_freight_reconciliation_groups"
+                ).fetchall()
+                for row in group_rows:
+                    rebased = _rebased_path_text(row["bk_path"], old, new)
+                    if rebased == row["bk_path"]:
+                        continue
+                    connection.execute(
+                        "UPDATE sea_freight_reconciliation_groups SET bk_path = ? WHERE id = ?",
+                        (rebased, int(row["id"])),
+                    )
+                    changed_rows += 1
         return changed_rows
 
     def close(self) -> None:

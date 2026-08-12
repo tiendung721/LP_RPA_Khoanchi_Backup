@@ -42,6 +42,8 @@ class ReviewedBatchProvider:
 
     def get_latest_ready_json_path(self) -> Path | None:
         for metadata in self.repository.list_ready_batches():
+            if metadata.source_kind == "SEA_FREIGHT_RECONCILIATION":
+                continue
             path = self._usable_path(metadata)
             if path is not None:
                 return path
@@ -57,7 +59,8 @@ class ReviewedBatchProvider:
         return [
             metadata
             for metadata in self.repository.list_ready_batches()
-            if self._usable_path(metadata) is not None
+            if metadata.source_kind != "SEA_FREIGHT_RECONCILIATION"
+            and self._usable_path(metadata) is not None
         ]
 
     def close(self) -> None:
@@ -65,7 +68,7 @@ class ReviewedBatchProvider:
             self.repository.database.close()
 
     def _usable_path(self, metadata: BatchMetadata) -> Path | None:
-        path = metadata.source_output_path
+        path = metadata.ready_path
         if path is None or not path.is_file():
             if path is not None:
                 LOGGER.warning(

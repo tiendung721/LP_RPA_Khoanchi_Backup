@@ -141,7 +141,6 @@ class AppSettings:
     daily_workbook_path: str = ""
     bk_workbook_path: str = ""
     payment_workbook_path: str = ""
-    container_gpt_bat_path: str = ""
     rpa_expense_bat_path: str = ""
 
     def __post_init__(self) -> None:
@@ -161,7 +160,6 @@ class AppSettings:
                 "payment_workbook_path",
                 "Đường dẫn file Thanh toán Nâng hạ/VS D/O",
             ),
-            ("container_gpt_bat_path", "Đường dẫn BAT Load số container"),
             ("rpa_expense_bat_path", "Đường dẫn BAT RPA nhập quyết toán"),
         )
         for attribute, label in optional_paths:
@@ -190,7 +188,6 @@ class AppSettings:
             "daily_workbook_path": self.daily_workbook_path,
             "bk_workbook_path": self.bk_workbook_path,
             "payment_workbook_path": self.payment_workbook_path,
-            "container_gpt_bat_path": self.container_gpt_bat_path,
             "rpa_expense_bat_path": self.rpa_expense_bat_path,
         }
 
@@ -209,7 +206,6 @@ class AppSettings:
             daily_workbook_path=value.get("daily_workbook_path", ""),
             bk_workbook_path=value.get("bk_workbook_path", ""),
             payment_workbook_path=value.get("payment_workbook_path", ""),
-            container_gpt_bat_path=value.get("container_gpt_bat_path", ""),
             rpa_expense_bat_path=value.get("rpa_expense_bat_path", ""),
         )
 

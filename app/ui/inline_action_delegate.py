@@ -1,4 +1,4 @@
-"""Delegate vẽ nút Load số container trực tiếp trong QTableView."""
+"""Delegate hiển thị một nút hành động trực tiếp trong bảng review."""
 
 from __future__ import annotations
 
@@ -18,14 +18,8 @@ from app.ui.review_table_model import ReviewTableModel
 class InlineActionDelegate(QStyledItemDelegate):
     clicked = Signal(object)
 
-    def paint(
-        self,
-        painter: QPainter,
-        option: QStyleOptionViewItem,
-        index: QModelIndex,
-    ) -> None:
-        visible = bool(index.data(ReviewTableModel.ACTION_VISIBLE_ROLE))
-        if not visible:
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        if not bool(index.data(ReviewTableModel.ACTION_VISIBLE_ROLE)):
             empty = QStyleOptionViewItem(option)
             self.initStyleOption(empty, index)
             empty.text = ""
@@ -35,9 +29,12 @@ class InlineActionDelegate(QStyledItemDelegate):
         self.initStyleOption(base, index)
         base.text = ""
         super().paint(painter, base, index)
-        button = self._button_option(option, index)
         style = option.widget.style() if option.widget is not None else QApplication.style()
-        style.drawControl(QStyle.ControlElement.CE_PushButton, button, painter)
+        style.drawControl(
+            QStyle.ControlElement.CE_PushButton,
+            self._button_option(option, index),
+            painter,
+        )
 
     def editorEvent(self, event, model, option, index) -> bool:  # noqa: N802
         if (
@@ -52,19 +49,13 @@ class InlineActionDelegate(QStyledItemDelegate):
         return False
 
     @classmethod
-    def _button_option(
-        cls,
-        option: QStyleOptionViewItem,
-        index: QModelIndex,
-    ) -> QStyleOptionButton:
+    def _button_option(cls, option: QStyleOptionViewItem, index: QModelIndex) -> QStyleOptionButton:
         button = QStyleOptionButton()
         button.rect = cls._button_rect(option.rect)
         button.text = str(index.data() or "")
         button.state = QStyle.StateFlag.State_Enabled
         if not bool(index.data(ReviewTableModel.ACTION_ENABLED_ROLE)):
             button.state &= ~QStyle.StateFlag.State_Enabled
-        if option.state & QStyle.StateFlag.State_MouseOver:
-            button.state |= QStyle.StateFlag.State_MouseOver
         return button
 
     @staticmethod

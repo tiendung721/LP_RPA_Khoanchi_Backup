@@ -30,12 +30,12 @@ class Severity(str, Enum):
 
 @dataclass(slots=True)
 class DataRow:
-    """Một dòng schema v1.
+    """Một dòng khoản chi dùng chung cho schema v1 và v2.
 
-    Thứ tự JSON chính thức là
-    ``[cont, bl, fee, rule, invoice_no, carrier, amount]``. Thuộc tính
-    ``amount`` vẫn đứng trước hai trường mới trong dataclass để các adapter
-    Python cũ dùng năm đối số vị trí không bị hiểu sai.
+    JSON chính thức là object schema v2. Mảng
+    ``[cont, bl, fee, rule, invoice_no, carrier, amount]`` chỉ còn là adapter
+    tương thích v1. Thuộc tính ``amount`` vẫn giữ vị trí cũ trong dataclass để
+    mã Python dùng năm đối số vị trí không bị hiểu sai.
     """
 
     FIELD_NAMES: ClassVar[tuple[str, ...]] = (
@@ -46,6 +46,12 @@ class DataRow:
         "amount",
         "invoice_no",
         "carrier",
+        "vessel_voyage_raw",
+        "vessel_name",
+        "voyage_no",
+        "invoice_container_count",
+        "container_count_basis",
+        "invoice_date",
     )
 
     cont: str | None
@@ -55,6 +61,12 @@ class DataRow:
     amount: int | None
     invoice_no: str | None = None
     carrier: str | None = None
+    vessel_voyage_raw: str | None = None
+    vessel_name: str | None = None
+    voyage_no: str | None = None
+    invoice_container_count: int | None = None
+    container_count_basis: str = "UNKNOWN"
+    invoice_date: str | None = None
 
     @classmethod
     def from_sequence(cls, value: Sequence[Any]) -> "DataRow":
@@ -71,6 +83,8 @@ class DataRow:
         )
 
     def to_list(self) -> list[Any]:
+        """Trả mảng v1 cho các adapter nội bộ cũ."""
+
         return [
             self.cont,
             self.bl,
@@ -80,6 +94,41 @@ class DataRow:
             self.carrier,
             self.amount,
         ]
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "DataRow":
+        return cls(
+            cont=value.get("container", value.get("cont")),
+            bl=value.get("bl"),
+            fee=value.get("fee"),
+            rule=value.get("rule"),
+            amount=value.get("amount"),
+            invoice_no=value.get("invoice_no"),
+            carrier=value.get("carrier"),
+            vessel_voyage_raw=value.get("vessel_voyage_raw"),
+            vessel_name=value.get("vessel_name"),
+            voyage_no=value.get("voyage_no"),
+            invoice_container_count=value.get("invoice_container_count"),
+            container_count_basis=value.get("container_count_basis", "UNKNOWN"),
+            invoice_date=value.get("invoice_date"),
+        )
+
+    def to_object(self) -> dict[str, Any]:
+        return {
+            "container": self.cont,
+            "bl": self.bl,
+            "vessel_voyage_raw": self.vessel_voyage_raw,
+            "vessel_name": self.vessel_name,
+            "voyage_no": self.voyage_no,
+            "invoice_container_count": self.invoice_container_count,
+            "container_count_basis": self.container_count_basis,
+            "fee": self.fee,
+            "rule": self.rule,
+            "invoice_no": self.invoice_no,
+            "invoice_date": self.invoice_date,
+            "carrier": self.carrier,
+            "amount": self.amount,
+        }
 
     def copy_with(self, **changes: Any) -> "DataRow":
         unknown = set(changes).difference(self.FIELD_NAMES)
@@ -133,7 +182,7 @@ class BatchDocument:
 
     def to_dict(self) -> dict[str, Any]:
         # Thứ tự chèn khóa là một phần của hợp đồng serialize: v trước d.
-        return {"v": self.v, "d": [row.to_list() for row in self.rows]}
+        return {"v": SCHEMA_VERSION, "d": [row.to_object() for row in self.rows]}
 
 
 # Tên ngắn thân thiện cho code tích hợp.
@@ -267,6 +316,8 @@ class BatchMetadata:
     error_count: int = 0
     total_amount: int = 0
     last_error: str | None = None
+    source_kind: str = "ASSISTANT"
+    reconciliation_group_id: int | None = None
 
     @property
     def batch_id(self) -> int:
@@ -355,4 +406,6 @@ def metadata_as_dict(metadata: BatchMetadata) -> Mapping[str, Any]:
         "error_count": metadata.error_count,
         "total_amount": metadata.total_amount,
         "last_error": metadata.last_error,
+        "source_kind": metadata.source_kind,
+        "reconciliation_group_id": metadata.reconciliation_group_id,
     }

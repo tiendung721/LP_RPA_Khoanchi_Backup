@@ -21,6 +21,12 @@ def _bundle(tmp_path: Path) -> tuple[Path, Path, Path]:
     profile_dir = root / "RPA_ChatGPT_Profile"
     launcher_dir.mkdir(parents=True)
     extension_dir.mkdir()
+    (extension_dir / "manifest.json").write_text(
+        json.dumps({"manifest_version": 3, "version": "2.2.0"}),
+        encoding="utf-8",
+    )
+    (extension_dir / "window-manager.js").write_text("", encoding="utf-8")
+    (extension_dir / "title-cleaner.js").write_text("", encoding="utf-8")
     bat = launcher_dir / "Mo_Tro_Ly_RPA.bat"
     bat.write_text("@echo off\r\n", encoding="utf-8")
     (launcher_dir / "open_chatgpt_app.ps1").write_text(
@@ -69,14 +75,20 @@ def test_launch_runs_bat_detached(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(launcher_module.QProcess, "startDetached", start_detached)
 
-    result = AssistantBatLauncher().launch(bat, output)
+    launcher = AssistantBatLauncher()
+    result = launcher.launch(bat, output)
 
     assert result.success
     assert result.process_id == 321
     assert calls[0][1][:3] == ["/d", "/s", "/c"]
     assert calls[0][1][3] == "call"
     assert calls[0][1][4] == str(bat.resolve())
+    assert len(calls[0][1][5]) >= 20
+    assert int(calls[0][1][6]) > 0
     assert calls[0][2] == str(bat.parent.resolve())
+    assert result.session_id == calls[0][1][5]
+    assert result.bridge_port == int(calls[0][1][6])
+    launcher.close()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Luồng BAT chỉ hỗ trợ Windows.")
@@ -88,6 +100,12 @@ def test_detached_command_really_executes_bat_with_spaces(
     extension_dir = root / "RPA_ChatGPT_Extension"
     launcher_dir.mkdir(parents=True)
     extension_dir.mkdir()
+    (extension_dir / "manifest.json").write_text(
+        json.dumps({"manifest_version": 3, "version": "2.2.0"}),
+        encoding="utf-8",
+    )
+    (extension_dir / "window-manager.js").write_text("", encoding="utf-8")
+    (extension_dir / "title-cleaner.js").write_text("", encoding="utf-8")
     marker = launcher_dir / "started.ok"
     bat = launcher_dir / "Mở Trợ Lý.bat"
     bat.write_text(
@@ -149,3 +167,15 @@ def test_explicit_empty_output_does_not_use_working_directory(
 
     with pytest.raises(AssistantLaunchError, match="Chưa cấu hình"):
         launcher.launch(bat, "")
+
+
+def test_old_extension_bundle_is_rejected(tmp_path: Path) -> None:
+    bat, _, root = _bundle(tmp_path)
+    manifest = root / "RPA_ChatGPT_Extension" / "manifest.json"
+    manifest.write_text(
+        json.dumps({"manifest_version": 3, "version": "2.1.0"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssistantLaunchError, match="2.2.0"):
+        AssistantBatLauncher().validate_configuration(bat, tmp_path / "Output")

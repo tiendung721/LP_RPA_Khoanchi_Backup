@@ -99,20 +99,6 @@ class SettingsPage(QWidget):
         output_widget.setLayout(output_row)
         form.addRow("Thư mục Output:", output_widget)
 
-        container_gpt_bat_row = QHBoxLayout()
-        self.container_gpt_bat_edit = QLineEdit()
-        self.container_gpt_bat_edit.setObjectName("containerGptBatEdit")
-        self.container_gpt_bat_edit.setPlaceholderText(
-            "Chọn BAT mở Custom GPT số container"
-        )
-        self.container_gpt_bat_edit.setClearButtonEnabled(True)
-        self.browse_container_gpt_bat_button = QPushButton("Chọn…")
-        container_gpt_bat_row.addWidget(self.container_gpt_bat_edit, 1)
-        container_gpt_bat_row.addWidget(self.browse_container_gpt_bat_button)
-        container_gpt_bat_widget = QWidget()
-        container_gpt_bat_widget.setLayout(container_gpt_bat_row)
-        form.addRow("BAT Load số container:", container_gpt_bat_widget)
-
         rpa_expense_bat_row = QHBoxLayout()
         self.rpa_expense_bat_edit = QLineEdit()
         self.rpa_expense_bat_edit.setObjectName("rpaExpenseBatEdit")
@@ -187,7 +173,6 @@ class SettingsPage(QWidget):
         for browse_button in (
             self.browse_bat_button,
             self.browse_output_button,
-            self.browse_container_gpt_bat_button,
             self.browse_rpa_expense_bat_button,
             self.browse_daily_workbook_button,
             self.browse_bk_workbook_button,
@@ -225,9 +210,6 @@ class SettingsPage(QWidget):
     def _connect_signals(self) -> None:
         self.browse_bat_button.clicked.connect(self._browse_bat)
         self.browse_output_button.clicked.connect(self._browse_output)
-        self.browse_container_gpt_bat_button.clicked.connect(
-            self._browse_container_gpt_bat
-        )
         self.browse_rpa_expense_bat_button.clicked.connect(
             self._browse_rpa_expense_bat
         )
@@ -249,7 +231,6 @@ class SettingsPage(QWidget):
         )
         self.bat_edit.textChanged.connect(self._validate_form)
         self.output_edit.textChanged.connect(self._validate_form)
-        self.container_gpt_bat_edit.textChanged.connect(self._validate_form)
         self.rpa_expense_bat_edit.textChanged.connect(self._validate_form)
         self.daily_workbook_edit.textChanged.connect(self._validate_form)
         self.bk_workbook_edit.textChanged.connect(self._validate_form)
@@ -267,9 +248,6 @@ class SettingsPage(QWidget):
         self.payment_workbook_edit.setText(
             str(_setting(settings, "payment_workbook_path") or "")
         )
-        self.container_gpt_bat_edit.setText(
-            str(_setting(settings, "container_gpt_bat_path") or "")
-        )
         self.rpa_expense_bat_edit.setText(
             str(_setting(settings, "rpa_expense_bat_path") or "")
         )
@@ -282,7 +260,6 @@ class SettingsPage(QWidget):
             "daily_workbook_path": self.daily_workbook_edit.text().strip(),
             "bk_workbook_path": self.bk_workbook_edit.text().strip(),
             "payment_workbook_path": self.payment_workbook_edit.text().strip(),
-            "container_gpt_bat_path": self.container_gpt_bat_edit.text().strip(),
             "rpa_expense_bat_path": self.rpa_expense_bat_edit.text().strip(),
         }
 
@@ -300,14 +277,6 @@ class SettingsPage(QWidget):
             problems.append("Không tìm thấy file BAT đã chọn.")
         if not output_text:
             problems.append("Cần chọn thư mục Output.")
-        container_gpt_bat = self.container_gpt_bat_edit.text().strip()
-        if (
-            container_gpt_bat
-            and Path(container_gpt_bat).suffix.casefold() != ".bat"
-        ):
-            problems.append("BAT Load số container phải có đuôi .bat.")
-        elif container_gpt_bat and not Path(container_gpt_bat).is_file():
-            problems.append("Không tìm thấy BAT Load số container.")
         rpa_expense_bat = self.rpa_expense_bat_edit.text().strip()
         if (
             rpa_expense_bat
@@ -387,16 +356,6 @@ class SettingsPage(QWidget):
         )
         if directory:
             self.output_edit.setText(directory)
-
-    def _browse_container_gpt_bat(self) -> None:
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Chọn BAT mở Custom GPT số container",
-            self.container_gpt_bat_edit.text().strip(),
-            "Batch Windows (*.bat)",
-        )
-        if filename:
-            self.container_gpt_bat_edit.setText(filename)
 
     def _browse_rpa_expense_bat(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(

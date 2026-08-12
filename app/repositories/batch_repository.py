@@ -29,6 +29,9 @@ _UPDATABLE_COLUMNS = frozenset(
         "total_amount",
         "last_error",
         "received_at",
+        "sha256",
+        "source_kind",
+        "reconciliation_group_id",
     }
 )
 
@@ -59,6 +62,8 @@ class BatchRepository:
         received_at: str | None = None,
         ready_path: str | Path | None = None,
         last_error: str | None = None,
+        source_kind: str = "ASSISTANT",
+        reconciliation_group_id: int | None = None,
     ) -> BatchMetadata:
         status_value = BatchStatus(status).value
         timestamp = received_at or local_now_iso()
@@ -68,8 +73,8 @@ class BatchRepository:
                 INSERT INTO batches (
                     source_filename, source_output_path, original_archive_path,
                     working_path, ready_path, sha256, status, received_at,
-                    last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_error, source_kind, reconciliation_group_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source_filename,
@@ -81,6 +86,8 @@ class BatchRepository:
                     status_value,
                     timestamp,
                     last_error,
+                    source_kind,
+                    reconciliation_group_id,
                 ),
             )
             batch_id = int(cursor.lastrowid)
@@ -363,4 +370,10 @@ class BatchRepository:
             error_count=int(row["error_count"]),
             total_amount=int(row["total_amount"]),
             last_error=row["last_error"],
+            source_kind=str(row["source_kind"]),
+            reconciliation_group_id=(
+                int(row["reconciliation_group_id"])
+                if row["reconciliation_group_id"] is not None
+                else None
+            ),
         )
