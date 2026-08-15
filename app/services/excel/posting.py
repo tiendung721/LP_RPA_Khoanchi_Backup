@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
+import unicodedata
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
@@ -20,6 +22,7 @@ from app.services.validation_service import normalize_bl, normalize_container
 from .headers import HeaderResolution, HeaderResolutionError, HeaderResolver, normalize_header
 from .carrier import (
     BK_CARRIER_HEADER_ALIASES,
+    DAILY_MANAGED_CARRIER_GROUPS,
     carrier_group_for_fee,
     carrier_key,
     carrier_text,
@@ -72,7 +75,8 @@ BASE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "vessel": ("Tên tàu", "Tàu"),
     "recipient": ("Người nhận", "Khách hàng"),
     "notes": ("Ghi chú", "Ghi Chú"),
-    "carrier_hp": BK_CARRIER_HEADER_ALIASES["HP"],
+    "carrier_sea": BK_CARRIER_HEADER_ALIASES["SEA"],
+    "carrier_road": BK_CARRIER_HEADER_ALIASES["ROAD"],
     "carrier_nam": BK_CARRIER_HEADER_ALIASES["NAM"],
 }
 
@@ -89,6 +93,8 @@ FEE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "QT": ("Quá tải",),
     "LL": ("LÀM LỆNH",),
     "SC": ("SỬA CHỮA",),
+    "VAT": ("THUẾ GTGT",),
+    "GH": ("GIA HẠN",),
 }
 
 INVOICE_HEADER_NAMES = frozenset(
@@ -260,6 +266,7 @@ class ExpensePostingService:
         document_rows = bundle["rows"]
         source_members = bundle["source_members"]
         reconciliation_members = bundle["reconciliation_members"]
+        source_kind = str(bundle.get("source_kind") or "ASSISTANT")
         already_posted = self._successful_bundle_indices(document_rows)
         repost_indices = set(repost_source_indices or ())
         invalid_reposts = repost_indices.difference(already_posted)
@@ -304,7 +311,16 @@ class ExpensePostingService:
                 selected = self._choose_sheet(sheet_name, candidates, groups, None)
                 items = self._items_from_groups(groups, repost_indices)
                 conflicts: list[PostingConflict] = []
-                if selected is not None:
+                if source_kind == "BANG_KE":
+                    self._ensure_bang_ke_columns(workbook)
+                    items, item_conflicts = self._analyze_bang_ke_items(
+                        workbook,
+                        items,
+                        batch_hash=batch_hash,
+                    )
+                    conflicts.extend(item_conflicts)
+                    selected = None
+                elif selected is not None:
                     sheet_items, item_conflicts = self._analyze_items(
                         workbook,
                         selected,
@@ -337,6 +353,10 @@ class ExpensePostingService:
                 original_source_count=int(bundle["original_source_count"]),
                 reconciliation_source_count=int(bundle["reconciliation_source_count"]),
                 confirmation_required=True,
+                source_kind=source_kind,
+                target_sheets={
+                    item.sheet_name for item in items if item.sheet_name is not None
+                },
             )
             status = (
                 ExcelRunStatus.WAITING_USER
@@ -377,6 +397,12 @@ class ExpensePostingService:
             raise ExpensePostingError(
                 "Lựa chọn sheet, dòng hoặc mã phí phải được phân tích lại bằng "
                 "ExpensePostingService.refine() trước khi apply."
+            )
+        if plan.source_kind == "BANG_KE":
+            return self._apply_bang_ke(
+                plan,
+                resolved,
+                progress_callback=progress_callback,
             )
         try:
             self._check_batch_resolution(plan, resolved)
@@ -688,6 +714,12 @@ class ExpensePostingService:
 
         resolved = resolution_map(resolutions)
         self._check_batch_resolution(plan, resolved)
+        if plan.source_kind == "BANG_KE":
+            return self._refine_bang_ke(
+                plan,
+                resolved,
+                progress_callback=progress_callback,
+            )
         selected_sheet = self._selected_sheet(plan, resolved)
         if selected_sheet is None:
             raise ExpensePostingError("Chưa chọn sheet tháng cần nhập khoản chi.")
@@ -910,7 +942,361 @@ class ExpensePostingService:
         )
         return refined
 
-    def _validate_json(self, raw: bytes) -> list[dict[str, Any]]:
+    @staticmethod
+    def _bang_ke_item_key(item: PostingItem) -> tuple[str, str]:
+        return (
+            item.container or "",
+            ExpensePostingService._vessel_voyage_key(
+                item.vessel_name,
+                item.voyage_no,
+                item.vessel_voyage_raw
+                if not (item.vessel_name or item.voyage_no)
+                else None,
+            ),
+        )
+
+    def _refine_bang_ke(
+        self,
+        plan: PostingPlan,
+        resolved: Mapping[str, Any],
+        *,
+        progress_callback: ProgressCallback = None,
+    ) -> PostingPlan:
+        self.gateway.assert_unchanged(
+            plan.target_path, plan.target_fingerprint, label="File BK"
+        )
+        self._assert_source_members_unchanged(plan)
+        items = copy.deepcopy(plan.items)
+        selected_by_key: dict[tuple[str, str], tuple[str, int]] = {}
+        for conflict in plan.conflicts:
+            value = resolved.get(conflict.conflict_id)
+            if value is None:
+                continue
+            action = self._action(value)
+            if action in {ResolutionAction.CANCEL, ResolutionAction.CANCEL_ALL}:
+                raise ExpensePostingError("Người dùng đã hủy nhập bảng kê.")
+            if conflict.item_index is None:
+                continue
+            item = items[conflict.item_index]
+            if action is ResolutionAction.SELECT_ROW:
+                selected_row = self._resolution_attr(value, "selected_row")
+                selected_sheet = self._resolution_attr(
+                    value, "selected_source_sheet"
+                ) or self._resolution_attr(value, "selected_sheet")
+                if selected_row is None or not selected_sheet:
+                    raise ExpensePostingError("Chưa chọn đủ sheet và dòng BK.")
+                valid = {
+                    (candidate.source_sheet, candidate.row)
+                    for candidate in conflict.row_candidates
+                }
+                choice = (str(selected_sheet), int(selected_row))
+                if choice not in valid:
+                    raise ExpensePostingError("Dòng BK được chọn không hợp lệ.")
+                selected_by_key[self._bang_ke_item_key(item)] = choice
+            elif action is ResolutionAction.SKIP:
+                item.action = ResolutionAction.SKIP
+                item.status = PostingItemStatus.USER_SKIPPED
+            elif action in {
+                ResolutionAction.ADD,
+                ResolutionAction.OVERWRITE,
+                ResolutionAction.KEEP_EXISTING,
+                ResolutionAction.KEEP_FORMULA,
+            }:
+                item.action = action
+                if action in {
+                    ResolutionAction.KEEP_EXISTING,
+                    ResolutionAction.KEEP_FORMULA,
+                }:
+                    item.status = PostingItemStatus.USER_SKIPPED
+
+        for item in items:
+            choice = selected_by_key.get(self._bang_ke_item_key(item))
+            if choice is not None:
+                item.selected_source_sheet, item.selected_source_row = choice
+                item.status = PostingItemStatus.PLANNED
+                item.action = None
+
+        _progress(progress_callback, "Đang kiểm tra lại các dòng BK đã chọn…")
+        workbook = self.gateway.load(plan.target_path, read_only=False)
+        try:
+            self._ensure_bang_ke_columns(workbook)
+            items, conflicts = self._analyze_bang_ke_items(
+                workbook, items, batch_hash=plan.batch_hash
+            )
+        finally:
+            workbook.close()
+        conflicts = [
+            conflict
+            for conflict in conflicts
+            if conflict.conflict_id not in resolved
+        ]
+        refined = PostingPlan(
+            batch_id=plan.batch_id,
+            batch_path=plan.batch_path,
+            batch_hash=plan.batch_hash,
+            target_path=plan.target_path,
+            target_fingerprint=plan.target_fingerprint,
+            items=items,
+            conflicts=conflicts,
+            sheet_candidates=plan.sheet_candidates,
+            selected_sheet=None,
+            source_item_count=plan.source_item_count,
+            already_posted_indices=plan.already_posted_indices,
+            previously_posted_items=plan.previously_posted_items,
+            repost_source_indices=plan.repost_source_indices,
+            repost_selection_done=plan.repost_selection_done,
+            run_id=plan.run_id,
+            source_members=plan.source_members,
+            reconciliation_members=plan.reconciliation_members,
+            original_source_count=plan.original_source_count,
+            reconciliation_source_count=plan.reconciliation_source_count,
+            confirmation_required=plan.confirmation_required,
+            confirmation_done=plan.confirmation_done,
+            source_kind="BANG_KE",
+            target_sheets={
+                item.sheet_name for item in items if item.sheet_name is not None
+            },
+        )
+        self._update_run(
+            plan.run_id,
+            status=(
+                ExcelRunStatus.WAITING_USER
+                if conflicts
+                else ExcelRunStatus.ANALYZING
+            ),
+            sheet_name=", ".join(sorted(refined.target_sheets)) or None,
+            conflict_count=len(conflicts),
+        )
+        return refined
+
+    def _apply_bang_ke(
+        self,
+        plan: PostingPlan,
+        resolved: Mapping[str, Any],
+        *,
+        progress_callback: ProgressCallback = None,
+    ) -> PostingResult:
+        self._check_batch_resolution(plan, resolved)
+        if plan.conflicts:
+            raise ExpensePostingError(
+                "Batch bảng kê vẫn còn xung đột; hãy xử lý và phân tích lại trước khi ghi."
+            )
+        self.gateway.assert_unchanged(
+            plan.target_path, plan.target_fingerprint, label="File BK"
+        )
+        self._assert_source_members_unchanged(plan)
+        actions: list[dict[str, Any]] = []
+        history: list[dict[str, Any]] = []
+        workbook = self.gateway.load(plan.target_path, read_only=False)
+        try:
+            self._ensure_bang_ke_columns(workbook)
+            for item in plan.items:
+                status = item.status
+                before = item.current_value
+                after = before
+                action = item.action or ResolutionAction.SKIP
+                amount_write = False
+                if status is PostingItemStatus.PLANNED:
+                    if item.sheet_name is None or item.target_row is None:
+                        status = PostingItemStatus.NOT_MATCHED
+                    elif item.target_column is None:
+                        status = PostingItemStatus.UNRESOLVED
+                    else:
+                        cell = workbook[item.sheet_name].cell(
+                            item.target_row, item.target_column
+                        )
+                        before = cell.value
+                        state = classify_target_cell(cell, item.amount)
+                        if item.amount < 0:
+                            if action is not ResolutionAction.ADD:
+                                raise ExpensePostingError(
+                                    "Khoản điều chỉnh giảm chưa được xác nhận bằng thao tác ADD."
+                                )
+                            if state.kind not in {
+                                TargetCellKind.NUMBER,
+                                TargetCellKind.ZERO,
+                                TargetCellKind.SAME_VALUE,
+                            }:
+                                raise ExpensePostingError(
+                                    f"Ô {item.sheet_name}!{cell.coordinate} không còn là số."
+                                )
+                            after = before + item.amount
+                            amount_write = True
+                            status = PostingItemStatus.POSTED
+                        elif state.kind is TargetCellKind.SAME_VALUE and not item.force_repost:
+                            action = ResolutionAction.KEEP_EXISTING
+                            status = PostingItemStatus.ALREADY_EXISTS
+                        elif state.kind in {TargetCellKind.EMPTY, TargetCellKind.ZERO} or (
+                            state.kind is TargetCellKind.SAME_VALUE and item.force_repost
+                        ):
+                            action = ResolutionAction.OVERWRITE
+                            after = item.amount
+                            amount_write = True
+                            status = PostingItemStatus.POSTED
+                        elif action is ResolutionAction.OVERWRITE:
+                            after = item.amount
+                            amount_write = True
+                            status = PostingItemStatus.POSTED
+                        else:
+                            status = PostingItemStatus.USER_SKIPPED
+                record = self._action_record(
+                    item,
+                    item.selected_fee,
+                    item.target_row,
+                    item.target_column,
+                    before,
+                    after,
+                    action,
+                    status,
+                )
+                record.update(
+                    {
+                        "amount_write": amount_write,
+                        "invoice_write": False,
+                        "carrier_write": False,
+                    }
+                )
+                actions.append(record)
+                history.extend(self._history_rows(record, item))
+        finally:
+            workbook.close()
+
+        write_actions = [action for action in actions if action["amount_write"]]
+        working_path: Path | None = None
+        backup_path: Path | None = None
+        after_fingerprint = plan.target_fingerprint
+        replaced = False
+        self._update_run(plan.run_id, status=ExcelRunStatus.APPLYING)
+        try:
+            with self.lock_service.acquire(plan.target_path):
+                pass
+            self.gateway.assert_unchanged(
+                plan.target_path, plan.target_fingerprint, label="File BK"
+            )
+            working_path = self.backups.create_working_copy(
+                plan.target_path, run_id=plan.run_id
+            )
+            write_book = self.gateway.load(working_path, read_only=False)
+            update_meta: dict[str, tuple[int, datetime]] = {}
+            try:
+                self._ensure_bang_ke_columns(write_book)
+                grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+                for action in write_actions:
+                    grouped[str(action["sheet_name"])].append(action)
+                for sheet_name, sheet_actions in grouped.items():
+                    worksheet = write_book[sheet_name]
+                    base = self._resolve_base_headers(worksheet)
+                    fee_columns = self._resolve_fee_columns(worksheet, base)
+                    update_column = self._ensure_update_column(worksheet)
+                    timestamp = self.clock().replace(tzinfo=None, microsecond=0)
+                    update_meta[sheet_name] = (update_column, timestamp)
+                    updated_rows: set[int] = set()
+                    for action in sheet_actions:
+                        fee = str(action["fee_selected"])
+                        column = int(action["target_column"])
+                        if fee_columns.get(fee) != column:
+                            raise ExpensePostingError(
+                                f"Cột phí {fee} trên {sheet_name} không còn khớp header."
+                            )
+                        row = int(action["target_row"])
+                        worksheet.cell(row, column).value = action["value_after"]
+                        updated_rows.add(row)
+                    for row in updated_rows:
+                        cell = worksheet.cell(row, update_column)
+                        cell.value = timestamp
+                        cell.number_format = UPDATE_NUMBER_FORMAT
+                self.gateway.save(write_book, working_path)
+            finally:
+                write_book.close()
+
+            for sheet_name, sheet_actions in grouped.items():
+                update_column, timestamp = update_meta[sheet_name]
+                self._verify_posting(
+                    working_path,
+                    sheet_name,
+                    sheet_actions,
+                    update_column=update_column,
+                    update_timestamp=timestamp,
+                )
+            backup_path = self.backups.create_backup(plan.target_path)
+            after_fingerprint = self.gateway.atomic_replace(
+                working_path,
+                plan.target_path,
+                expected=plan.target_fingerprint,
+            )
+            working_path = None
+            replaced = True
+            self._record_history(plan, history)
+            posted = sum(len(action["source_indices"]) for action in write_actions)
+            skipped = sum(
+                len(action["source_indices"])
+                for action in actions
+                if action["status"]
+                in {
+                    PostingItemStatus.USER_SKIPPED,
+                    PostingItemStatus.NOT_MATCHED,
+                    PostingItemStatus.UNRESOLVED,
+                }
+            )
+            already = sum(
+                len(action["source_indices"])
+                for action in actions
+                if action["status"] is PostingItemStatus.ALREADY_EXISTS
+            )
+            target_sheets = tuple(
+                sorted({str(action["sheet_name"]) for action in write_actions})
+            )
+            result = PostingResult(
+                status=(
+                    ExcelRunStatus.SUCCEEDED
+                    if write_actions
+                    else ExcelRunStatus.NO_CHANGES
+                ),
+                target_path=plan.target_path,
+                sheet_name=", ".join(target_sheets) or None,
+                target_sheets=target_sheets,
+                posted_source_items=posted,
+                written_cells=len(write_actions),
+                skipped_source_items=skipped,
+                already_existing_items=already,
+                conflict_count=0,
+                backup_path=backup_path,
+                fingerprint_before=plan.target_fingerprint,
+                fingerprint_after=after_fingerprint,
+                run_id=plan.run_id,
+                message=(
+                    f"Đã nhập {posted} khoản bảng kê vào {len(target_sheets)} sheet."
+                    if write_actions
+                    else "Không có khoản bảng kê cần ghi; cấu trúc cột đã được chuẩn hóa."
+                ),
+            )
+            self._finish_result(result)
+            return result
+        except Exception as exc:
+            if replaced and backup_path is not None:
+                try:
+                    rollback = self.backups.create_working_copy(
+                        backup_path, run_id=f"{plan.run_id}-rollback"
+                    )
+                    try:
+                        self.gateway.atomic_replace(
+                            rollback,
+                            plan.target_path,
+                            expected=after_fingerprint,
+                        )
+                    finally:
+                        rollback.unlink(missing_ok=True)
+                except Exception as rollback_error:
+                    exc.add_note(f"Khôi phục BK thất bại: {rollback_error}")
+            self._finish_failed(plan.run_id, exc)
+            raise
+        finally:
+            if working_path is not None and working_path.exists():
+                working_path.unlink()
+
+    def _validate_json(
+        self, raw: bytes, *, allow_negative: bool = False
+    ) -> list[dict[str, Any]]:
         try:
             document = JsonCodec().loads(raw)
         except JsonCodecError as exc:
@@ -942,10 +1328,13 @@ class ExpensePostingService:
                 not isinstance(rule, str) or rule.strip().upper() not in RULE_CODES
             ):
                 raise ExpensePostingError(f"Rule dòng {index + 1} không hợp lệ.")
-            if isinstance(amount, bool) or type(amount) is not int or amount < 0:
+            if (
+                isinstance(amount, bool)
+                or type(amount) is not int
+                or (amount < 0 and not allow_negative)
+            ):
                 raise ExpensePostingError(f"Số tiền dòng {index + 1} không hợp lệ.")
-            result.append(
-                {
+            payload = {
                     "source_item_index": index,
                     "container": normalize_container(container),
                     "bl": normalize_bl(bl),
@@ -954,8 +1343,16 @@ class ExpensePostingService:
                     "invoice_no": invoice_no,
                     "carrier": carrier,
                     "amount": amount,
-                }
-            )
+            }
+            if any((row.vessel_voyage_raw, row.vessel_name, row.voyage_no)):
+                payload.update(
+                    {
+                        "vessel_voyage_raw": row.vessel_voyage_raw,
+                        "vessel_name": row.vessel_name,
+                        "voyage_no": row.voyage_no,
+                    }
+                )
+            result.append(payload)
         return result
 
     def _posting_bundle(self, batch_id: int | None) -> dict[str, Any]:
@@ -970,7 +1367,6 @@ class ExpensePostingService:
         raw = batch_path.read_bytes()
         resolved_batch_id = batch_id or self._batch_id_for_path(batch_path)
         source_hash = hashlib.sha256(raw).hexdigest()
-        source_rows = self._validate_json(raw)
         repository = getattr(self.provider, "repository", None)
         metadata = (
             repository.get_by_id(resolved_batch_id)
@@ -978,6 +1374,9 @@ class ExpensePostingService:
             else None
         )
         source_kind = str(getattr(metadata, "source_kind", "ASSISTANT"))
+        source_rows = self._validate_json(
+            raw, allow_negative=source_kind == "BANG_KE"
+        )
         members: list[dict[str, Any]] = [
             {
                 "batch_id": resolved_batch_id,
@@ -1026,6 +1425,7 @@ class ExpensePostingService:
                 ),
                 "original_source_count": 0 if group_id is not None else len(rows),
                 "reconciliation_source_count": len(rows) if group_id is not None else 0,
+                "source_kind": source_kind,
             }
 
         managed = self.sea_freight_repository.groups_for_source_batch(
@@ -1131,6 +1531,7 @@ class ExpensePostingService:
             "reconciliation_members": reconciliation_members,
             "original_source_count": original_count,
             "reconciliation_source_count": len(combined) - original_count,
+            "source_kind": source_kind,
         }
 
     def _successful_bundle_indices(
@@ -1240,6 +1641,9 @@ class ExpensePostingService:
                 selected_fee=group[0]["fee"],
                 rule=group[0]["rule"],
                 amount=sum(row["amount"] for row in group),
+                vessel_voyage_raw=group[0].get("vessel_voyage_raw"),
+                vessel_name=group[0].get("vessel_name"),
+                voyage_no=group[0].get("voyage_no"),
                 source_items=[dict(row) for row in group],
                 invoice_candidates=_unique_invoice_values(
                     [row.get("invoice_no") for row in group]
@@ -1253,6 +1657,206 @@ class ExpensePostingService:
             )
             for group in groups
         ]
+
+    @staticmethod
+    def _vessel_voyage_key(*values: Any) -> str:
+        text = " ".join(str(value) for value in values if value not in (None, ""))
+        text = unicodedata.normalize("NFD", text.upper())
+        text = "".join(char for char in text if unicodedata.category(char) != "Mn")
+        text = re.sub(r"\b(?:VOYAGE|CHUYEN\s*SO|CHUYEN|VOY|V)\b", " ", text)
+        return " ".join(re.findall(r"[A-Z0-9]+", text))
+
+    def _ensure_bang_ke_columns(self, workbook: Any) -> set[str]:
+        """Chèn VAT/Gia hạn sau cặp Sửa chữa/HĐ trên mọi sheet tháng."""
+
+        from .bang_ke import BangKeColumnError, ensure_bang_ke_fee_columns
+
+        changed: set[str] = set()
+        for worksheet in workbook.worksheets:
+            if self.months.parse_target_sheet(worksheet.title) is None:
+                continue
+            base = self._resolve_base_headers(worksheet)
+            try:
+                if ensure_bang_ke_fee_columns(
+                    worksheet, header_row=base.row_end
+                ):
+                    changed.add(worksheet.title)
+            except BangKeColumnError as exc:
+                raise ExpensePostingError(str(exc)) from exc
+        calculation = getattr(workbook, "calculation", None)
+        if calculation is not None and changed:
+            calculation.fullCalcOnLoad = True
+            calculation.forceFullCalc = True
+            calculation.calcMode = "auto"
+        return changed
+
+    def _analyze_bang_ke_items(
+        self,
+        workbook: Any,
+        items: list[PostingItem],
+        *,
+        batch_hash: str,
+    ) -> tuple[list[PostingItem], list[PostingConflict]]:
+        sheets: dict[str, tuple[Any, HeaderResolution, dict[str, int]]] = {}
+        all_candidates: list[RowCandidate] = []
+        by_container: dict[str, list[RowCandidate]] = defaultdict(list)
+        for name in workbook.sheetnames:
+            if self.months.parse_target_sheet(name) is None:
+                continue
+            worksheet = workbook[name]
+            base = self._resolve_base_headers(worksheet)
+            fee_columns = self._resolve_fee_columns(worksheet, base)
+            sheets[name] = (worksheet, base, fee_columns)
+            candidates = [
+                candidate
+                for values in self._container_index(worksheet, base).values()
+                for candidate in values
+            ]
+            all_candidates.extend(candidates)
+            for candidate in candidates:
+                if candidate.container:
+                    by_container[candidate.container].append(candidate)
+
+        conflicts: list[PostingConflict] = []
+        for item_index, item in enumerate(items):
+            if item.status is not PostingItemStatus.PLANNED:
+                continue
+            item.target_row = item.target_column = None
+            item.target_cell = None
+            item.current_value = None
+            item.cell_state = None
+            source_key = self._vessel_voyage_key(
+                item.vessel_name,
+                item.voyage_no,
+                item.vessel_voyage_raw if not (item.vessel_name or item.voyage_no) else None,
+            )
+            candidates = list(by_container.get(item.container or "", ()))
+            item.row_candidates = candidates
+            selected: RowCandidate | None = None
+            if item.selected_source_row is not None:
+                selected = next(
+                    (
+                        candidate
+                        for candidate in all_candidates
+                        if candidate.row == item.selected_source_row
+                        and candidate.source_sheet == item.selected_source_sheet
+                    ),
+                    None,
+                )
+                if selected is None:
+                    raise ExpensePostingError("Dòng BK đã chọn không còn hợp lệ.")
+            elif candidates:
+                exact = [
+                    candidate
+                    for candidate in candidates
+                    if source_key
+                    and self._vessel_voyage_key(candidate.vessel) == source_key
+                ]
+                if len(exact) == 1:
+                    selected = exact[0]
+                elif len(candidates) == 1:
+                    item.row_candidates = candidates
+                    conflicts.append(
+                        self._item_conflict(
+                            batch_hash,
+                            item_index,
+                            item,
+                            ConflictType.PARTIAL_KEY_MATCH,
+                            "Container chỉ có một dòng nhưng tàu/chuyến trống hoặc khác; hãy xác nhận dòng BK.",
+                            (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP, ResolutionAction.CANCEL_ALL),
+                            row_candidates=candidates,
+                            details={"source_vessel_voyage": source_key},
+                        )
+                    )
+                    continue
+                else:
+                    choices = exact if exact else candidates
+                    item.row_candidates = choices
+                    conflicts.append(
+                        self._item_conflict(
+                            batch_hash,
+                            item_index,
+                            item,
+                            ConflictType.MULTIPLE_CONTAINER_MATCH,
+                            f"Container {item.container} có nhiều dòng trong BK; hãy chọn đúng tàu/chuyến.",
+                            (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP, ResolutionAction.CANCEL_ALL),
+                            row_candidates=choices,
+                            details={"source_vessel_voyage": source_key},
+                        )
+                    )
+                    continue
+            else:
+                item.row_candidates = all_candidates
+                conflicts.append(
+                    self._item_conflict(
+                        batch_hash,
+                        item_index,
+                        item,
+                        ConflictType.CONTAINER_NOT_FOUND,
+                        f"Không tìm thấy container {item.container or 'trống'} trên toàn bộ BK.",
+                        (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP, ResolutionAction.CANCEL_ALL),
+                        row_candidates=all_candidates,
+                    )
+                )
+                continue
+
+            assert selected is not None
+            item.sheet_name = selected.source_sheet
+            item.selected_source_sheet = selected.source_sheet
+            item.selected_source_row = selected.row
+            item.target_row = selected.row
+            item.source_sqt = selected.sqt
+            worksheet, _base, fee_columns = sheets[selected.source_sheet]
+            item.target_column = fee_columns.get(item.selected_fee)
+            if item.target_column is None:
+                conflicts.append(
+                    self._item_conflict(
+                        batch_hash,
+                        item_index,
+                        item,
+                        ConflictType.FEE_COLUMN_MISSING,
+                        f"Không nhận diện được cột phí {item.selected_fee} trên {selected.source_sheet}.",
+                        (ResolutionAction.SKIP, ResolutionAction.CANCEL_ALL),
+                    )
+                )
+                continue
+            self._set_cell_state(worksheet, item)
+            if item.amount < 0:
+                state = item.cell_state.kind if item.cell_state else None
+                numeric = state in {TargetCellKind.NUMBER, TargetCellKind.ZERO, TargetCellKind.SAME_VALUE}
+                before = item.current_value
+                after = before + item.amount if numeric else None
+                conflicts.append(
+                    self._item_conflict(
+                        batch_hash,
+                        item_index,
+                        item,
+                        ConflictType.NEGATIVE_ADJUSTMENT,
+                        (
+                            f"Áp dụng điều chỉnh giảm: {before:,} + ({item.amount:,}) = {after:,}."
+                            + (" CẢNH BÁO: kết quả sau điều chỉnh bị âm." if after is not None and after < 0 else "")
+                            if numeric
+                            else "Ô đích không phải số; hãy chọn lại dòng hoặc bỏ qua khoản điều chỉnh giảm."
+                        ),
+                        (
+                            (ResolutionAction.ADD, ResolutionAction.SKIP, ResolutionAction.CANCEL_ALL)
+                            if numeric
+                            else (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP, ResolutionAction.CANCEL_ALL)
+                        ),
+                        row_candidates=item.row_candidates,
+                        details={
+                            "value_before": before,
+                            "adjustment": item.amount,
+                            "value_after": after,
+                            "negative_after": bool(after is not None and after < 0),
+                        },
+                    )
+                )
+            else:
+                conflict = self._cell_conflict(batch_hash, item_index, item)
+                if conflict is not None:
+                    conflicts.append(conflict)
+        return items, conflicts
 
     def _resolve_base_headers(self, worksheet: Any) -> HeaderResolution:
         return self.headers.resolve(
@@ -1289,7 +1893,7 @@ class ExpensePostingService:
             if len(matches) != 1:
                 continue
             column = matches[0]
-            if normalized[column] in INVOICE_HEADER_NAMES:
+            if fee != "VAT" and normalized[column] in INVOICE_HEADER_NAMES:
                 continue
             if (
                 fee == "CBDH"
@@ -1326,10 +1930,13 @@ class ExpensePostingService:
     @staticmethod
     def _resolve_carrier_columns(base: HeaderResolution) -> dict[str, int]:
         result: dict[str, int] = {}
-        hp = base.columns.get("carrier_hp")
+        sea = base.columns.get("carrier_sea")
+        road = base.columns.get("carrier_road")
         nam = base.columns.get("carrier_nam")
-        if hp is not None:
-            result["HP"] = hp
+        if sea is not None:
+            result["SEA"] = sea
+        if road is not None:
+            result["ROAD"] = road
         if nam is not None:
             result["NAM"] = nam
         return result
@@ -1405,7 +2012,7 @@ class ExpensePostingService:
             carrier = join_carriers(
                 *(
                     worksheet.cell(row, columns[field]).value
-                    for field in ("carrier_hp", "carrier_nam")
+                    for field in ("carrier_sea", "carrier_road", "carrier_nam")
                     if field in columns
                 )
             )
@@ -1995,6 +2602,20 @@ class ExpensePostingService:
                 "carrier_cell": cell.coordinate,
                 "carrier_current_value": cell.value,
             }
+            if group in DAILY_MANAGED_CARRIER_GROUPS:
+                # Carrier GPT của CB/CBDH/VTN đã bị bỏ khi tiếp nhận. Một giá
+                # trị còn xuất hiện ở đây vì thế là ngoại lệ user chủ động nhập.
+                # Có giá trị thì dùng, để trống thì giữ nguồn chuẩn Hàng ngày.
+                for index in indexes:
+                    items[index].carrier_action = (
+                        ResolutionAction.OVERWRITE
+                        if incoming
+                        else ResolutionAction.KEEP_EXISTING
+                    )
+                    items[index].carrier_value_after = (
+                        join_carriers(incoming) if incoming else cell.value
+                    )
+                continue
             if ambiguous:
                 ambiguous_candidates = unique_carriers(
                     carrier
@@ -2556,7 +3177,7 @@ class ExpensePostingService:
                 continue
             row = conflict.target_row
             group = conflict.details.get("carrier_group")
-            if row is not None and group in {"HP", "NAM"}:
+            if row is not None and group in {"SEA", "ROAD", "NAM"}:
                 carrier_conflicts[(int(row), str(group))] = conflict
 
         grouped: dict[tuple[int, str], list[int]] = defaultdict(list)
@@ -2636,7 +3257,13 @@ class ExpensePostingService:
             cell = worksheet.cell(row, column)
             before = cell.value
             if chosen is None:
-                if not split_carriers(before):
+                if group in DAILY_MANAGED_CARRIER_GROUPS:
+                    chosen = (
+                        ResolutionAction.OVERWRITE
+                        if incoming
+                        else ResolutionAction.KEEP_EXISTING
+                    )
+                elif not split_carriers(before):
                     chosen = ResolutionAction.OVERWRITE
                 elif all(
                     carrier_key(value) in {carrier_key(current) for current in split_carriers(before)}

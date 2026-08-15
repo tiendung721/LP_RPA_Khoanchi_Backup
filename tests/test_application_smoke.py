@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtWidgets import QAbstractButton, QLabel, QLineEdit
+from PySide6.QtWidgets import QAbstractButton, QLabel, QLineEdit, QMessageBox
 
 from app.application import ApplicationRuntime, configured_data_root
 from app.config import AppPaths, AppSettings, ConfigManager
@@ -114,6 +114,7 @@ def test_runtime_and_main_window_start_with_isolated_data_root(
         settings_edits = window.settings_page.findChildren(QLineEdit)
         assert {
             "assistantBatEdit",
+            "bangKeAssistantBatEdit",
             "outputDirEdit",
             "rpaExpenseBatEdit",
         }.issubset({edit.objectName() for edit in settings_edits})
@@ -123,6 +124,7 @@ def test_runtime_and_main_window_start_with_isolated_data_root(
             if not edit.objectName().startswith("qt_")
         } == {
             "assistantBatEdit",
+            "bangKeAssistantBatEdit",
             "outputDirEdit",
             "dailyWorkbookEdit",
             "bkWorkbookEdit",
@@ -232,6 +234,45 @@ def test_new_download_automatically_opens_review_window(
         runtime.close()
 
 
+def test_bang_ke_download_automatically_closes_assistant(
+    qtbot, tmp_path: Path
+) -> None:
+    runtime = _isolated_runtime(tmp_path)
+    window = MainWindow(controller=runtime, start_watcher=False)
+    assistant = _AssistantLauncher()
+    window._assistant_launcher = assistant
+    qtbot.addWidget(window)
+    source = runtime.paths.output_dir / "ket_qua_bang_ke.json"
+    source.write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "d": [["DRYU3026167", None, "VTN", "CV", None, None, 100]],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        window._launch_assistant(
+            SimpleNamespace(
+                bang_ke_assistant_bat_path="tool-bang-ke.bat",
+                output_dir=runtime.paths.output_dir,
+            ),
+            context="bang_ke",
+            bat_setting="bang_ke_assistant_bat_path",
+        )
+        result = runtime.batch_service.receive_file(source)
+        window._apply_receive_result(result, automatic=True)
+
+        assert assistant.launches[-1]["context"] == "bang_ke"
+        assert assistant.completed == ["test-session-00000000000000000001"]
+        assert window._assistant_sessions == []
+    finally:
+        window.close()
+        runtime.close()
+
+
 def test_new_download_is_added_to_open_reconciliation_without_closing_dialog(
     qtbot, tmp_path: Path
 ) -> None:
@@ -298,6 +339,78 @@ def test_new_download_is_added_to_open_reconciliation_without_closing_dialog(
         assert received.batch.id not in window._review_windows
         assert window._sea_freight_dialog.status_label.text().startswith("Đã nhận thêm 1 HĐ")
         assert assistant.completed == ["test-session-00000000000000000001"]
+    finally:
+        if window._sea_freight_dialog is not None:
+            window._sea_freight_dialog.close()
+        window.close()
+        runtime.close()
+
+
+def test_visible_reconciliation_cannot_switch_to_another_row(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _isolated_runtime(tmp_path)
+    runtime.sea_freight_service.matcher = _SeaMatcher(tmp_path / "BK.xlsx", 2)
+    window = MainWindow(controller=runtime, start_watcher=False)
+    qtbot.addWidget(window)
+    source = DataRow(
+        cont=None, bl="BL-1", fee="CB", rule="HD", amount=20_000_000,
+        invoice_no="INV-1", carrier="HÃNG A",
+        vessel_voyage_raw="PROSPER 2625S", vessel_name="PROSPER", voyage_no="2625S",
+        invoice_container_count=2, container_count_basis="EXPLICIT", invoice_date="2026-07-01",
+    )
+    first = runtime.sea_freight_service.open_or_create(
+        source,
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=None,
+        source_item_index=0,
+        source_sha256="source-1",
+    )
+    second = runtime.sea_freight_repository.upsert_snapshot(
+        BkContainerSnapshot(
+            bk_path=str((tmp_path / "BK.xlsx").resolve()),
+            bk_sheet="T07 26",
+            vessel_voyage_raw="NEW VISION 2613S",
+            vessel_key="NEWVISION",
+            voyage_key="2613S",
+            combined_key="NEWVISION2613S",
+            workbook_fingerprint="fp-2",
+            snapshot_hash="snapshot-2",
+            containers=(),
+        ),
+        month=7,
+        year=2026,
+    )
+    notices: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda _parent, _title, message, *_args, **_kwargs: notices.append(message),
+    )
+
+    try:
+        window.open_reconciliation(first.id)
+        dialog = window._sea_freight_dialog
+        assert dialog is not None and dialog.isVisible()
+
+        window.open_reconciliation(second.id)
+
+        assert window._sea_freight_dialog is dialog
+        assert dialog.group_id == first.id
+        assert dialog.group_value.text().startswith("PROSPER 2625S")
+        assert notices == [
+            "Hãy đóng hồ sơ hiện tại trước khi mở hồ sơ của dòng khác."
+        ]
+
+        dialog.close()
+        assert not dialog.isVisible()
+        window.open_reconciliation(second.id)
+
+        assert window._sea_freight_dialog is dialog
+        assert dialog.group_id == second.id
+        assert dialog.group_value.text().startswith("NEW VISION 2613S")
     finally:
         if window._sea_freight_dialog is not None:
             window._sea_freight_dialog.close()

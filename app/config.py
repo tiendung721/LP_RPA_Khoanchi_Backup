@@ -137,6 +137,7 @@ class AppPaths:
 class AppSettings:
     data_root: Path = field(default_factory=default_data_root)
     assistant_bat_path: str = ""
+    bang_ke_assistant_bat_path: str = ""
     output_dir: Path = field(default_factory=default_output_dir)
     daily_workbook_path: str = ""
     bk_workbook_path: str = ""
@@ -154,6 +155,7 @@ class AppSettings:
             raise ValueError("Thư mục Output không được để trống.")
         optional_paths = (
             ("assistant_bat_path", "Đường dẫn BAT"),
+            ("bang_ke_assistant_bat_path", "Đường dẫn BAT tool bảng kê"),
             ("daily_workbook_path", "Đường dẫn file Hàng ngày"),
             ("bk_workbook_path", "Đường dẫn file BK"),
             (
@@ -184,6 +186,7 @@ class AppSettings:
         return {
             "data_root": str(self.data_root),
             "assistant_bat_path": self.assistant_bat_path,
+            "bang_ke_assistant_bat_path": self.bang_ke_assistant_bat_path,
             "output_dir": str(self.output_dir),
             "daily_workbook_path": self.daily_workbook_path,
             "bk_workbook_path": self.bk_workbook_path,
@@ -202,6 +205,7 @@ class AppSettings:
         return cls(
             data_root=value.get("data_root", fallback.data_root),
             assistant_bat_path=value.get("assistant_bat_path", ""),
+            bang_ke_assistant_bat_path=value.get("bang_ke_assistant_bat_path", ""),
             output_dir=value.get("output_dir", fallback.output_dir),
             daily_workbook_path=value.get("daily_workbook_path", ""),
             bk_workbook_path=value.get("bk_workbook_path", ""),

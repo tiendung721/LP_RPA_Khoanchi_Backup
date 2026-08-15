@@ -11,6 +11,7 @@ def test_workflow_only_exposes_assistant_action_in_step_one(qtbot) -> None:
     qtbot.addWidget(page)
 
     assert page.open_assistant_button.text() == "Mở Trợ lý ảo"
+    assert page.open_bang_ke_assistant_button.text() == "Mở tool bảng kê"
     assert not hasattr(page, "open_inbox_button")
     assert not hasattr(page, "choose_file_button")
     assert not hasattr(page, "pending_card")

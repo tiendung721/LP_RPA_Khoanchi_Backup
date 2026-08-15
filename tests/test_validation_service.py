@@ -94,6 +94,24 @@ def test_amount_parser_rejects_ambiguous_or_invalid_values(value: object) -> Non
         parse_amount(value)  # type: ignore[arg-type]
 
 
+def test_bang_ke_validation_keeps_signed_adjustment() -> None:
+    row = DataRow("DRYU3045911", "VS26020793", "VSDL", "GV", -282_000)
+    validator = ValidationService()
+
+    regular = validator.validate_document(BatchDocument(rows=[row]))
+    bang_ke = validator.validate_document(
+        BatchDocument(rows=[row]), allow_negative=True
+    )
+
+    assert regular.has_errors
+    assert not bang_ke.has_errors
+    assert bang_ke.summary.total_amount == -282_000
+    assert any(
+        issue.code == "amount_negative_adjustment"
+        for issue in bang_ke.row_results[0].issues
+    )
+
+
 def test_duplicate_rows_remain_and_only_warn(
     validator: ValidationService,
 ) -> None:

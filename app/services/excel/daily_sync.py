@@ -963,6 +963,16 @@ class DailySyncService:
             source = template.cell(data_row, column)
             target = worksheet.cell(template_target_row, column)
             self._copy_cell(source, target, copy_value=False)
+        from .bang_ke import BangKeColumnError, ensure_bang_ke_fee_columns
+
+        try:
+            ensure_bang_ke_fee_columns(
+                worksheet,
+                header_row=header.row_end,
+                strict=False,
+            )
+        except BangKeColumnError as exc:
+            raise DailySyncError(str(exc)) from exc
         return worksheet
 
     @staticmethod

@@ -253,7 +253,7 @@ def coerce_review_row(value: Any) -> ReviewRow:
     raise TypeError(f"Không thể chuyển kiểu {type(value).__name__} thành dòng dữ liệu.")
 
 
-def validate_row(row: ReviewRow) -> RowValidation:
+def validate_row(row: ReviewRow, *, allow_negative: bool = False) -> RowValidation:
     """Kiểm tra các lỗi chặn/cảnh báo độc lập của một dòng."""
 
     errors: list[str] = []
@@ -300,8 +300,10 @@ def validate_row(row: ReviewRow) -> RowValidation:
     if row.amount is not None:
         if isinstance(row.amount, bool) or not isinstance(row.amount, int):
             errors.append("Số tiền phải là số nguyên hoặc null.")
-        elif row.amount < 0:
+        elif row.amount < 0 and not allow_negative:
             errors.append("Số tiền không được âm.")
+        elif row.amount < 0:
+            warnings.append("Khoản điều chỉnh giảm.")
 
     if row.rule == "HD" and row.fee != "CB":
         errors.append("Quy tắc HD chỉ được dùng cho cước biển (CB).")
@@ -326,8 +328,6 @@ def validate_row(row: ReviewRow) -> RowValidation:
     if row.fee == "CB" and row.bl is None:
         warnings.append("Cước biển chưa có số B/L.")
     if row.fee == "CB" and row.cont is None and row.bl is not None:
-        if not row.vessel_voyage_raw:
-            warnings.append("Thiếu tàu/chuyến nguyên văn để đối soát BK.")
         if not row.vessel_name or not row.voyage_no:
             warnings.append("Thiếu tên tàu hoặc số chuyến để đối soát BK.")
         if row.invoice_container_count is None:
@@ -345,23 +345,20 @@ class ReviewTableModel(QAbstractTableModel):
     COLUMN_NO = 0
     COLUMN_CONT = 1
     COLUMN_BL = 2
-    COLUMN_VESSEL_VOYAGE_RAW = 3
-    COLUMN_VESSEL_NAME = 4
-    COLUMN_VOYAGE_NO = 5
-    COLUMN_INVOICE_CONTAINER_COUNT = 6
-    COLUMN_CONTAINER_COUNT_BASIS = 7
-    COLUMN_FEE = 8
-    COLUMN_FEE_NAME = 9
-    COLUMN_RULE = 10
-    COLUMN_RULE_NAME = 11
-    COLUMN_INVOICE_NO = 12
-    COLUMN_INVOICE_DATE = 13
-    COLUMN_CARRIER = 14
-    COLUMN_AMOUNT = 15
-    COLUMN_STATUS = 16
-    COLUMN_MESSAGES = 17
-    COLUMN_LOOKUP_RESULT = 18
-    COLUMN_LOOKUP_ACTION = 19
+    COLUMN_VESSEL_VOYAGE = 3
+    COLUMN_INVOICE_CONTAINER_COUNT = 4
+    COLUMN_CONTAINER_COUNT_BASIS = 5
+    COLUMN_FEE = 6
+    COLUMN_FEE_NAME = 7
+    COLUMN_RULE = 8
+    COLUMN_RULE_NAME = 9
+    COLUMN_INVOICE_NO = 10
+    COLUMN_INVOICE_DATE = 11
+    COLUMN_CARRIER = 12
+    COLUMN_AMOUNT = 13
+    COLUMN_STATUS = 14
+    COLUMN_MESSAGES = 15
+    COLUMN_LOOKUP_ACTION = 16
 
     ACTION_VISIBLE_ROLE = int(Qt.ItemDataRole.UserRole) + 10
     ACTION_ENABLED_ROLE = int(Qt.ItemDataRole.UserRole) + 11
@@ -372,9 +369,7 @@ class ReviewTableModel(QAbstractTableModel):
         "STT",
         "Container",
         "B/L",
-        "Tàu/chuyến nguyên văn",
-        "Tên tàu",
-        "Số chuyến",
+        "Tàu/chuyến",
         "SL cont HĐ",
         "Căn cứ SL",
         "Mã cước",
@@ -387,8 +382,7 @@ class ReviewTableModel(QAbstractTableModel):
         "Số tiền cuối cùng (VND)",
         "Trạng thái",
         "Cảnh báo / lỗi",
-        "Trạng thái đối soát",
-        "Đối soát số cont",
+        "",
     )
 
     def __init__(
@@ -397,6 +391,7 @@ class ReviewTableModel(QAbstractTableModel):
         parent: Any = None,
         *,
         validator: Callable[[list[list[Any]]], Any] | Any | None = None,
+        allow_negative: bool = False,
     ) -> None:
         super().__init__(parent)
         self._rows: list[ReviewRow] = []
@@ -404,6 +399,7 @@ class ReviewTableModel(QAbstractTableModel):
         self._stats = ReviewStats(0, 0, 0, 0, 0, 0, 0, 0, {})
         self._dirty = False
         self._validator = validator
+        self._allow_negative = bool(allow_negative)
         self._lookup_presentations: dict[str, ContainerLoadPresentation] = {}
         if rows is not None:
             self.set_rows(rows, mark_dirty=False)
@@ -462,10 +458,12 @@ class ReviewTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return self._display_value(row, result, lookup, column, index.row())
         if role == Qt.ItemDataRole.ToolTipRole:
-            if column == self.COLUMN_LOOKUP_RESULT:
-                return lookup.message or "Chưa đối soát số cont."
             if column == self.COLUMN_LOOKUP_ACTION:
-                return "Mở hồ sơ đối soát số cont của tàu/chuyến này."
+                return (
+                    "Mở hồ sơ đối soát số cont của tàu/chuyến này."
+                    if lookup.session_id
+                    else "Đối soát số cont cho dòng cước biển này."
+                )
             messages = "\n".join(result.messages)
             return messages or "Dòng hợp lệ."
         if role == Qt.ItemDataRole.BackgroundRole:
@@ -504,9 +502,14 @@ class ReviewTableModel(QAbstractTableModel):
             source_row + 1,
             row.cont,
             row.bl,
-            row.vessel_voyage_raw,
-            row.vessel_name,
-            row.voyage_no,
+            " ".join(
+                part
+                for part in (
+                    str(row.vessel_name).strip() if isinstance(row.vessel_name, str) else "",
+                    str(row.voyage_no).strip() if isinstance(row.voyage_no, str) else "",
+                )
+                if part
+            ) or None,
             row.invoice_container_count,
             row.container_count_basis,
             row.fee,
@@ -522,7 +525,6 @@ class ReviewTableModel(QAbstractTableModel):
             result.status.value,
             "\n".join(result.messages),
             "",
-            "",
         )
         return values[column] if 0 <= column < len(values) else None
 
@@ -534,17 +536,13 @@ class ReviewTableModel(QAbstractTableModel):
         column: int,
         source_row: int,
     ) -> str | int:
-        if column == self.COLUMN_LOOKUP_RESULT:
-            return lookup.message or "Chưa đối soát"
         if column == self.COLUMN_LOOKUP_ACTION:
-            return "Xem hồ sơ" if lookup.session_id else "Đối soát số cont"
+            return "Xem hồ sơ" if lookup.session_id else "Đối soát"
         value = self._raw_value(row, result, column, source_row)
         if column in (
             self.COLUMN_CONT,
             self.COLUMN_BL,
-            self.COLUMN_VESSEL_VOYAGE_RAW,
-            self.COLUMN_VESSEL_NAME,
-            self.COLUMN_VOYAGE_NO,
+            self.COLUMN_VESSEL_VOYAGE,
             self.COLUMN_RULE,
             self.COLUMN_INVOICE_NO,
             self.COLUMN_INVOICE_DATE,
@@ -690,7 +688,7 @@ class ReviewTableModel(QAbstractTableModel):
             session_id=session_id,
         )
         self.dataChanged.emit(
-            self.index(source_row, self.COLUMN_LOOKUP_RESULT),
+            self.index(source_row, self.COLUMN_LOOKUP_ACTION),
             self.index(source_row, self.COLUMN_LOOKUP_ACTION),
         )
 
@@ -709,17 +707,6 @@ class ReviewTableModel(QAbstractTableModel):
         return (
             container_missing
             and row.fee == "CB"
-            and isinstance(row.vessel_voyage_raw, str)
-            and bool(row.vessel_voyage_raw.strip())
-            and isinstance(row.vessel_name, str)
-            and bool(row.vessel_name.strip())
-            and isinstance(row.voyage_no, str)
-            and bool(row.voyage_no.strip())
-            and type(row.invoice_container_count) is int
-            and row.invoice_container_count > 0
-            and row.container_count_basis in {"EXPLICIT", "CALCULATED"}
-            and type(row.amount) is int
-            and row.amount >= 0
         )
 
     def mark_clean(self) -> None:
@@ -736,6 +723,13 @@ class ReviewTableModel(QAbstractTableModel):
                 self.index(self.rowCount() - 1, self.columnCount() - 1),
             )
         return self._stats
+
+    def set_allow_negative(self, allow: bool) -> None:
+        value = bool(allow)
+        if self._allow_negative == value:
+            return
+        self._allow_negative = value
+        self.revalidate()
 
     def first_error_row(self) -> int | None:
         return next(
@@ -761,7 +755,10 @@ class ReviewTableModel(QAbstractTableModel):
         self.rowsChanged.emit()
 
     def _revalidate(self, *, emit_signal: bool) -> None:
-        results = [validate_row(row) for row in self._rows]
+        results = [
+            validate_row(row, allow_negative=self._allow_negative)
+            for row in self._rows
+        ]
         duplicate_keys = [
             tuple((key, repr(value)) for key, value in row.to_object().items())
             for row in self._rows
@@ -783,7 +780,7 @@ class ReviewTableModel(QAbstractTableModel):
         valid_amounts = [
             row.amount
             for row in self._rows
-            if isinstance(row.amount, int) and not isinstance(row.amount, bool) and row.amount >= 0
+            if isinstance(row.amount, int) and not isinstance(row.amount, bool)
         ]
         self._stats = ReviewStats(
             total=len(self._rows),
@@ -809,6 +806,11 @@ class ReviewTableModel(QAbstractTableModel):
                 method = getattr(self._validator, name, None)
                 if callable(method):
                     payload: Any = self.to_document() if name == "validate_document" else self.rows_as_arrays()
+                    if name == "validate_document" and self._allow_negative:
+                        try:
+                            return method(payload, allow_negative=True)
+                        except TypeError:
+                            pass
                     return method(payload)
         except Exception:
             # Validation nội bộ vẫn đảm bảo UI hoạt động; lỗi service sẽ được lớp điều
@@ -916,6 +918,9 @@ class ReviewFilterProxyModel(QSortFilterProxyModel):
             bl = model.index(source_row, ReviewTableModel.COLUMN_BL, source_parent).data(
                 Qt.ItemDataRole.UserRole
             )
+            vessel_voyage = model.index(
+                source_row, ReviewTableModel.COLUMN_VESSEL_VOYAGE, source_parent
+            ).data(Qt.ItemDataRole.UserRole)
             invoice_no = model.index(
                 source_row, ReviewTableModel.COLUMN_INVOICE_NO, source_parent
             ).data(Qt.ItemDataRole.UserRole)
@@ -923,7 +928,8 @@ class ReviewFilterProxyModel(QSortFilterProxyModel):
                 source_row, ReviewTableModel.COLUMN_CARRIER, source_parent
             ).data(Qt.ItemDataRole.UserRole)
             haystack = (
-                f"{cont or ''} {bl or ''} {invoice_no or ''} {carrier or ''}"
+                f"{cont or ''} {bl or ''} {vessel_voyage or ''} "
+                f"{invoice_no or ''} {carrier or ''}"
             ).casefold()
             if self._search_text not in haystack:
                 return False

@@ -26,6 +26,13 @@ class ContainerRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class VesselVoyageSuggestion:
+    vessel_voyage: str
+    container_count: int
+    score: float
+
+
+@dataclass(frozen=True, slots=True)
 class BkContainerSnapshot:
     bk_path: str
     bk_sheet: str

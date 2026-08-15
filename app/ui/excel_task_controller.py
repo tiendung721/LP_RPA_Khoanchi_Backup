@@ -76,12 +76,14 @@ class ExcelTaskController(QObject):
         daily_sync_service: Any | None = None,
         expense_posting_service: Any | None = None,
         payment_sync_service: Any | None = None,
+        draft_service: Any | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.daily_sync_service = daily_sync_service
         self.expense_posting_service = expense_posting_service
         self.payment_sync_service = payment_sync_service
+        self.draft_service = draft_service
         self._executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="excel-worker",
@@ -91,6 +93,9 @@ class ExcelTaskController(QObject):
         self._phase = "idle"
         self._future: Future[Any] | None = None
         self._waiting_plan: Any | None = None
+        self._draft_context_key: str | None = None
+        self._draft_saved_this_run = False
+        self._saved_resolution_info: dict[str, Any] = {}
         self._closed = False
 
     @classmethod
@@ -267,6 +272,7 @@ class ExcelTaskController(QObject):
         service = self._service_for(normalized)
         if service is None or not callable(getattr(service, "apply", None)):
             raise RuntimeError("Dịch vụ Excel không hỗ trợ áp dụng kế hoạch.")
+        self.save_draft(plan, resolutions, operation=normalized)
 
         with self._state_lock:
             active = self._active_operation
@@ -298,6 +304,67 @@ class ExcelTaskController(QObject):
     continue_with_resolutions = apply_plan
     apply = apply_plan
 
+    def saved_resolutions(
+        self,
+        plan: Any,
+        *,
+        operation: Any | None = None,
+    ) -> dict[str, Any]:
+        """Return compatible choices from the unfinished session, if any."""
+
+        if self.draft_service is None:
+            self._saved_resolution_info = {}
+            return {}
+        normalized = (
+            self.normalize_operation(operation)
+            if operation is not None
+            else self._operation_for_plan(plan)
+        )
+        restore_with_info = getattr(self.draft_service, "restore_with_info", None)
+        if callable(restore_with_info):
+            restored = restore_with_info(plan, normalized)
+            self._draft_context_key = str(restored.source_file_key)
+            self._saved_resolution_info = {
+                "found": bool(restored.found),
+                "status": restored.status,
+                "updated_at": restored.updated_at,
+                "current_conflict_count": restored.current_conflict_count,
+                "saved_choice_count": restored.saved_choice_count,
+                "restored_count": restored.restored_count,
+                "target_compatible": restored.target_compatible,
+                "last_error": restored.last_error,
+            }
+            return dict(restored.resolutions)
+        context_key, resolutions = self.draft_service.restore(plan, normalized)
+        self._draft_context_key = context_key
+        self._saved_resolution_info = {}
+        return dict(resolutions)
+
+    @property
+    def saved_resolution_info(self) -> dict[str, Any]:
+        return dict(self._saved_resolution_info)
+
+    def save_draft(
+        self,
+        plan: Any,
+        resolutions: Mapping[str, Any] | None,
+        *,
+        operation: Any | None = None,
+    ) -> None:
+        """Persist choices before refine/apply so failures do not discard them."""
+
+        if self.draft_service is None:
+            return
+        normalized = (
+            self.normalize_operation(operation)
+            if operation is not None
+            else self._operation_for_plan(plan)
+        )
+        self._draft_context_key = self.draft_service.save(
+            plan, normalized, resolutions
+        )
+        self._draft_saved_this_run = True
+
     def refine_plan(
         self,
         plan: Any,
@@ -313,6 +380,7 @@ class ExcelTaskController(QObject):
             else self._operation_for_plan(plan)
         )
         service = self._service_for(normalized)
+        self.save_draft(plan, resolutions, operation=normalized)
         refine = getattr(service, "refine", None)
         if not callable(refine):
             return self.apply_plan(
@@ -361,6 +429,8 @@ class ExcelTaskController(QObject):
             except Exception:
                 # Hủy UI không được làm controller mắc kẹt chỉ vì lưu audit lỗi.
                 pass
+        if self.draft_service is not None and self._draft_saved_this_run:
+            self.draft_service.mark_cancelled(self._draft_context_key)
         self._release(operation)
         self.finished.emit(operation)
         return True
@@ -460,11 +530,15 @@ class ExcelTaskController(QObject):
         self._finish_success(operation, result)
 
     def _finish_success(self, operation: str, result: Any) -> None:
+        if self.draft_service is not None and self._draft_saved_this_run:
+            self.draft_service.mark_completed(self._draft_context_key)
         self._release(operation)
         self.completed.emit(result)
         self.finished.emit(operation)
 
     def _finish_failure(self, operation: str, error: BaseException) -> None:
+        if self.draft_service is not None and self._draft_saved_this_run:
+            self.draft_service.mark_failed(self._draft_context_key, error)
         self._release(operation)
         self.failed.emit(error)
         self.finished.emit(operation)
@@ -479,6 +553,9 @@ class ExcelTaskController(QObject):
                 )
             self._active_operation = operation
             self._phase = phase
+            self._draft_context_key = None
+            self._draft_saved_this_run = False
+            self._saved_resolution_info = {}
 
     def _release(self, operation: str) -> None:
         with self._state_lock:
@@ -487,6 +564,8 @@ class ExcelTaskController(QObject):
                 self._phase = "idle"
                 self._future = None
                 self._waiting_plan = None
+                self._draft_context_key = None
+                self._draft_saved_this_run = False
 
     def _progress_callback(self, operation: str) -> Callable[..., None]:
         def report(*parts: Any) -> None:

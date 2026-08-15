@@ -26,6 +26,7 @@ from app.models import (
 )
 from app.repositories.batch_repository import BatchRepository, local_now_iso
 from app.schema import coerce_document, document_to_dict
+from app.services.carrier_policy import strip_received_gpt_carriers
 from app.services.file_stability import file_sha256, is_temporary_file
 from app.services.json_codec import JsonCodec, JsonCodecError
 from app.services.validation_service import ValidationService
@@ -231,6 +232,11 @@ class BatchService:
                 message="File hiện hành không thay đổi.",
             )
 
+        source_kind = (
+            "BANG_KE"
+            if source.name.casefold().startswith("ket_qua_boc_tach_bang_ke_")
+            else "ASSISTANT"
+        )
         received_at = local_now_iso()
         output_path = self._promote_output_file(source, received_at)
         duplicate = self.repository.get_by_sha256(sha256)
@@ -244,6 +250,7 @@ class BatchService:
                     sha256=sha256,
                     status=BatchStatus.RECEIVED,
                     received_at=received_at,
+                    source_kind=source_kind,
                 )
             else:
                 batch = self.repository.update_batch(
@@ -264,6 +271,7 @@ class BatchService:
                     error_count=0,
                     total_amount=0,
                     last_error=None,
+                    source_kind=source_kind,
                 )
         except sqlite3.IntegrityError:
             # Hai event có thể đồng thời vượt qua bước tra SHA-256.
@@ -283,6 +291,7 @@ class BatchService:
                 last_saved_at=None,
                 confirmed_at=None,
                 last_error=None,
+                source_kind=source_kind,
             )
 
         self._current_output_batch_id = batch.id
@@ -303,7 +312,9 @@ class BatchService:
                 message="File JSON không đọc được hoặc sai cấu trúc gốc.",
             )
 
-        validation = self.validation_service.validate_document(document)
+        document = self._prepare_received_gpt_document(output_path, document)
+
+        validation = self._validate_document(document, source_kind=source_kind)
         batch = self.repository.update_batch(
             batch.id,
             row_count=validation.summary.total_rows,
@@ -347,7 +358,13 @@ class BatchService:
             raise BatchDataError(
                 "Bản làm việc không còn là JSON có cấu trúc hợp lệ."
             ) from exc
-        validation = self.validation_service.validate_document(document)
+        if metadata.last_saved_at is None:
+            document = self._prepare_received_gpt_document(
+                metadata.working_path, document
+            )
+        validation = self._validate_document(
+            document, source_kind=metadata.source_kind
+        )
         new_status = (
             BatchStatus.REVIEWING
             if metadata.status in {BatchStatus.RECEIVED, BatchStatus.INVALID}
@@ -380,7 +397,9 @@ class BatchService:
         metadata = self._require_current_batch(batch_id)
         normalized = coerce_document(document)
         output_path, reloaded = self._write_current_document(metadata, normalized)
-        revalidation = self.validation_service.validate_document(reloaded)
+        revalidation = self._validate_document(
+            reloaded, source_kind=metadata.source_kind
+        )
         metadata = self.repository.mark_saved(
             batch_id,
             revalidation.summary,
@@ -416,7 +435,9 @@ class BatchService:
             if document is None
             else coerce_document(document)
         )
-        validation = self.validation_service.validate_document(document_to_save)
+        validation = self._validate_document(
+            document_to_save, source_kind=metadata.source_kind
+        )
         if validation.has_errors:
             raise BatchValidationError(
                 "Không thể xác nhận vì lô vẫn còn lỗi chặn.",
@@ -425,7 +446,9 @@ class BatchService:
         output_path, reloaded = self._write_current_document(
             metadata, document_to_save
         )
-        revalidation = self.validation_service.validate_document(reloaded)
+        revalidation = self._validate_document(
+            reloaded, source_kind=metadata.source_kind
+        )
         if revalidation.has_errors:
             raise BatchValidationError(
                 "Dữ liệu đọc lại vẫn còn lỗi chặn.",
@@ -743,6 +766,51 @@ class BatchService:
             raise BatchDataError("Không thể lưu dữ liệu JSON.") from exc
         self._notify_output_written(output_path)
         return output_path, reloaded
+
+    def _prepare_received_gpt_document(
+        self,
+        path: Path,
+        document: BatchDocument,
+    ) -> BatchDocument:
+        """Làm sạch carrier trùng nguồn trước lần review đầu tiên.
+
+        Chỉ dữ liệu vừa nhận từ GPT (chưa từng được user lưu) đi qua đây. Sau
+        khi user tự nhập carrier cho CB/CBDH/VTN, bản đã lưu sẽ được giữ nguyên.
+        """
+
+        prepared, stripped = strip_received_gpt_carriers(document)
+        if not stripped:
+            return document
+        try:
+            self.codec.dump_atomic(
+                path,
+                prepared,
+                create_backup=False,
+                validate=True,
+            )
+            reloaded = self.codec.load(path)
+        except (JsonCodecError, OSError) as exc:
+            LOGGER.exception("Không thể làm sạch carrier GPT trong %s", path)
+            raise BatchDataError(
+                "Không thể chuẩn hóa bên vận tải trước khi hiển thị."
+            ) from exc
+        LOGGER.info(
+            "Đã bỏ carrier GPT của %s dòng lấy bên vận tải từ file Hàng ngày.",
+            stripped,
+        )
+        self._notify_output_written(path)
+        return reloaded
+
+    def _validate_document(
+        self,
+        document: BatchDocument,
+        *,
+        source_kind: str,
+    ) -> ValidationResult:
+        return self.validation_service.validate_document(
+            document,
+            allow_negative=source_kind == "BANG_KE",
+        )
 
     def _timestamped_output_path(self, iso_value: str) -> Path:
         timestamp = self._filename_timestamp(iso_value)

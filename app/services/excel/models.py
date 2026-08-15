@@ -58,6 +58,7 @@ class ConflictType(str, Enum):
     FILE_CHANGED = "FILE_CHANGED"
     FILE_LOCKED = "FILE_LOCKED"
     PARTIAL_KEY_MATCH = "PARTIAL_KEY_MATCH"
+    NEGATIVE_ADJUSTMENT = "NEGATIVE_ADJUSTMENT"
     PAYMENT_SOURCE_INVALID = "PAYMENT_SOURCE_INVALID"
     PAYMENT_CLEAR_VALUE = "PAYMENT_CLEAR_VALUE"
     MULTIPLE_SOURCE_INVOICES = "MULTIPLE_SOURCE_INVOICES"
@@ -381,6 +382,9 @@ class PostingItem:
     selected_fee: str
     rule: str | None
     amount: int
+    vessel_voyage_raw: str | None = None
+    vessel_name: str | None = None
+    voyage_no: str | None = None
     sheet_name: str | None = None
     selected_source_sheet: str | None = None
     selected_source_row: int | None = None
@@ -506,6 +510,8 @@ class PostingPlan:
     reconciliation_source_count: int = 0
     confirmation_required: bool = False
     confirmation_done: bool = False
+    source_kind: str = "ASSISTANT"
+    target_sheets: set[str] = field(default_factory=set)
 
     @property
     def operation(self) -> ExcelOperation:
@@ -516,7 +522,7 @@ class PostingPlan:
         return (
             (self.confirmation_required and not self.confirmation_done)
             or
-            self.selected_sheet is None
+            (self.source_kind != "BANG_KE" and self.selected_sheet is None)
             or (
                 bool(self.previously_posted_items)
                 and not self.repost_selection_done
@@ -542,6 +548,7 @@ class PostingResult:
     status: ExcelRunStatus
     target_path: Path
     sheet_name: str | None = None
+    target_sheets: tuple[str, ...] = ()
     posted_source_items: int = 0
     written_cells: int = 0
     invoice_written_cells: int = 0

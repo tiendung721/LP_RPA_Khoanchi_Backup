@@ -90,6 +90,23 @@ def test_friendly_amount_parser_and_text_normalization() -> None:
     assert normalize_bl("  hbl /  2026-01  ") == "HBL / 2026-01"
 
 
+def test_bang_ke_review_allows_negative_and_uses_signed_total(qtbot) -> None:
+    row = ReviewRow("DRYU3045911", "VS26020793", "VSDL", "GV", -282_000)
+
+    regular = ReviewTableModel([row])
+    bang_ke = ReviewTableModel([row], allow_negative=True)
+
+    assert regular.stats.error == 1
+    assert bang_ke.stats.error == 0
+    assert bang_ke.stats.warning == 1
+    assert bang_ke.stats.total_amount == -282_000
+    assert any(
+        "Khoản điều chỉnh giảm" in warning
+        for warning in bang_ke.validation_at(0).warnings
+    )
+    assert parse_amount("-282.000", allow_negative=True) == -282_000
+
+
 def test_invalid_unhashable_values_remain_visible_and_editable(qtbot) -> None:
     model = ReviewTableModel(
         [
@@ -103,3 +120,34 @@ def test_invalid_unhashable_values_remain_visible_and_editable(qtbot) -> None:
         "{'raw': '13.554.000'}"
     )
     assert model.rowCount() == 2
+
+
+def test_compact_vessel_column_and_action_visibility(qtbot) -> None:
+    sea_missing = ReviewRow(
+        cont=None,
+        bl="BL-1",
+        fee="CB",
+        rule="HD",
+        amount=100,
+        vessel_name="NEW VISION",
+        voyage_no="2610S",
+    )
+    sea_with_container = ReviewRow(
+        cont="DRYU3026167",
+        fee="CB",
+        rule="HD",
+        amount=100,
+    )
+    model = ReviewTableModel([sea_missing, sea_with_container])
+
+    assert model.data(model.index(0, ReviewTableModel.COLUMN_VESSEL_VOYAGE)) == (
+        "NEW VISION 2610S"
+    )
+    assert model.data(
+        model.index(0, ReviewTableModel.COLUMN_LOOKUP_ACTION),
+        ReviewTableModel.ACTION_VISIBLE_ROLE,
+    )
+    assert not model.data(
+        model.index(1, ReviewTableModel.COLUMN_LOOKUP_ACTION),
+        ReviewTableModel.ACTION_VISIBLE_ROLE,
+    )

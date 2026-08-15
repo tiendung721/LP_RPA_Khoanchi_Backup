@@ -3,12 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialogButtonBox, QMessageBox
+from PySide6.QtWidgets import QDialogButtonBox, QLabel, QMessageBox
 
 from app.ui.edit_row_dialog import EditRowDialog
-from app.ui.review_window import ReviewWindow
+from app.ui.review_window import ReviewWindow, VesselVoyageNotFoundDialog
 from app.ui.review_table_model import ReviewRow, ReviewTableModel
 from app.ui.sea_freight_center import ReconciliationPeriodDialog
+from app.sea_freight.contracts import VesselVoyageSuggestion
+from app.sea_freight.service import VesselVoyageNotFoundError
 
 
 def _review_payload() -> dict[str, Any]:
@@ -152,12 +154,13 @@ def test_editing_row_updates_status_and_dirty_state(qtbot) -> None:
         window.close()
 
 
-def test_review_table_hides_only_the_four_redundant_columns(qtbot) -> None:
+def test_review_table_uses_compact_vessel_and_reconciliation_columns(qtbot) -> None:
     window = ReviewWindow(_review_payload())
     qtbot.addWidget(window)
 
     try:
         hidden_columns = {
+            ReviewTableModel.COLUMN_CONTAINER_COUNT_BASIS,
             ReviewTableModel.COLUMN_FEE,
             ReviewTableModel.COLUMN_RULE,
             ReviewTableModel.COLUMN_RULE_NAME,
@@ -177,8 +180,12 @@ def test_review_table_hides_only_the_four_redundant_columns(qtbot) -> None:
                 ReviewTableModel.COLUMN_LOOKUP_ACTION,
                 Qt.Orientation.Horizontal,
             )
-            == "Đối soát số cont"
+            == ""
         )
+        assert window.model.headerData(
+            ReviewTableModel.COLUMN_VESSEL_VOYAGE,
+            Qt.Orientation.Horizontal,
+        ) == "Tàu/chuyến"
     finally:
         window.close()
 
@@ -245,6 +252,75 @@ def test_edit_dialog_hides_rule_but_preserves_its_value(qtbot) -> None:
         )
     finally:
         dialog.close()
+
+
+def test_daily_sync_fee_keeps_carrier_editable_and_clears_stale_fee_carrier(
+    qtbot,
+) -> None:
+    dialog = EditRowDialog(
+        ReviewRow(
+            "DRYU3026167",
+            None,
+            "NH",
+            "CV",
+            13_554_000,
+            carrier="NHÀ CUNG CẤP HĐ PHÍ",
+        )
+    )
+    qtbot.addWidget(dialog)
+
+    dialog.fee_combo.setCurrentIndex(dialog.fee_combo.findData("VTN"))
+
+    assert dialog.carrier_edit.isEnabled()
+    assert dialog.carrier_edit.text() == ""
+    dialog.carrier_edit.setText("USER CHỌN")
+    assert dialog.row_data().carrier == "USER CHỌN"
+
+
+def test_edit_dialog_preserves_ai_raw_and_previews_effective_vessel_voyage(
+    qtbot,
+) -> None:
+    dialog = EditRowDialog(
+        ReviewRow(
+            cont=None,
+            bl="BL-1",
+            fee="CB",
+            rule="HD",
+            amount=100,
+            vessel_voyage_raw="NEW VISON 2610S",
+            vessel_name="NEW VISON",
+            voyage_no="2610S",
+            invoice_container_count=1,
+            container_count_basis="EXPLICIT",
+        )
+    )
+    qtbot.addWidget(dialog)
+
+    dialog.vessel_name_edit.setText("NEW VISION")
+
+    assert dialog.vessel_voyage_preview.text() == "NEW VISION 2610S"
+    assert dialog.row_data().vessel_voyage_raw == "NEW VISON 2610S"
+    assert dialog.row_data().vessel_name == "NEW VISION"
+    assert not hasattr(dialog, "vessel_voyage_raw_edit")
+
+
+def test_vessel_not_found_dialog_lists_read_only_suggestions(qtbot) -> None:
+    dialog = VesselVoyageNotFoundDialog(
+        VesselVoyageNotFoundError(
+            vessel_voyage="NEW VISON 2610S",
+            bk_sheet="T07 26",
+            suggestions=(
+                VesselVoyageSuggestion("NEW VISION 2610S", 2, 0.95),
+                VesselVoyageSuggestion("NEW VISION 2611N", 1, 0.80),
+            ),
+        )
+    )
+    qtbot.addWidget(dialog)
+
+    suggestion_text = dialog.findChild(QLabel, "vesselVoyageSuggestions")
+    assert suggestion_text is not None
+    assert "NEW VISION 2610S — 2 container" in suggestion_text.text()
+    assert dialog.edit_button.text() == "Sửa dòng"
 
 
 def test_add_dialog_keeps_rule_selector(qtbot) -> None:

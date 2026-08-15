@@ -196,6 +196,212 @@ def test_sync_analysis_always_shows_full_sheet_confirmation(
     assert "Thiếu SQT, được bỏ qua: 3 dòng" in captured["text"]
 
 
+def test_bang_ke_posting_skips_global_month_and_applies_multi_sheet_plan(
+    monkeypatch,
+) -> None:
+    plan = SimpleNamespace(
+        operation="posting",
+        source_kind="BANG_KE",
+        batch_id=42,
+        conflicts=[],
+        selected_sheet=None,
+        sheet_candidates=[
+            SimpleNamespace(target_sheet="T01 26"),
+            SimpleNamespace(target_sheet="T04 26"),
+        ],
+        target_sheets={"T04 26", "T01 26"},
+        previously_posted_items=[],
+        repost_selection_done=False,
+        confirmation_required=True,
+        confirmation_done=False,
+        original_source_count=5,
+        reconciliation_source_count=0,
+        items=[object(), object()],
+    )
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.apply_calls: list[Any] = []
+            self.cancel_calls = 0
+
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "posting"
+
+        @staticmethod
+        def start_posting(**_kwargs: Any) -> None:
+            raise AssertionError("BANG_KE không được phân tích lại theo một sheet chung.")
+
+        def apply_plan(
+            self,
+            value: Any,
+            resolutions: Any,
+            *,
+            operation: str,
+        ) -> None:
+            self.apply_calls.append((value, resolutions, operation))
+
+        def cancel_waiting(self) -> None:
+            self.cancel_calls += 1
+
+    class UnexpectedMonthDialog:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("BANG_KE không được hỏi một tháng chung.")
+
+    captured: dict[str, str] = {}
+
+    def question(
+        _parent: Any,
+        title: str,
+        text: str,
+        *_args: Any,
+    ) -> QMessageBox.StandardButton:
+        captured["title"] = title
+        captured["text"] = text
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(
+        main_window_module, "MonthSelectionDialog", UnexpectedMonthDialog
+    )
+    monkeypatch.setattr(QMessageBox, "question", question)
+    tasks = Tasks()
+    owner = SimpleNamespace(
+        _excel_tasks=tasks,
+        _excel_operation="posting",
+        _show_excel_error=lambda *_args, **_kwargs: None,
+    )
+
+    MainWindow._excel_analysis_ready(owner, plan)
+
+    assert tasks.apply_calls == [(plan, {}, "posting")]
+    assert tasks.cancel_calls == 0
+    assert plan.confirmation_done is True
+    assert captured["title"] == "Xác nhận nhập khoản chi"
+    assert "Sheet đích: T01 26, T04 26" in captured["text"]
+
+
+def test_regular_posting_still_reanalyzes_the_selected_month(monkeypatch) -> None:
+    candidates = [
+        SimpleNamespace(target_sheet="T06 26"),
+        SimpleNamespace(target_sheet="T07 26"),
+    ]
+    plan = SimpleNamespace(
+        operation="posting",
+        source_kind="ASSISTANT",
+        batch_id=7,
+        conflicts=[],
+        selected_sheet=None,
+        sheet_candidates=candidates,
+    )
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.start_calls: list[dict[str, Any]] = []
+            self.cancel_calls = 0
+
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "posting"
+
+        def start_posting(self, **kwargs: Any) -> None:
+            self.start_calls.append(kwargs)
+
+        def cancel_waiting(self) -> None:
+            self.cancel_calls += 1
+
+    class Dialog:
+        selected_sheet_name = "T07 26"
+
+        def __init__(
+            self,
+            dialog_candidates: list[Any],
+            _parent: Any,
+            **_kwargs: Any,
+        ) -> None:
+            assert dialog_candidates == candidates
+
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(main_window_module, "MonthSelectionDialog", Dialog)
+    tasks = Tasks()
+    owner = SimpleNamespace(
+        _excel_tasks=tasks,
+        _excel_context="workflow",
+        _excel_operation="posting",
+        _show_excel_error=lambda *_args, **_kwargs: None,
+    )
+
+    MainWindow._excel_analysis_ready(owner, plan)
+
+    assert tasks.cancel_calls == 1
+    assert tasks.start_calls == [{"batch_id": 7, "sheet_name": "T07 26"}]
+
+
+def test_bang_ke_repost_selection_reanalyzes_without_a_global_month(
+    monkeypatch,
+) -> None:
+    plan = SimpleNamespace(
+        operation="posting",
+        source_kind="BANG_KE",
+        batch_id=42,
+        conflicts=[],
+        selected_sheet=None,
+        sheet_candidates=[SimpleNamespace(target_sheet="T01 26")],
+        previously_posted_items=[SimpleNamespace(source_item_index=3)],
+        repost_selection_done=False,
+    )
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.start_calls: list[dict[str, Any]] = []
+            self.cancel_calls = 0
+
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "posting"
+
+        def start_posting(self, **kwargs: Any) -> None:
+            self.start_calls.append(kwargs)
+
+        def cancel_waiting(self) -> None:
+            self.cancel_calls += 1
+
+    class Dialog:
+        selected_source_indices = {3}
+
+        def __init__(self, items: list[Any], _parent: Any) -> None:
+            assert items == plan.previously_posted_items
+
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+    class UnexpectedMonthDialog:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("BANG_KE không được hỏi một tháng chung.")
+
+    monkeypatch.setattr(main_window_module, "RepostSelectionDialog", Dialog)
+    monkeypatch.setattr(
+        main_window_module, "MonthSelectionDialog", UnexpectedMonthDialog
+    )
+    tasks = Tasks()
+    owner = SimpleNamespace(
+        _excel_tasks=tasks,
+        _excel_context="workflow",
+        _excel_operation="posting",
+        _show_excel_error=lambda *_args, **_kwargs: None,
+    )
+
+    MainWindow._excel_analysis_ready(owner, plan)
+
+    assert tasks.cancel_calls == 1
+    assert tasks.start_calls == [
+        {"batch_id": 42, "repost_source_indices": {3}}
+    ]
+
+
 @pytest.mark.parametrize("selector_action", ["SELECT_SOURCE_ITEM", "SELECT_SHEET"])
 def test_posting_selector_resolution_is_refined_before_apply(
     monkeypatch,
@@ -241,7 +447,9 @@ def test_posting_selector_resolution_is_refined_before_apply(
             self.cancel_calls += 1
 
     class Dialog:
-        def __init__(self, _conflicts: Any, _parent: Any) -> None:
+        def __init__(
+            self, _conflicts: Any, _parent: Any, **_kwargs: Any
+        ) -> None:
             pass
 
         @staticmethod
@@ -271,6 +479,407 @@ def test_posting_selector_resolution_is_refined_before_apply(
     assert tasks.refine_calls[0][1]["selector-conflict"]["action"] == selector_action
     assert tasks.apply_calls == []
     assert tasks.cancel_calls == 0
+
+
+def test_bang_ke_non_selector_resolution_is_refined_before_apply(
+    monkeypatch,
+) -> None:
+    conflict = SimpleNamespace(conflict_id="remaining-conflict")
+    plan = SimpleNamespace(
+        operation="posting",
+        source_kind="BANG_KE",
+        conflicts=[conflict],
+        selected_sheet=None,
+        previously_posted_items=[],
+        confirmation_required=False,
+    )
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.refine_calls: list[Any] = []
+            self.apply_calls: list[Any] = []
+
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "posting"
+
+        def refine_plan(
+            self,
+            value: Any,
+            resolutions: Any,
+            *,
+            operation: str,
+        ) -> None:
+            self.refine_calls.append((value, resolutions, operation))
+
+        def apply_plan(
+            self,
+            value: Any,
+            resolutions: Any,
+            *,
+            operation: str,
+        ) -> None:
+            self.apply_calls.append((value, resolutions, operation))
+
+        @staticmethod
+        def cancel_waiting() -> None:
+            raise AssertionError("Plan phải được refine, không được hủy.")
+
+    class Dialog:
+        def __init__(
+            self, _conflicts: Any, _parent: Any, **_kwargs: Any
+        ) -> None:
+            pass
+
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        @staticmethod
+        def resolution_map() -> dict[str, Any]:
+            return {
+                "remaining-conflict": {
+                    "conflict_id": "remaining-conflict",
+                    "action": "SKIP",
+                }
+            }
+
+    monkeypatch.setattr(main_window_module, "ConflictResolutionDialog", Dialog)
+    tasks = Tasks()
+    owner = SimpleNamespace(
+        _excel_tasks=tasks,
+        _excel_operation="posting",
+        _show_excel_error=lambda *_args, **_kwargs: None,
+    )
+
+    MainWindow._excel_analysis_ready(owner, plan)
+
+    assert tasks.refine_calls == [
+        (
+            plan,
+            {
+                "remaining-conflict": {
+                    "conflict_id": "remaining-conflict",
+                    "action": "SKIP",
+                }
+            },
+            "posting",
+        )
+    ]
+    assert tasks.apply_calls == []
+
+
+def test_posting_reopens_dialog_with_saved_resolution(
+    monkeypatch,
+) -> None:
+    conflict = SimpleNamespace(conflict_id="occupied")
+    plan = SimpleNamespace(
+        operation="posting",
+        conflicts=[conflict],
+        selected_sheet="T07 26",
+        previously_posted_items=[],
+    )
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.apply_calls: list[Any] = []
+
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "posting"
+
+        @staticmethod
+        def saved_resolutions(_plan: Any, *, operation: str) -> dict[str, Any]:
+            assert operation == "posting"
+            return {
+                "occupied": {
+                    "conflict_id": "occupied",
+                    "action": "KEEP_EXISTING",
+                }
+            }
+
+        def apply_plan(
+            self, value: Any, resolutions: Any, *, operation: str
+        ) -> None:
+            self.apply_calls.append((value, resolutions, operation))
+
+        @staticmethod
+        def cancel_waiting() -> None:
+            raise AssertionError("Không được hủy phiên đã phục hồi.")
+
+    class Dialog:
+        initial_resolutions: dict[str, Any] = {}
+
+        def __init__(self, _conflicts: Any, _parent: Any, **kwargs: Any) -> None:
+            Dialog.initial_resolutions = dict(kwargs["initial_resolutions"])
+
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        @staticmethod
+        def resolution_map() -> dict[str, Any]:
+            return {
+                "occupied": {
+                    "conflict_id": "occupied",
+                    "action": "KEEP_EXISTING",
+                }
+            }
+
+    monkeypatch.setattr(
+        main_window_module, "ConflictResolutionDialog", Dialog
+    )
+    tasks = Tasks()
+    owner = SimpleNamespace(
+        _excel_tasks=tasks,
+        _excel_operation="posting",
+        _show_excel_error=lambda *_args, **_kwargs: None,
+    )
+
+    MainWindow._excel_analysis_ready(owner, plan)
+
+    assert Dialog.initial_resolutions["occupied"]["action"] == "KEEP_EXISTING"
+    assert tasks.apply_calls == [
+        (
+            plan,
+            {
+                "occupied": {
+                    "conflict_id": "occupied",
+                    "action": "KEEP_EXISTING",
+                }
+            },
+            "posting",
+        )
+    ]
+
+
+def test_daily_sync_reopens_dialog_with_saved_resolution(monkeypatch) -> None:
+    conflict = SimpleNamespace(conflict_id="daily-conflict")
+    candidate = SimpleNamespace(
+        month=7,
+        target_sheet="T07 26",
+        update_count=1,
+        new_row_count=0,
+        unchanged_count=0,
+        target_only_count=0,
+        invalid_count=0,
+    )
+    plan = SimpleNamespace(
+        operation="sync",
+        conflicts=[conflict],
+        selected_month=7,
+        selected_sheet="T07 26",
+        month_candidates=[candidate],
+    )
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.apply_calls: list[Any] = []
+
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "sync"
+
+        @staticmethod
+        def saved_resolutions(_plan: Any, *, operation: str) -> dict[str, Any]:
+            return {
+                "daily-conflict": {
+                    "conflict_id": "daily-conflict",
+                    "action": "SKIP_INVALID",
+                }
+            }
+
+        def apply_plan(
+            self, value: Any, resolutions: Any, *, operation: str
+        ) -> None:
+            self.apply_calls.append((value, resolutions, operation))
+
+        @staticmethod
+        def cancel_waiting() -> None:
+            raise AssertionError("Không được hủy phiên đã phục hồi.")
+
+    class Dialog:
+        initial_resolutions: dict[str, Any] = {}
+
+        def __init__(self, _conflicts: Any, _parent: Any, **kwargs: Any) -> None:
+            Dialog.initial_resolutions = dict(kwargs["initial_resolutions"])
+
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        @staticmethod
+        def resolution_map() -> dict[str, Any]:
+            return {
+                "daily-conflict": {
+                    "conflict_id": "daily-conflict",
+                    "action": "SKIP_INVALID",
+                }
+            }
+
+    monkeypatch.setattr(
+        main_window_module, "ConflictResolutionDialog", Dialog
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+    tasks = Tasks()
+    owner = SimpleNamespace(
+        _excel_tasks=tasks,
+        _excel_operation="sync",
+        _show_excel_error=lambda *_args, **_kwargs: None,
+    )
+
+    MainWindow._excel_analysis_ready(owner, plan)
+
+    assert Dialog.initial_resolutions["daily-conflict"]["action"] == "SKIP_INVALID"
+    assert tasks.apply_calls[0][1]["daily-conflict"]["action"] == "SKIP_INVALID"
+
+
+def test_payment_sync_reopens_dialog_with_saved_resolution(
+    monkeypatch,
+) -> None:
+    conflict = SimpleNamespace(conflict_id="payment-conflict")
+    plan = SimpleNamespace(conflicts=[conflict])
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.refine_calls: list[Any] = []
+
+        @staticmethod
+        def saved_resolutions(_plan: Any, *, operation: str) -> dict[str, Any]:
+            return {
+                "payment-conflict": {
+                    "conflict_id": "payment-conflict",
+                    "action": "SKIP",
+                }
+            }
+
+        def refine_plan(
+            self, value: Any, resolutions: Any, *, operation: str
+        ) -> None:
+            self.refine_calls.append((value, resolutions, operation))
+
+    class Dialog:
+        initial_resolutions: dict[str, Any] = {}
+
+        def __init__(self, _conflicts: Any, _parent: Any, **kwargs: Any) -> None:
+            Dialog.initial_resolutions = dict(kwargs["initial_resolutions"])
+
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        @staticmethod
+        def resolution_map() -> dict[str, Any]:
+            return {
+                "payment-conflict": {
+                    "conflict_id": "payment-conflict",
+                    "action": "SKIP",
+                }
+            }
+
+    monkeypatch.setattr(
+        main_window_module, "ConflictResolutionDialog", Dialog
+    )
+    tasks = Tasks()
+    owner = SimpleNamespace(_excel_tasks=tasks)
+
+    MainWindow._handle_payment_sync_plan(owner, plan)
+
+    assert Dialog.initial_resolutions["payment-conflict"]["action"] == "SKIP"
+    assert tasks.refine_calls == [
+        (
+            plan,
+            {
+                "payment-conflict": {
+                    "conflict_id": "payment-conflict",
+                    "action": "SKIP",
+                }
+            },
+            "payment_sync",
+        )
+    ]
+
+
+def test_conflict_choices_are_saved_before_final_confirmation(
+    monkeypatch,
+) -> None:
+    conflict = SimpleNamespace(conflict_id="occupied")
+    plan = SimpleNamespace(
+        operation="posting",
+        source_kind="BANG_KE",
+        conflicts=[conflict],
+        selected_sheet=None,
+        previously_posted_items=[],
+        confirmation_required=True,
+        confirmation_done=False,
+        original_source_count=1,
+        reconciliation_source_count=0,
+        items=[object()],
+        target_sheets={"T01 26"},
+    )
+    expected = {
+        "occupied": {
+            "conflict_id": "occupied",
+            "action": "KEEP_EXISTING",
+        }
+    }
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.saved: list[Any] = []
+            self.cancelled = 0
+
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "posting"
+
+        @staticmethod
+        def saved_resolutions(_plan: Any, *, operation: str) -> dict[str, Any]:
+            return {}
+
+        def save_draft(
+            self, value: Any, resolutions: Any, *, operation: str
+        ) -> None:
+            self.saved.append((value, resolutions, operation))
+
+        def cancel_waiting(self) -> None:
+            self.cancelled += 1
+
+    class Dialog:
+        def __init__(
+            self, _conflicts: Any, _parent: Any, **_kwargs: Any
+        ) -> None:
+            pass
+
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        @staticmethod
+        def resolution_map() -> dict[str, Any]:
+            return expected
+
+    monkeypatch.setattr(main_window_module, "ConflictResolutionDialog", Dialog)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.No,
+    )
+    tasks = Tasks()
+    owner = SimpleNamespace(
+        _excel_tasks=tasks,
+        _excel_operation="posting",
+        _show_excel_error=lambda *_args, **_kwargs: None,
+    )
+
+    MainWindow._excel_analysis_ready(owner, plan)
+
+    assert tasks.saved == [(plan, expected, "posting")]
+    assert tasks.cancelled == 1
 
 
 def test_payment_sync_confirmation_discloses_new_sheet_template(
@@ -610,6 +1219,42 @@ class _Service:
         return {"message": "Hoàn tất", "operation": "sync"}
 
 
+class _DraftService:
+    def __init__(self) -> None:
+        self.saved: list[Any] = []
+        self.completed: list[str] = []
+        self.failed: list[tuple[str, str]] = []
+        self.cancelled: list[str] = []
+
+    @staticmethod
+    def restore_with_info(_plan: Any, _operation: str) -> Any:
+        return SimpleNamespace(
+            source_file_key="posting:batch:42",
+            resolutions={"c1": {"conflict_id": "c1", "action": "SKIP"}},
+            found=True,
+            status="FAILED",
+            updated_at="2026-08-14T13:57:43+07:00",
+            current_conflict_count=1,
+            saved_choice_count=1,
+            restored_count=1,
+            target_compatible=True,
+            last_error="temporary error",
+        )
+
+    def save(self, plan: Any, operation: str, resolutions: Any) -> str:
+        self.saved.append((plan, operation, resolutions))
+        return "posting:batch:42"
+
+    def mark_completed(self, key: str) -> None:
+        self.completed.append(key)
+
+    def mark_failed(self, key: str, error: object) -> None:
+        self.failed.append((key, str(error)))
+
+    def mark_cancelled(self, key: str) -> None:
+        self.cancelled.append(key)
+
+
 def test_excel_controller_auto_applies_plan_without_conflicts(qtbot) -> None:
     service = _Service({"operation": "sync", "has_changes": True, "conflicts": []})
     controller = ExcelTaskController(daily_sync_service=service)
@@ -749,6 +1394,122 @@ def test_excel_controller_notifies_service_when_user_cancels(qtbot) -> None:
         controller.shutdown()
 
 
+def test_controller_keeps_successful_choices_and_restore_metadata(qtbot) -> None:
+    plan = {
+        "operation": "posting",
+        "conflicts": [{"conflict_id": "c1", "type": "CONTAINER_NOT_FOUND"}],
+    }
+    service = _Service(plan)
+    drafts = _DraftService()
+    controller = ExcelTaskController(
+        expense_posting_service=service,
+        draft_service=drafts,
+    )
+    ready: list[Any] = []
+    completed: list[Any] = []
+    controller.analysis_ready.connect(ready.append)
+    controller.completed.connect(completed.append)
+
+    try:
+        controller.start_posting()
+        qtbot.waitUntil(lambda: bool(ready), timeout=2000)
+        restored = controller.saved_resolutions(ready[0], operation="posting")
+
+        assert restored["c1"]["action"] == "SKIP"
+        assert controller.saved_resolution_info["status"] == "FAILED"
+
+        controller.apply_plan(ready[0], restored, operation="posting")
+        qtbot.waitUntil(lambda: bool(completed), timeout=2000)
+
+        assert drafts.saved
+        assert drafts.completed == ["posting:batch:42"]
+    finally:
+        controller.shutdown()
+
+
+def test_controller_does_not_overwrite_history_when_dialog_is_only_closed(
+    qtbot,
+) -> None:
+    plan = {
+        "operation": "posting",
+        "conflicts": [{"conflict_id": "c1", "type": "CONTAINER_NOT_FOUND"}],
+    }
+    service = _Service(plan)
+    drafts = _DraftService()
+    controller = ExcelTaskController(
+        expense_posting_service=service,
+        draft_service=drafts,
+    )
+    ready: list[Any] = []
+    controller.analysis_ready.connect(ready.append)
+
+    try:
+        controller.start_posting()
+        qtbot.waitUntil(lambda: bool(ready), timeout=2000)
+        controller.saved_resolutions(ready[0], operation="posting")
+
+        assert controller.cancel_waiting()
+        assert drafts.cancelled == []
+    finally:
+        controller.shutdown()
+
+
+def test_controller_marks_choices_cancelled_after_they_were_saved(qtbot) -> None:
+    plan = {
+        "operation": "posting",
+        "conflicts": [{"conflict_id": "c1", "type": "CONTAINER_NOT_FOUND"}],
+    }
+    service = _Service(plan)
+    drafts = _DraftService()
+    controller = ExcelTaskController(
+        expense_posting_service=service,
+        draft_service=drafts,
+    )
+    ready: list[Any] = []
+    controller.analysis_ready.connect(ready.append)
+
+    try:
+        controller.start_posting()
+        qtbot.waitUntil(lambda: bool(ready), timeout=2000)
+        controller.save_draft(
+            ready[0],
+            {"c1": {"conflict_id": "c1", "action": "SKIP"}},
+            operation="posting",
+        )
+
+        assert controller.cancel_waiting()
+        assert drafts.cancelled == ["posting:batch:42"]
+    finally:
+        controller.shutdown()
+
+
+def test_negative_adjustment_requires_action_before_dialog_accepts(qtbot) -> None:
+    dialog = ConflictResolutionDialog(
+        [
+            {
+                "conflict_id": "negative",
+                "type": "NEGATIVE_ADJUSTMENT",
+                "container": "ABCD1234567",
+                "fee": "NH",
+                "amount": -100,
+                "allowed_actions": ["ADD", "SKIP", "CANCEL_ALL"],
+            }
+        ]
+    )
+    qtbot.addWidget(dialog)
+
+    dialog._validate_and_accept()
+
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    assert "chưa chọn cách xử lý" in dialog.validation_label.text()
+
+    dialog._action_combos["negative"].setCurrentIndex(1)
+    dialog._validate_and_accept()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.resolution_map()["negative"]["action"] == "ADD"
+
+
 def test_month_and_conflict_dialogs_collect_generic_mapping(qtbot) -> None:
     months = MonthSelectionDialog(
         [
@@ -801,6 +1562,96 @@ def test_month_and_conflict_dialogs_collect_generic_mapping(qtbot) -> None:
     assert result["occupied"]["action"] == "OVERWRITE"
     assert result["unknown"]["action"] == "SELECT_FEE"
     assert result["unknown"]["selected_fee"] == "SC"
+
+
+def test_conflict_dialog_prefills_saved_resolutions(qtbot) -> None:
+    dialog = ConflictResolutionDialog(
+        [
+            {
+                "conflict_id": "occupied",
+                "type": "TARGET_CELL_OCCUPIED",
+                "target_cell": "Q12",
+                "current_value": 800_000,
+            },
+            {
+                "conflict_id": "unknown",
+                "type": "UNKNOWN_FEE_CODE",
+                "fee": "CXD",
+                "amount": 500_000,
+            },
+        ],
+        initial_resolutions={
+            "occupied": {
+                "conflict_id": "occupied",
+                "action": "OVERWRITE",
+            },
+            "unknown": {
+                "conflict_id": "unknown",
+                "action": "SELECT_FEE",
+                "selected_fee": "SC",
+            },
+        },
+        restore_info={
+            "found": True,
+            "status": "FAILED",
+            "updated_at": "2026-08-14T13:57:43+07:00",
+            "target_compatible": True,
+        },
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog._action_combos["occupied"].currentData() == "OVERWRITE"
+    assert dialog._action_combos["unknown"].currentData() == "SELECT_FEE"
+    assert dialog._selected_fees["unknown"].currentData() == "SC"
+    assert "Đã khôi phục 2/2 lựa chọn" in dialog.restore_label.text()
+    assert "Thất bại" in dialog.restore_label.text()
+
+
+def test_conflict_dialog_restores_selected_row_and_source_sheet(qtbot) -> None:
+    dialog = ConflictResolutionDialog(
+        [
+            {
+                "conflict_id": "selected-row",
+                "type": "MULTIPLE_CONTAINER_MATCH",
+                "container": "ABCD1234567",
+                "fee": "VSDL",
+                "amount": 270_000,
+                "allowed_actions": ["SELECT_ROW", "SKIP", "CANCEL_ALL"],
+                "row_candidates": [
+                    {
+                        "source_sheet": "T01 26",
+                        "row": 55,
+                        "container": "ABCD1234567",
+                    }
+                ],
+            }
+        ],
+        initial_resolutions={
+            "selected-row": {
+                "conflict_id": "selected-row",
+                "action": "SELECT_ROW",
+                "selected_row": 55,
+                "row": 55,
+                "selected_source_sheet": "T01 26",
+            }
+        },
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog._action_combos["selected-row"].currentData() == "SELECT_ROW"
+    assert dialog._selected_rows["selected-row"] == 55
+    assert dialog._selected_source_sheets["selected-row"] == "T01 26"
+    assert dialog._selector_buttons["selected-row"].text() == "T01 26 – dòng 55"
+    assert dialog.resolution_map()["selected-row"] == {
+        "conflict_id": "selected-row",
+        "action": "SELECT_ROW",
+        "selected_row": 55,
+        "row": 55,
+        "selected_source_sheet": "T01 26",
+    }
+
+    dialog._validate_and_accept()
+    assert dialog.result() == QDialog.DialogCode.Accepted
 
 
 def test_posting_month_dialog_has_no_default_or_recommendation(qtbot) -> None:

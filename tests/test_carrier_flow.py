@@ -57,7 +57,7 @@ def _ready(path: Path, rows: list[list[object]]) -> None:
     path.write_text(json.dumps({"v": 1, "d": rows}, ensure_ascii=False), encoding="utf-8")
 
 
-def test_posting_routes_carriers_and_writes_hidden_detail(tmp_path: Path) -> None:
+def test_posting_routes_expense_invoice_carriers_to_vt_nam(tmp_path: Path) -> None:
     bk = tmp_path / "bk.xlsx"
     ready = tmp_path / "ready.json"
     _posting_book(bk)
@@ -78,16 +78,85 @@ def test_posting_routes_carriers_and_writes_hidden_detail(tmp_path: Path) -> Non
     assert not plan.conflicts
     result = service.apply(plan, {})
 
-    assert result.carrier_written_cells == 2
+    assert result.carrier_written_cells == 1
     workbook = load_workbook(bk, data_only=False)
     try:
-        assert workbook["T07 26"]["F2"].value == "PHB"
-        assert workbook["T07 26"]["I2"].value == "NHS"
+        assert workbook["T07 26"]["F2"].value is None
+        assert workbook["T07 26"]["I2"].value == "PHB / NHS"
         assert workbook[BK_DETAIL_SHEET].sheet_state == "hidden"
         detail = workbook[BK_DETAIL_SHEET]
         assert detail.max_row == 3
-        assert {detail["H2"].value, detail["H3"].value} == {"HP", "NAM"}
+        assert {detail["H2"].value, detail["H3"].value} == {"NAM"}
         assert {detail["L2"].value, detail["L3"].value} == {"PHB", "NHS"}
+    finally:
+        workbook.close()
+
+
+def _add_road_fee_columns(path: Path) -> None:
+    workbook = load_workbook(path)
+    sheet = workbook["T07 26"]
+    sheet["J1"] = "Cước bộ đóng hàng"
+    sheet["K1"] = "Số HĐ"
+    sheet["L1"] = "Cước VTN"
+    sheet["M1"] = "Số HĐ"
+    workbook.save(path)
+    workbook.close()
+
+
+def test_posting_blank_daily_sync_carrier_keeps_existing_value(
+    tmp_path: Path,
+) -> None:
+    bk = tmp_path / "bk.xlsx"
+    ready = tmp_path / "ready.json"
+    _posting_book(bk, hp_carrier="DAILY ROAD")
+    _ready(
+        ready,
+        [["CONT700", None, "CBDH", "CV", "HD-1", None, 100]],
+    )
+    _add_road_fee_columns(bk)
+    service = ExpensePostingService(
+        _Provider(ready), bk_path=bk, backup_dir=tmp_path / "Backup"
+    )
+
+    plan = service.analyze(batch_id=1, sheet_name="T07 26")
+    assert not any(
+        conflict.conflict_type is ConflictType.CARRIER_VALUE_CONFLICT
+        for conflict in plan.conflicts
+    )
+    service.apply(plan, {})
+
+    workbook = load_workbook(bk, data_only=False)
+    try:
+        assert workbook["T07 26"]["F2"].value == "DAILY ROAD"
+    finally:
+        workbook.close()
+
+
+def test_posting_manual_daily_sync_carrier_overrides_existing_value(
+    tmp_path: Path,
+) -> None:
+    bk = tmp_path / "bk.xlsx"
+    ready = tmp_path / "ready.json"
+    _posting_book(bk, hp_carrier="DAILY ROAD")
+    _ready(
+        ready,
+        [["CONT700", None, "VTN", "CV", "HD-2", "USER ROAD", 200]],
+    )
+    _add_road_fee_columns(bk)
+    service = ExpensePostingService(
+        _Provider(ready), bk_path=bk, backup_dir=tmp_path / "Backup"
+    )
+
+    plan = service.analyze(batch_id=1, sheet_name="T07 26")
+    assert not any(
+        conflict.conflict_type is ConflictType.CARRIER_VALUE_CONFLICT
+        for conflict in plan.conflicts
+    )
+    service.apply(plan, {})
+
+    workbook = load_workbook(bk, data_only=False)
+    try:
+        assert workbook["T07 26"]["F2"].value == "USER ROAD"
     finally:
         workbook.close()
 

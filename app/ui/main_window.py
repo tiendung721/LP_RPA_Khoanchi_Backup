@@ -268,6 +268,9 @@ class MainWindow(QMainWindow):
     def _connect_page_signals(self) -> None:
         self.navigation.currentRowChanged.connect(self._change_page)
         self.workflow_page.open_assistant_requested.connect(self.open_assistant)
+        self.workflow_page.open_bang_ke_assistant_requested.connect(
+            self.open_bang_ke_assistant
+        )
         self.workflow_page.open_review_requested.connect(self.open_review)
         self.workflow_page.sync_daily_requested.connect(self.start_daily_sync)
         self.workflow_page.post_expenses_requested.connect(
@@ -422,6 +425,14 @@ class MainWindow(QMainWindow):
     @Slot()
     def open_assistant(self) -> None:
         self._launch_assistant(self._settings, context="home")
+
+    @Slot()
+    def open_bang_ke_assistant(self) -> None:
+        self._launch_assistant(
+            self._settings,
+            context="bang_ke",
+            bat_setting="bang_ke_assistant_bat_path",
+        )
 
     def open_reconciliation_assistant(self, group_id: int) -> None:
         self._launch_assistant(
@@ -722,6 +733,28 @@ class MainWindow(QMainWindow):
             self.workflow_page.set_excel_progress(operation, message)
         self.statusBar().showMessage(message)
 
+    def _saved_excel_resolutions(
+        self, plan: Any, operation: str
+    ) -> dict[str, Any]:
+        loader = getattr(self._excel_tasks, "saved_resolutions", None)
+        if not callable(loader):
+            self._excel_restore_info = {}
+            return {}
+        resolutions = dict(loader(plan, operation=operation) or {})
+        info = getattr(self._excel_tasks, "saved_resolution_info", {})
+        self._excel_restore_info = dict(info or {})
+        return resolutions
+
+    def _save_excel_draft(
+        self,
+        plan: Any,
+        resolutions: Mapping[str, Any],
+        operation: str,
+    ) -> None:
+        saver = getattr(self._excel_tasks, "save_draft", None)
+        if callable(saver):
+            saver(plan, resolutions, operation=operation)
+
     @Slot(object)
     def _excel_analysis_ready(self, plan: Any) -> None:
         if self._excel_tasks is None:
@@ -733,7 +766,9 @@ class MainWindow(QMainWindow):
             if operation == "payment_sync":
                 self._handle_payment_sync_plan(plan)
                 return
-            resolutions: dict[str, Any] = {}
+            resolutions = MainWindow._saved_excel_resolutions(
+                self, plan, operation
+            )
             handled_conflicts: set[str] = set()
             conflicts = list(_attribute(plan, "conflicts", default=()) or ())
             selected_sync_sheet = _attribute(
@@ -778,6 +813,10 @@ class MainWindow(QMainWindow):
                         handled_conflicts.add(conflict_id)
 
             selected_sheet = _attribute(plan, "selected_sheet", "selected_sheet_name")
+            raw_source_kind = _attribute(plan, "source_kind", default="ASSISTANT")
+            source_kind = str(
+                getattr(raw_source_kind, "value", raw_source_kind) or "ASSISTANT"
+            ).strip().upper()
             sheet_candidates = list(
                 _attribute(
                     plan,
@@ -789,6 +828,7 @@ class MainWindow(QMainWindow):
             )
             if (
                 operation == "posting"
+                and source_kind != "BANG_KE"
                 and selected_sheet in (None, "")
                 and sheet_candidates
             ):
@@ -803,7 +843,8 @@ class MainWindow(QMainWindow):
                     self._excel_tasks.cancel_waiting()
                     return
                 # Re-analyze the selected sheet so every row/cell conflict is
-                # collected before apply; no old decision is reused.
+                # collected before apply; compatible choices are restored after
+                # the selected sheet has been analyzed.
                 sheet_name = dialog.selected_sheet_name
                 self._excel_tasks.cancel_waiting()
                 self._excel_context = "workflow"
@@ -821,7 +862,10 @@ class MainWindow(QMainWindow):
             )
             if (
                 operation == "posting"
-                and selected_sheet not in (None, "")
+                and (
+                    selected_sheet not in (None, "")
+                    or source_kind == "BANG_KE"
+                )
                 and previously_posted
                 and not repost_selection_done
             ):
@@ -832,10 +876,14 @@ class MainWindow(QMainWindow):
                 repost_indices = dialog.selected_source_indices
                 self._excel_tasks.cancel_waiting()
                 self._excel_context = "workflow"
+                analyze_kwargs: dict[str, Any] = {
+                    "batch_id": _attribute(plan, "batch_id", default=None),
+                    "repost_source_indices": repost_indices,
+                }
+                if source_kind != "BANG_KE":
+                    analyze_kwargs["sheet_name"] = str(selected_sheet)
                 self._excel_tasks.start_posting(
-                    batch_id=_attribute(plan, "batch_id", default=None),
-                    sheet_name=str(selected_sheet),
-                    repost_source_indices=repost_indices,
+                    **analyze_kwargs,
                 )
                 return
 
@@ -897,11 +945,19 @@ class MainWindow(QMainWindow):
                 conflict for conflict in remaining if conflict not in blocking_sync
             ]
             if remaining:
-                dialog = ConflictResolutionDialog(remaining, self)
+                dialog = ConflictResolutionDialog(
+                    remaining,
+                    self,
+                    initial_resolutions=resolutions,
+                    restore_info=getattr(self, "_excel_restore_info", {}),
+                )
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     self._excel_tasks.cancel_waiting()
                     return
                 resolutions.update(dialog.resolution_map())
+                MainWindow._save_excel_draft(
+                    self, plan, resolutions, operation
+                )
             if (
                 operation == "posting"
                 and bool(_attribute(plan, "confirmation_required", default=False))
@@ -916,11 +972,27 @@ class MainWindow(QMainWindow):
                 previous_count = len(
                     list(_attribute(plan, "previously_posted_items", default=()) or ())
                 )
+                target_sheet_detail = ""
+                if source_kind == "BANG_KE":
+                    target_sheets = sorted(
+                        {
+                            str(sheet).strip()
+                            for sheet in (
+                                _attribute(plan, "target_sheets", default=()) or ()
+                            )
+                            if str(sheet).strip()
+                        }
+                    )
+                    if target_sheets:
+                        target_sheet_detail = (
+                            f"Sheet đích: {', '.join(target_sheets)}\n"
+                        )
                 answer = QMessageBox.question(
                     self,
                     "Xác nhận nhập khoản chi",
                     (
-                        f"Khoản từ file gốc: {normal_count}\n"
+                        target_sheet_detail
+                        + f"Khoản từ file gốc: {normal_count}\n"
                         f"Dòng cont từ hồ sơ đối soát: {reconciliation_count}\n"
                         f"Đã nhập trước đó: {previous_count}\n"
                         f"Còn cần xử lý: {len(list(_attribute(plan, 'items', default=()) or ()))}\n\n"
@@ -1015,9 +1087,8 @@ class MainWindow(QMainWindow):
                 for value in resolutions.values()
                 if isinstance(value, Mapping)
             }
-            if (
-                operation == "posting"
-                and selector_actions.intersection(
+            selector_refine_required = bool(
+                selector_actions.intersection(
                     {
                         "SELECT_SHEET",
                         "SELECT_ROW",
@@ -1027,6 +1098,10 @@ class MainWindow(QMainWindow):
                         "SELECT_CARRIER",
                     }
                 )
+            )
+            bang_ke_refine_required = source_kind == "BANG_KE" and bool(conflicts)
+            if operation == "posting" and (
+                selector_refine_required or bang_ke_refine_required
             ):
                 self._excel_tasks.refine_plan(
                     plan,
@@ -1049,14 +1124,24 @@ class MainWindow(QMainWindow):
 
         if self._excel_tasks is None:
             return
-        resolutions: dict[str, Any] = {}
+        resolutions = MainWindow._saved_excel_resolutions(
+            self, plan, "payment_sync"
+        )
         conflicts = list(_attribute(plan, "conflicts", default=()) or ())
         if conflicts:
-            conflict_dialog = ConflictResolutionDialog(conflicts, self)
+            conflict_dialog = ConflictResolutionDialog(
+                conflicts,
+                self,
+                initial_resolutions=resolutions,
+                restore_info=getattr(self, "_excel_restore_info", {}),
+            )
             if conflict_dialog.exec() != QDialog.DialogCode.Accepted:
                 self._excel_tasks.cancel_waiting()
                 return
             resolutions.update(conflict_dialog.resolution_map())
+            MainWindow._save_excel_draft(
+                self, plan, resolutions, "payment_sync"
+            )
             self._excel_tasks.refine_plan(
                 plan,
                 resolutions,
@@ -1065,12 +1150,15 @@ class MainWindow(QMainWindow):
             return
 
         new_rows = list(_attribute(plan, "new_rows", default=()) or ())
-        if new_rows:
+        if new_rows and "selected_new_rows" not in resolutions:
             new_dialog = PaymentNewRowsDialog(new_rows, self)
             if new_dialog.exec() != QDialog.DialogCode.Accepted:
                 self._excel_tasks.cancel_waiting()
                 return
             resolutions["selected_new_rows"] = new_dialog.selected_item_ids
+            MainWindow._save_excel_draft(
+                self, plan, resolutions, "payment_sync"
+            )
 
         source_sheet = _attribute(plan, "source_sheet", default="—")
         target_sheet = _attribute(plan, "target_sheet", default="—")
@@ -1436,6 +1524,14 @@ class MainWindow(QMainWindow):
                 settings_data.get("assistant_bat_path"),
                 settings_data.get("output_dir"),
             )
+            bang_ke_bat = str(
+                settings_data.get("bang_ke_assistant_bat_path") or ""
+            ).strip()
+            if bang_ke_bat:
+                launcher.validate_configuration(
+                    bang_ke_bat,
+                    settings_data.get("output_dir"),
+                )
             rpa_expense_bat = str(
                 settings_data.get("rpa_expense_bat_path") or ""
             ).strip()
@@ -1489,6 +1585,7 @@ class MainWindow(QMainWindow):
         *,
         context: str,
         reconciliation_group_id: int | None = None,
+        bat_setting: str = "assistant_bat_path",
     ) -> None:
         launcher = self._assistant_launcher
         if launcher is None:
@@ -1507,9 +1604,20 @@ class MainWindow(QMainWindow):
                 "Hãy hoàn tất hoặc đóng cửa sổ đó trước khi mở phiên mới.",
             )
             return
+        selected_bat = str(
+            _attribute(settings, bat_setting, default="") or ""
+        ).strip()
+        if not selected_bat and context == "bang_ke":
+            QMessageBox.warning(
+                self,
+                "Chưa cấu hình BAT",
+                "Chưa cấu hình file BAT mở tool bảng kê. "
+                "Hãy chọn file trong Cài đặt.",
+            )
+            return
         try:
             result = launcher.launch(
-                bat_path=_attribute(settings, "assistant_bat_path", default=""),
+                bat_path=selected_bat,
                 output_dir=_attribute(settings, "output_dir", default=""),
                 context=context,
                 reconciliation_group_id=reconciliation_group_id,
@@ -1715,7 +1823,7 @@ class MainWindow(QMainWindow):
                     self._complete_assistant_session(session)
             else:
                 self._open_new_download(review)
-                if session is not None and session.context == "home":
+                if session is not None and session.context in {"home", "bang_ke"}:
                     self._complete_assistant_session(session)
 
     def _next_assistant_session(self) -> _AssistantSession | None:
@@ -1819,7 +1927,19 @@ class MainWindow(QMainWindow):
         if self._sea_freight_service is None:
             QMessageBox.warning(self, "Chưa thể mở", "Dịch vụ đối soát chưa được khởi tạo.")
             return
-        if self._sea_freight_dialog is None:
+        dialog = self._sea_freight_dialog
+        if dialog is not None and dialog.isVisible():
+            dialog.showNormal()
+            dialog.raise_()
+            dialog.activateWindow()
+            if dialog.group_id != group_id:
+                QMessageBox.information(
+                    dialog,
+                    "Hồ sơ đang được mở",
+                    "Hãy đóng hồ sơ hiện tại trước khi mở hồ sơ của dòng khác.",
+                )
+            return
+        if dialog is None:
             dialog = SeaFreightReconciliationDialog(
                 self._sea_freight_service,
                 batch_service=self._batch_service,
@@ -1833,10 +1953,10 @@ class MainWindow(QMainWindow):
             dialog.confirmed.connect(self._open_reconciliation_result)
             self._sea_freight_dialog = dialog
         else:
-            self._sea_freight_dialog.load_group(group_id)
-        self._sea_freight_dialog.showNormal()
-        self._sea_freight_dialog.raise_()
-        self._sea_freight_dialog.activateWindow()
+            dialog.load_group(group_id)
+        dialog.showNormal()
+        dialog.raise_()
+        dialog.activateWindow()
 
     @Slot(object)
     def _open_reconciliation_result(self, review: Any) -> None:

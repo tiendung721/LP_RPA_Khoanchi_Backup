@@ -355,6 +355,137 @@ def test_posting_reader_accepts_v1_review_fields_without_using_them_for_amount(
     ]
 
 
+def test_bang_ke_posts_across_sheets_migrates_columns_and_adds_negative(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ket_qua_boc_tach_bang_ke_fixture.json"
+    target = tmp_path / "BK.xlsx"
+
+    def source_row(
+        container: str,
+        fee: str,
+        amount: int,
+        vessel: str,
+        voyage: str,
+    ) -> dict[str, Any]:
+        return {
+            "container": container,
+            "bl": "BL-01",
+            "vessel_voyage_raw": f"{vessel} V.{voyage}",
+            "vessel_name": vessel,
+            "voyage_no": voyage,
+            "invoice_container_count": None,
+            "container_count_basis": "UNKNOWN",
+            "fee": fee,
+            "rule": "GV",
+            "invoice_no": None,
+            "invoice_date": None,
+            "carrier": None,
+            "amount": amount,
+        }
+
+    ready.write_text(
+        json.dumps(
+            {
+                "v": 2,
+                "d": [
+                    source_row("DRYU3045911", "VSDL", -282_000, "PRIME", "2606S"),
+                    source_row("DRYU3045911", "NH", -409_300, "PRIME", "2606S"),
+                    source_row("DRYU3045911", "HV", -560_000, "PRIME", "2606S"),
+                    source_row("DRYU3045911", "VAT", 80_000, "PRIME", "2606S"),
+                    source_row("MSCU1234567", "GH", 150_000, "PROSPER", "2625S"),
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    workbook = Workbook()
+    january = _new_full_posting_sheet(workbook, "T01 26")
+    _add_full_plan_row(
+        january,
+        2,
+        sqt=101,
+        container="DRYU3045911",
+        closing_date="2026-01-10",
+    )
+    january.cell(2, 7).value = "PRIME\nVoyage 2606S"
+    january.cell(2, FULL_POSTING_LAYOUT["VSDL"][0]).value = 1_000_000
+    january.cell(2, FULL_POSTING_LAYOUT["NH"][0]).value = 1_000_000
+    january.cell(2, FULL_POSTING_LAYOUT["HV"][0]).value = 1_000_000
+    april = _new_full_posting_sheet(workbook, "T04 26")
+    _add_full_plan_row(
+        april,
+        2,
+        sqt=402,
+        container="MSCU1234567",
+        closing_date="2026-04-10",
+    )
+    april.cell(2, 7).value = "PROSPER - Chuyến số 2625S"
+    workbook.save(target)
+    workbook.close()
+
+    class BangKeProvider(_ReadyProvider):
+        repository = SimpleNamespace(
+            get_by_id=lambda _batch_id: SimpleNamespace(source_kind="BANG_KE")
+        )
+
+    service = ExpensePostingService(
+        BangKeProvider(ready),
+        bk_path=target,
+        temp_dir=tmp_path / "Temp",
+        backup_dir=tmp_path / "Backup",
+    )
+    plan = service.analyze(batch_id=1)
+
+    assert plan.source_kind == "BANG_KE"
+    assert plan.selected_sheet is None
+    assert plan.target_sheets == {"T01 26", "T04 26"}
+    negative_conflicts = [
+        conflict
+        for conflict in plan.conflicts
+        if conflict.conflict_type is ConflictType.NEGATIVE_ADJUSTMENT
+    ]
+    assert {conflict.fee: conflict.amount for conflict in negative_conflicts} == {
+        "VSDL": -282_000,
+        "NH": -409_300,
+        "HV": -560_000,
+    }
+    assert {
+        conflict.fee: conflict.details["value_after"]
+        for conflict in negative_conflicts
+    } == {"VSDL": 718_000, "NH": 590_700, "HV": 440_000}
+
+    refined = service.refine(
+        plan,
+        {
+            conflict.conflict_id: {"action": ResolutionAction.ADD}
+            for conflict in negative_conflicts
+        },
+    )
+    assert not refined.conflicts, [
+        (conflict.fee, conflict.sheet_name, conflict.message)
+        for conflict in refined.conflicts
+    ]
+    result = service.apply(refined, {})
+
+    assert result.target_sheets == ("T01 26", "T04 26")
+    assert result.backup_path is not None
+    workbook = load_workbook(target, data_only=False)
+    try:
+        for sheet_name in ("T01 26", "T04 26"):
+            sheet = workbook[sheet_name]
+            assert sheet.cell(1, 39).value == "THUẾ GTGT"
+            assert sheet.cell(1, 40).value == "GIA HẠN"
+        assert workbook["T01 26"].cell(2, 30).value == 718_000
+        assert workbook["T01 26"].cell(2, 26).value == 590_700
+        assert workbook["T01 26"].cell(2, 28).value == 440_000
+        assert workbook["T01 26"].cell(2, 39).value == 80_000
+        assert workbook["T04 26"].cell(2, 40).value == 150_000
+    finally:
+        workbook.close()
+
+
 def _posting_service(
     ready: Path,
     target: Path,

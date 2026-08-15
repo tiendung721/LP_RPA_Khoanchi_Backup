@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
 from app.database import Database
 from app.config import AppSettings
@@ -13,10 +14,12 @@ from app.services.reviewed_batch_provider import ReviewedBatchProvider
 from app.services.excel.posting import ExpensePostingService
 from app.sea_freight import (
     BkContainerSnapshot,
+    BkVesselMatcher,
     ContainerRecord,
     GroupStatus,
     SeaFreightReconciliationService,
     SeaFreightRepository,
+    VesselVoyageNotFoundError,
     iso6346_check_digit,
     normalize_match_key,
     validate_vessel_voyage,
@@ -82,6 +85,90 @@ def test_vessel_voyage_normalization_keeps_voyage_letters() -> None:
     ) == ("PHUCKHANH", "V424S", "PHUCKHANHV424S")
     with pytest.raises(ValueError):
         validate_vessel_voyage("TP 16/5", "TP", "16/5")
+
+    assert validate_vessel_voyage(
+        "AI ĐỌC SAI", "PHUC KHANH", "V.424S"
+    ) == ("PHUCKHANH", "V424S", "PHUCKHANHV424S")
+
+
+def test_vessel_not_found_does_not_create_empty_group(tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.db")
+    repository = SeaFreightRepository(database)
+    matcher = _Matcher(_snapshot(tmp_path, count=0))
+    service = SeaFreightReconciliationService(repository, matcher=matcher)
+
+    with pytest.raises(VesselVoyageNotFoundError) as caught:
+        service.open_or_create(
+            _row(1, 100, "INV-NOT-FOUND"),
+            bk_path=tmp_path / "BK.xlsx",
+            month=7,
+            year=2026,
+            source_batch_id=None,
+            source_item_index=0,
+            source_sha256="missing",
+        )
+
+    assert caught.value.vessel_voyage == "PROSPER 2625S"
+    assert caught.value.bk_sheet == "T07 26"
+    assert repository.list_groups(include_closed=True) == []
+    database.close()
+
+
+def test_matcher_normalizes_exact_text_and_ranks_bk_suggestions(tmp_path: Path) -> None:
+    bk_path = tmp_path / "BK.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "T07 26"
+    sheet.append(
+        [
+            "SQT PM",
+            "Ngày Đóng",
+            "Số Container",
+            "Số tấn",
+            "Loại hàng",
+            "Nơi đóng",
+            "Tên tàu",
+            "Ngày chạy",
+            "Dự kiến giao",
+            "Người nhận",
+            "VT biển",
+            "Vận chuyển",
+        ]
+    )
+    sheet.append(
+        [1, None, _container(1), None, None, None, "PHÚC KHANH / V.424S"]
+    )
+    sheet.append(
+        [2, None, _container(2), None, None, None, "NEW VISION 2610S"]
+    )
+    sheet.append(
+        [3, None, _container(3), None, None, None, "NEW VISION 2610S"]
+    )
+    sheet.append(
+        [4, None, _container(4), None, None, None, "NEW VISION 2611N"]
+    )
+    workbook.save(bk_path)
+    workbook.close()
+    matcher = BkVesselMatcher()
+
+    exact = matcher.snapshot(
+        bk_path,
+        "T07 26",
+        vessel_voyage_raw="AI ĐỌC KHÁC",
+        vessel_name="phuc khanh",
+        voyage_no="V 424S",
+    )
+    suggestions = matcher.suggestions(
+        bk_path,
+        "T07 26",
+        vessel_name="NEW VISON",
+        voyage_no="2610S",
+    )
+
+    assert exact.container_count == 1
+    assert exact.vessel_voyage_raw == "phuc khanh V 424S"
+    assert suggestions[0].vessel_voyage == "NEW VISION 2610S"
+    assert suggestions[0].container_count == 2
 
 
 def test_accumulates_pending_then_ready_and_allocates_exact_total(tmp_path: Path) -> None:
@@ -335,6 +422,9 @@ def test_reconciliation_dialog_has_only_the_six_confirmed_actions(qtbot, tmp_pat
         assert dialog.container_table.rowCount() == 2
         assert dialog.result_table.rowCount() == 2
         assert dialog.status_label.text().startswith("Đủ 2/2 cont")
+        assert dialog.group_value.isReadOnly()
+        assert dialog.group_value.text().startswith("PROSPER 2625S – Lần 1 –")
+        assert not hasattr(dialog, "group_combo")
     finally:
         dialog.close()
         database.close()

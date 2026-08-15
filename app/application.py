@@ -24,6 +24,7 @@ from app.database import Database
 from app.logging_setup import setup_logging
 from app.repositories.batch_repository import BatchRepository
 from app.repositories.batch_repository import local_now_iso
+from app.repositories.excel_draft_repository import ExcelDraftRepository
 from app.repositories.excel_run_repository import ExcelRunRepository
 from app.repositories.expense_posting_repository import ExpensePostingRepository
 from app.services.batch_service import BatchService
@@ -36,6 +37,7 @@ from app.services.excel import (
     ExpensePostingService,
     PaymentSyncService,
 )
+from app.services.excel.drafts import ExcelDraftService
 from app.services.output_watcher import OutputWatcher
 from app.services.json_codec import JsonCodec
 from app.services.reviewed_batch_provider import ReviewedBatchProvider
@@ -94,6 +96,8 @@ class ApplicationRuntime:
         )
         self.reviewed_batch_provider = ReviewedBatchProvider(self.batch_service)
         self.excel_run_repository = ExcelRunRepository(self.database)
+        self.excel_draft_repository = ExcelDraftRepository(self.database)
+        self.excel_draft_service = ExcelDraftService(self.excel_draft_repository)
         self.expense_posting_repository = ExpensePostingRepository(self.database)
         self.sea_freight_repository = SeaFreightRepository(self.database)
         self.sea_freight_service = SeaFreightReconciliationService(
@@ -110,6 +114,7 @@ class ApplicationRuntime:
             daily_sync_service=self.daily_sync_service,
             expense_posting_service=self.expense_posting_service,
             payment_sync_service=self.payment_sync_service,
+            draft_service=self.excel_draft_service,
         )
         self.rpa_expense_service = RpaExpenseService(self.settings)
         self.rpa_expense_launcher = RpaExpenseBatLauncher(self.settings)

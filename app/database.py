@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
@@ -117,7 +118,15 @@ class Database:
                 self._migration_13(connection)
                 connection.execute("PRAGMA user_version = 13")
                 current_version = 13
-            self._ensure_schema_13(connection)
+            if current_version < 14:
+                self._migration_14(connection)
+                connection.execute("PRAGMA user_version = 14")
+                current_version = 14
+            if current_version < 15:
+                self._migration_15(connection)
+                connection.execute("PRAGMA user_version = 15")
+                current_version = 15
+            self._ensure_schema_15(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -823,6 +832,129 @@ class Database:
     @staticmethod
     def _ensure_schema_13(connection: sqlite3.Connection) -> None:
         Database._migration_13(connection)
+
+    @staticmethod
+    def _migration_14(connection: sqlite3.Connection) -> None:
+        """Lưu lựa chọn của phiên Excel chưa hoàn tất để có thể tiếp tục."""
+
+        Database._ensure_schema_13(connection)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS excel_resolution_drafts (
+                context_key TEXT PRIMARY KEY,
+                operation TEXT NOT NULL,
+                context_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('ACTIVE', 'FAILED', 'COMPLETED')
+                ),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                last_error TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_excel_resolution_drafts_status
+            ON excel_resolution_drafts(operation, status, updated_at DESC)
+            """
+        )
+
+    @staticmethod
+    def _ensure_schema_14(connection: sqlite3.Connection) -> None:
+        Database._migration_14(connection)
+
+    @staticmethod
+    def _migration_15(connection: sqlite3.Connection) -> None:
+        """Giữ lần xử lý xung đột gần nhất theo file nguồn và nghiệp vụ."""
+
+        Database._ensure_schema_14(connection)
+        Database._ensure_schema_15(connection)
+
+        rows = connection.execute(
+            "SELECT * FROM excel_resolution_drafts ORDER BY updated_at, context_key"
+        ).fetchall()
+        for row in rows:
+            try:
+                context = json.loads(str(row["context_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                context = {}
+            operation = str(row["operation"])
+            batch_id = context.get("batch_id")
+            source_path = context.get("source_path")
+            source_identity = context.get("source_identity")
+            if batch_id not in (None, ""):
+                source_file_key = f"{operation}:batch:{batch_id}"
+            elif source_path not in (None, ""):
+                source_file_key = f"{operation}:path:{str(source_path).casefold()}"
+            elif source_identity not in (None, ""):
+                source_file_key = f"{operation}:identity:{source_identity}"
+            else:
+                source_file_key = f"{operation}:legacy:{row['context_key']}"
+            status = (
+                "SUCCEEDED" if str(row["status"]) == "COMPLETED" else str(row["status"])
+            )
+            connection.execute(
+                """
+                INSERT INTO excel_resolution_latest (
+                    source_file_key, operation, context_json, payload_json,
+                    status, run_id, created_at, updated_at, completed_at,
+                    last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_file_key) DO UPDATE SET
+                    operation = excluded.operation,
+                    context_json = excluded.context_json,
+                    payload_json = excluded.payload_json,
+                    status = excluded.status,
+                    run_id = excluded.run_id,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    completed_at = excluded.completed_at,
+                    last_error = excluded.last_error
+                WHERE excluded.updated_at >= excel_resolution_latest.updated_at
+                """,
+                (
+                    source_file_key,
+                    operation,
+                    str(row["context_json"]),
+                    str(row["payload_json"]),
+                    status,
+                    context.get("run_id"),
+                    str(row["created_at"]),
+                    str(row["updated_at"]),
+                    row["completed_at"],
+                    row["last_error"],
+                ),
+            )
+
+    @staticmethod
+    def _ensure_schema_15(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS excel_resolution_latest (
+                source_file_key TEXT PRIMARY KEY,
+                operation TEXT NOT NULL,
+                context_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('ACTIVE', 'SUCCEEDED', 'FAILED', 'CANCELLED')
+                ),
+                run_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                last_error TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_excel_resolution_latest_operation
+            ON excel_resolution_latest(operation, updated_at DESC)
+            """
+        )
 
     @contextmanager
     def transaction(

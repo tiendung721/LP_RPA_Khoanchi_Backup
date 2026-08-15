@@ -11,6 +11,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from openpyxl.styles import Alignment, Font, PatternFill
 
+from app.constants import DAILY_SYNC_CARRIER_FEE_CODES
+
 from .models import CarrierSummaryResult
 
 
@@ -21,10 +23,18 @@ CARRIER_SEPARATOR = " / "
 UNMAPPED_CARRIER = "CHƯA XÁC ĐỊNH"
 MISSING_INVOICE = "CHƯA CÓ HĐ"
 
-HP_FEE_CODES = frozenset({"HH"})
-NAM_FEE_CODES = frozenset({"NV", "NH", "HV", "VSDL", "LL", "LC", "SC", "QT"})
+SEA_FEE_CODES = frozenset({"CB"})
+ROAD_FEE_CODES = frozenset(DAILY_SYNC_CARRIER_FEE_CODES - SEA_FEE_CODES)
+NAM_FEE_CODES = frozenset(
+    {"NV", "HH", "NH", "HV", "VSDL", "LL", "LC", "SC", "QT"}
+)
+DAILY_MANAGED_CARRIER_GROUPS = frozenset({"SEA", "ROAD"})
 
 BK_CARRIER_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
+    "SEA": ("VT biển", "Vận tải biển"),
+    "ROAD": ("VT bộ", "Vận tải bộ"),
+    # Giữ alias HP cho luồng BK → Thanh toán cũ; Khoản chi → BK không còn
+    # dùng nhóm này để HĐ phí không ghi vào cột VT bộ của file Hàng ngày.
     "HP": ("VT bộ", "Vận tải bộ"),
     "NAM": ("VT TRONG NAM", "Vận tải trong Nam"),
 }
@@ -83,8 +93,10 @@ WARNING_FILL = PatternFill("solid", fgColor="FFF2CC")
 
 def carrier_group_for_fee(fee: str | None) -> str | None:
     normalized = str(fee or "").strip().upper()
-    if normalized in HP_FEE_CODES:
-        return "HP"
+    if normalized in SEA_FEE_CODES:
+        return "SEA"
+    if normalized in ROAD_FEE_CODES:
+        return "ROAD"
     if normalized in NAM_FEE_CODES:
         return "NAM"
     return None
@@ -764,6 +776,7 @@ def detail_rows_from_actions(
 __all__ = [
     "BK_CARRIER_HEADER_ALIASES",
     "BK_DETAIL_SHEET",
+    "DAILY_MANAGED_CARRIER_GROUPS",
     "DETAIL_HEADERS",
     "INVOICE_SUMMARY_HEADERS",
     "MISSING_INVOICE",

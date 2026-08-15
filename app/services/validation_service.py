@@ -92,7 +92,11 @@ def normalize_optional_text(
     return normalized or None
 
 
-def parse_amount(value: int | str | None) -> int | None:
+def parse_amount(
+    value: int | str | None,
+    *,
+    allow_negative: bool = False,
+) -> int | None:
     """Parse số nguyên VND; không suy đoán ký hiệu thập phân."""
 
     if value is None:
@@ -100,9 +104,9 @@ def parse_amount(value: int | str | None) -> int | None:
     if isinstance(value, bool):
         raise AmountParseError("Số tiền không được là kiểu boolean.")
     if type(value) is int:
-        if value < 0:
+        if value < 0 and not allow_negative:
             raise AmountParseError("Số tiền không được âm.")
-        if value > _MAX_SIGNED_64:
+        if abs(value) > _MAX_SIGNED_64:
             raise AmountParseError("Số tiền vượt giới hạn số nguyên 64 bit.")
         return value
     if not isinstance(value, str):
@@ -111,22 +115,27 @@ def parse_amount(value: int | str | None) -> int | None:
     text = value.strip()
     if not text:
         return None
-    if not _AMOUNT_ALLOWED_RE.fullmatch(text):
+    sign = -1 if text.startswith("-") else 1
+    unsigned = text[1:].strip() if sign < 0 else text
+    if sign < 0 and not allow_negative:
+        raise AmountParseError("Số tiền không được âm.")
+    if not _AMOUNT_ALLOWED_RE.fullmatch(unsigned):
         raise AmountParseError(
             "Số tiền chỉ được chứa chữ số và dấu phân cách hàng nghìn."
         )
-    if text.isdigit():
-        parsed = int(text)
+    if unsigned.isdigit():
+        parsed = int(unsigned)
     else:
         # Thu gọn mọi dạng khoảng trắng thành dấu cách trước khi kiểm tra nhóm.
-        grouped = _COLLAPSE_WHITESPACE_RE.sub(" ", text)
+        grouped = _COLLAPSE_WHITESPACE_RE.sub(" ", unsigned)
         match = _AMOUNT_GROUPED_RE.fullmatch(grouped)
         if match is None:
             raise AmountParseError(
                 "Dấu phân cách tiền không đúng nhóm hàng nghìn."
             )
         parsed = int(re.sub(r"[.,\s]", "", grouped))
-    if parsed > _MAX_SIGNED_64:
+    parsed *= sign
+    if abs(parsed) > _MAX_SIGNED_64:
         raise AmountParseError("Số tiền vượt giới hạn số nguyên 64 bit.")
     return parsed
 
@@ -186,7 +195,13 @@ class ValidationService:
             invoice_date=normalize_optional_text(invoice_date, field_name="Ngày HĐ"),
         )
 
-    def validate_row(self, row: DataRow, index: int = 0) -> RowValidation:
+    def validate_row(
+        self,
+        row: DataRow,
+        index: int = 0,
+        *,
+        allow_negative: bool = False,
+    ) -> RowValidation:
         issues: list[ValidationIssue] = []
 
         def error(code: str, message: str, field: str) -> None:
@@ -327,8 +342,14 @@ class ValidationService:
                 message = "Số tiền phải là số nguyên hoặc null."
                 code = "amount_type"
             error(code, message, "amount")
-        elif isinstance(row.amount, int) and row.amount < 0:
+        elif isinstance(row.amount, int) and row.amount < 0 and not allow_negative:
             error("amount_negative", "Số tiền không được âm.", "amount")
+        elif isinstance(row.amount, int) and row.amount < 0:
+            warning(
+                "amount_negative_adjustment",
+                "Khoản điều chỉnh giảm.",
+                "amount",
+            )
 
         if fee_valid and rule_valid:
             if row.rule == "HD" and row.fee != "CB":
@@ -386,7 +407,6 @@ class ValidationService:
             )
         if fee_valid and row.fee == "CB" and row.cont is None:
             required_reconciliation = (
-                ("vessel_voyage_raw", row.vessel_voyage_raw, "tàu/chuyến nguyên văn"),
                 ("vessel_name", row.vessel_name, "tên tàu"),
                 ("voyage_no", row.voyage_no, "số chuyến"),
                 (
@@ -404,7 +424,12 @@ class ValidationService:
                     )
         return RowValidation(row_index=index, issues=issues)
 
-    def validate_document(self, value: BatchDocument | object) -> ValidationResult:
+    def validate_document(
+        self,
+        value: BatchDocument | object,
+        *,
+        allow_negative: bool = False,
+    ) -> ValidationResult:
         if isinstance(value, BatchDocument):
             document = value
             if type(document.v) is not int or document.v != SCHEMA_VERSION:
@@ -432,7 +457,8 @@ class ValidationService:
                 return ValidationResult(issues=[issue])
 
         row_results = [
-            self.validate_row(row, index) for index, row in enumerate(document.rows)
+            self.validate_row(row, index, allow_negative=allow_negative)
+            for index, row in enumerate(document.rows)
         ]
         self._append_duplicate_warnings(document.rows, row_results)
         all_issues = [
@@ -450,7 +476,7 @@ class ValidationService:
                 container_count += 1
             if isinstance(row.bl, str) and bool(row.bl):
                 bl_count += 1
-            if type(row.amount) is int and row.amount >= 0:
+            if type(row.amount) is int:
                 amount_count += 1
                 total_amount += row.amount
             if isinstance(row.fee, str):

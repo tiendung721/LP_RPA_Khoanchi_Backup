@@ -6,6 +6,7 @@ from .contracts import (
     GroupStatus,
     ReconciliationGroup,
     SupplementImportResult,
+    VesselVoyageSuggestion,
     group_status_text,
 )
 from .container_numbers import (
@@ -16,15 +17,19 @@ from .container_numbers import (
     validate_iso6346,
 )
 from .matching import (
+    BkVesselMatcher,
     SeaFreightMatchError,
     normalize_match_key,
+    vessel_voyage_keys,
+    vessel_voyage_text,
     validate_vessel_voyage,
 )
 from .repository import SeaFreightRepository
-from .service import SeaFreightReconciliationService
+from .service import SeaFreightReconciliationService, VesselVoyageNotFoundError
 
 __all__ = [
     "BkContainerSnapshot",
+    "BkVesselMatcher",
     "InvalidContainerNumber",
     "allocate_integer_amount",
     "iso6346_check_digit",
@@ -34,10 +39,14 @@ __all__ = [
     "GroupStatus",
     "ReconciliationGroup",
     "SupplementImportResult",
+    "VesselVoyageSuggestion",
     "SeaFreightMatchError",
     "SeaFreightReconciliationService",
+    "VesselVoyageNotFoundError",
     "SeaFreightRepository",
     "normalize_match_key",
+    "vessel_voyage_keys",
+    "vessel_voyage_text",
     "validate_vessel_voyage",
     "group_status_text",
 ]

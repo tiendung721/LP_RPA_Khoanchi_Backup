@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.services.carrier_policy import carrier_is_managed_by_daily_sync
+
 from .review_table_model import (
     FEE_CATALOG,
     RULE_CATALOG,
@@ -69,22 +71,26 @@ def normalize_optional_text(value: str) -> str | None:
     return normalized or None
 
 
-def parse_amount(text: str) -> int | None:
+def parse_amount(text: str, *, allow_negative: bool = False) -> int | None:
     """Đọc số nguyên 64 bit từ cách gõ thân thiện có phân cách hàng nghìn."""
 
     if _core_parse_amount is not None:
-        return _core_parse_amount(text)
+        return _core_parse_amount(text, allow_negative=allow_negative)
     value = text.strip()
     if not value:
         return None
-    if not re.fullmatch(r"\d+", value):
-        if not re.fullmatch(r"\d{1,3}(?:[., ]\d{3})+", value):
+    sign = -1 if value.startswith("-") else 1
+    unsigned = value[1:].strip() if sign < 0 else value
+    if sign < 0 and not allow_negative:
+        raise ValueError("Số tiền không được âm.")
+    if not re.fullmatch(r"\d+", unsigned):
+        if not re.fullmatch(r"\d{1,3}(?:[., ]\d{3})+", unsigned):
             raise ValueError(
                 "Số tiền chỉ được chứa chữ số và dấu phân cách hàng nghìn hợp lệ."
             )
-    compact = re.sub(r"[., ]", "", value)
-    amount = int(compact)
-    if amount > 9_223_372_036_854_775_807:
+    compact = re.sub(r"[., ]", "", unsigned)
+    amount = sign * int(compact)
+    if abs(amount) > 9_223_372_036_854_775_807:
         raise ValueError("Số tiền vượt giới hạn số nguyên 64 bit.")
     return amount
 
@@ -105,6 +111,7 @@ class EditRowDialog(QDialog):
         *,
         validator: Callable[[ReviewRow], Any] | Any | None = None,
         title: str | None = None,
+        allow_negative: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title or ("Thêm dòng dữ liệu" if row is None else "Sửa dòng dữ liệu"))
@@ -112,9 +119,12 @@ class EditRowDialog(QDialog):
         self.resize(680, 760)
         self._editing = row is not None
         self._original_rule: Any = None
+        self._original_vessel_voyage_raw: Any = None
         self._validator = validator
+        self._allow_negative = bool(allow_negative)
         self._result_row: ReviewRow | None = None
         self._last_validation = RowValidation()
+        self._last_fee: object = None
         self._build_ui()
         self._connect_signals()
         self.set_row(row if row is not None else ReviewRow())
@@ -156,20 +166,24 @@ class EditRowDialog(QDialog):
         self.bl_edit.setClearButtonEnabled(True)
         form.addRow("Số B/L:", self.bl_edit)
 
-        self.vessel_voyage_raw_edit = QLineEdit()
-        self.vessel_voyage_raw_edit.setPlaceholderText("Ví dụ: PROSPER 2625S")
-        self.vessel_voyage_raw_edit.setClearButtonEnabled(True)
-        form.addRow("Tàu/chuyến gốc:", self.vessel_voyage_raw_edit)
-
         self.vessel_name_edit = QLineEdit()
+        self.vessel_name_edit.setObjectName("vesselNameEdit")
         self.vessel_name_edit.setPlaceholderText("Ví dụ: PROSPER")
         self.vessel_name_edit.setClearButtonEnabled(True)
         form.addRow("Tên tàu:", self.vessel_name_edit)
 
         self.voyage_no_edit = QLineEdit()
+        self.voyage_no_edit.setObjectName("voyageNoEdit")
         self.voyage_no_edit.setPlaceholderText("Ví dụ: 2625S")
         self.voyage_no_edit.setClearButtonEnabled(True)
         form.addRow("Số chuyến:", self.voyage_no_edit)
+
+        self.vessel_voyage_preview = QLabel("—")
+        self.vessel_voyage_preview.setObjectName("vesselVoyagePreview")
+        self.vessel_voyage_preview.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        form.addRow("Tàu/chuyến dùng để đối soát:", self.vessel_voyage_preview)
 
         self.invoice_container_count_edit = QLineEdit()
         self.invoice_container_count_edit.setPlaceholderText("Số nguyên dương")
@@ -180,6 +194,14 @@ class EditRowDialog(QDialog):
         self.container_count_basis_combo.addItem("EXPLICIT – Ghi rõ trên HĐ", "EXPLICIT")
         self.container_count_basis_combo.addItem("CALCULATED – Tính từ HĐ", "CALCULATED")
         form.addRow("Căn cứ SL:", self.container_count_basis_combo)
+        self._sea_freight_widgets = (
+            self.vessel_name_edit,
+            self.voyage_no_edit,
+            self.vessel_voyage_preview,
+            self.invoice_container_count_edit,
+            self.container_count_basis_combo,
+        )
+        self._form = form
 
         self.fee_combo = QComboBox()
         self.fee_combo.setObjectName("feeCombo")
@@ -225,7 +247,11 @@ class EditRowDialog(QDialog):
         self.amount_edit.setMaxLength(30)
         self.amount_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
         amount_box.addWidget(self.amount_edit)
-        amount_hint = QLabel("Lưu dưới dạng số nguyên VND; không nhập ký hiệu tiền tệ hoặc số âm.")
+        amount_hint = QLabel(
+            "Số nguyên VND có dấu; số âm là khoản điều chỉnh giảm."
+            if self._allow_negative
+            else "Lưu dưới dạng số nguyên VND; không nhập ký hiệu tiền tệ hoặc số âm."
+        )
         amount_hint.setProperty("muted", True)
         amount_box.addWidget(amount_hint)
         amount_widget = QWidget()
@@ -257,12 +283,11 @@ class EditRowDialog(QDialog):
     def _connect_signals(self) -> None:
         self.container_edit.textChanged.connect(self._validate_realtime)
         self.bl_edit.textChanged.connect(self._validate_realtime)
-        self.vessel_voyage_raw_edit.textChanged.connect(self._validate_realtime)
-        self.vessel_name_edit.textChanged.connect(self._validate_realtime)
-        self.voyage_no_edit.textChanged.connect(self._validate_realtime)
+        self.vessel_name_edit.textChanged.connect(self._vessel_changed)
+        self.voyage_no_edit.textChanged.connect(self._vessel_changed)
         self.invoice_container_count_edit.textChanged.connect(self._validate_realtime)
         self.container_count_basis_combo.currentIndexChanged.connect(self._validate_realtime)
-        self.fee_combo.currentIndexChanged.connect(self._validate_realtime)
+        self.fee_combo.currentIndexChanged.connect(self._fee_changed)
         self.rule_combo.currentIndexChanged.connect(self._validate_realtime)
         self.invoice_no_edit.textChanged.connect(self._validate_realtime)
         self.invoice_date_edit.textChanged.connect(self._validate_realtime)
@@ -272,13 +297,42 @@ class EditRowDialog(QDialog):
         self.button_box.accepted.connect(self._accept_row)
         self.button_box.rejected.connect(self.reject)
 
+    def _fee_changed(self, *_args: Any) -> None:
+        current = self.fee_combo.currentData()
+        if (
+            carrier_is_managed_by_daily_sync(current)
+            and not carrier_is_managed_by_daily_sync(self._last_fee)
+        ):
+            # Khi đổi một HĐ phí thành loại vận tải lấy từ Hàng ngày, carrier
+            # cũ không được vô tình trở thành một ghi đè thủ công. Ô vẫn mở để
+            # user nhập lại sau thao tác đổi mã nếu đó thực sự là chủ ý.
+            self.carrier_edit.clear()
+        self._last_fee = current
+        self._update_sea_freight_visibility()
+        self._validate_realtime()
+
+    def _vessel_changed(self, *_args: Any) -> None:
+        vessel = " ".join(self.vessel_name_edit.text().strip().split())
+        voyage = " ".join(self.voyage_no_edit.text().strip().split())
+        self.vessel_voyage_preview.setText(
+            " ".join(part for part in (vessel, voyage) if part) or "—"
+        )
+        self._validate_realtime()
+
+    def _update_sea_freight_visibility(self) -> None:
+        visible = self.fee_combo.currentData() == "CB"
+        for widget in self._sea_freight_widgets:
+            self._form.setRowVisible(widget, visible)
+
+    def focus_vessel_fields(self) -> None:
+        self.vessel_name_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.vessel_name_edit.selectAll()
+
     def set_row(self, row: Any) -> None:
         value = coerce_review_row(row)
+        self._original_vessel_voyage_raw = value.vessel_voyage_raw
         self.container_edit.setText(value.cont if isinstance(value.cont, str) else "")
         self.bl_edit.setText(value.bl if isinstance(value.bl, str) else "")
-        self.vessel_voyage_raw_edit.setText(
-            value.vessel_voyage_raw if isinstance(value.vessel_voyage_raw, str) else ""
-        )
         self.vessel_name_edit.setText(
             value.vessel_name if isinstance(value.vessel_name, str) else ""
         )
@@ -307,10 +361,12 @@ class EditRowDialog(QDialog):
         )
         valid_amount = (
             value.amount
-            if isinstance(value.amount, int) and not isinstance(value.amount, bool) and value.amount >= 0
+            if isinstance(value.amount, int) and not isinstance(value.amount, bool)
             else None
         )
         self.amount_edit.setText(format_amount(valid_amount))
+        self._vessel_changed()
+        self._update_sea_freight_visibility()
         self._validate_realtime()
 
     @staticmethod
@@ -324,7 +380,13 @@ class EditRowDialog(QDialog):
 
     def _format_amount_on_finish(self) -> None:
         try:
-            self.amount_edit.setText(format_amount(parse_amount(self.amount_edit.text())))
+            self.amount_edit.setText(
+                format_amount(
+                    parse_amount(
+                        self.amount_edit.text(), allow_negative=self._allow_negative
+                    )
+                )
+            )
         except ValueError:
             return
 
@@ -332,7 +394,9 @@ class EditRowDialog(QDialog):
         amount_error: str | None = None
         amount: int | None = None
         try:
-            amount = parse_amount(self.amount_edit.text())
+            amount = parse_amount(
+                self.amount_edit.text(), allow_negative=self._allow_negative
+            )
         except ValueError as exc:
             amount_error = str(exc)
         count_text = self.invoice_container_count_edit.text().strip()
@@ -350,9 +414,7 @@ class EditRowDialog(QDialog):
             amount=amount,
             invoice_no=normalize_optional_text(self.invoice_no_edit.text()),
             carrier=normalize_optional_text(self.carrier_edit.text()),
-            vessel_voyage_raw=normalize_optional_text(
-                self.vessel_voyage_raw_edit.text()
-            ),
+            vessel_voyage_raw=self._original_vessel_voyage_raw,
             vessel_name=normalize_optional_text(self.vessel_name_edit.text()),
             voyage_no=normalize_optional_text(self.voyage_no_edit.text()),
             invoice_container_count=count,
@@ -363,7 +425,7 @@ class EditRowDialog(QDialog):
 
     def _validate_realtime(self, *_args: Any) -> None:
         row, amount_error = self._collect_row()
-        local = validate_row(row)
+        local = validate_row(row, allow_negative=self._allow_negative)
         errors = list(local.errors)
         warnings = list(local.warnings)
         if amount_error:
@@ -425,7 +487,13 @@ class EditRowDialog(QDialog):
                 method = getattr(self._validator, "validate_row", None)
                 if not callable(method):
                     return [], []
-                result = method(row)
+                if self._allow_negative:
+                    try:
+                        result = method(row, allow_negative=True)
+                    except TypeError:
+                        result = method(row)
+                else:
+                    result = method(row)
         except Exception:
             return [], []
 

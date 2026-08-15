@@ -37,9 +37,17 @@ Bước 1 hoặc chọn JSON thủ công.
 - Dòng cước biển thiếu số cont có một hành động duy nhất **Đối soát số cont**.
   Người dùng chọn tháng/năm, ứng dụng tự chọn sheet `TMM YY` và tìm cont bằng
   **tên tàu + số chuyến**.
+- Màn hình kiểm tra chỉ hiển thị một cột **Tàu/chuyến** ghép từ hai trường trên;
+  khi sửa dòng, giá trị AI nguyên văn vẫn được giữ để truy vết.
+- Nếu không tìm thấy tàu/chuyến trong BK, ứng dụng không tạo hồ sơ rỗng mà hiển
+  thị tối đa năm gợi ý gần đúng kèm số cont. Người dùng tự sửa thông tin rồi chủ
+  động đối soát lại; gợi ý không bao giờ được tự áp dụng.
 - Cửa sổ đối soát hiển thị đồng thời danh sách HĐ, cont tìm được trong BK và
   bảng kết quả dự kiến. HĐ có thể thêm, sửa, xóa và lưu trực tiếp; hồ sơ chưa
   hoàn tất được giữ qua các lần khởi động mà không cần trung tâm chờ riêng.
+- Hồ sơ trong cửa sổ đối soát được cố định theo đúng dòng đã chọn ở màn hình
+  kiểm tra dữ liệu bóc tách. Muốn xem hoặc đối soát file khác, người dùng phải
+  đóng hồ sơ hiện tại rồi bấm **Xem hồ sơ** hoặc **Đối soát** tại dòng tương ứng.
 - Khi mở Trợ lý bóc tách trong hồ sơ, JSON mới tải về `Output` được tự kiểm tra.
   Chỉ HĐ cước biển cùng tàu/chuyến được thêm vào hồ sơ; HĐ trùng bị bỏ qua và
   các dòng khác vẫn nằm trong batch bóc tách mới.

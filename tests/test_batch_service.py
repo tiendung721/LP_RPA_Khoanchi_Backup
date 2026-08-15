@@ -91,6 +91,23 @@ def test_receive_keeps_one_timestamped_json_without_legacy_copies(
     service.close()
 
 
+def test_bang_ke_filename_sets_source_kind_before_timestamp_rename(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    source = _write_json(
+        settings.output_dir / "ket_qua_boc_tach_bang_ke_ha_vo.json",
+        [["DRYU3045911", "VS26020793", "VSDL", "GV", None, None, 282_000]],
+    )
+    service = BatchService(settings)
+
+    result = service.receive_file(source)
+
+    assert result.batch.source_kind == "BANG_KE"
+    _assert_timestamped(result.batch.working_path)
+    service.close()
+
+
 def test_receive_real_fixture_records_all_47_rows(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     source = settings.output_dir / "ket_qua_boc_tach.json"
@@ -103,6 +120,60 @@ def test_receive_real_fixture_records_all_47_rows(tmp_path: Path) -> None:
     assert result.review is not None
     assert result.batch.row_count == 47
     assert len(result.review.document.rows) == 47
+    service.close()
+
+
+def test_receive_strips_only_gpt_carriers_managed_by_daily_sync(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    source = _write_json(
+        settings.output_dir / "ket_qua_boc_tach.json",
+        [
+            ["DRYU3026167", None, "VTN", "CV", "HD-VTN", "GPT VTN DÀI", 100],
+            ["GAOU2112422", None, "CBDH", "CV", "HD-CBDH", "GPT BỘ DÀI", 200],
+            [None, "BL123456789", "CB", "HD", "HD-CB", "GPT BIỂN DÀI", 300],
+            ["VSGU2250713", None, "NH", "CV", "HD-PHI", "NHS", 400],
+        ],
+    )
+    service = BatchService(settings)
+
+    result = service.receive_file(source)
+
+    assert result.review is not None
+    assert [row.carrier for row in result.review.document.rows] == [
+        None,
+        None,
+        None,
+        "NHS",
+    ]
+    persisted = json.loads(_current_json(settings).read_text(encoding="utf-8"))
+    assert [row["carrier"] for row in persisted["d"]] == [
+        None,
+        None,
+        None,
+        "NHS",
+    ]
+    service.close()
+
+
+def test_manual_carrier_for_daily_sync_fee_survives_save_and_reload(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    source = _write_json(
+        settings.output_dir / "ket_qua_boc_tach.json",
+        [["DRYU3026167", None, "VTN", "CV", "HD-1", "GPT DÀI", 100]],
+    )
+    service = BatchService(settings)
+    received = service.receive_file(source)
+    received.review.document.rows[0].carrier = "USER CHỌN"
+
+    saved = service.save_working(received.batch.id, received.review.document)
+    reloaded = service.load_batch(received.batch.id)
+
+    assert saved.document.rows[0].carrier == "USER CHỌN"
+    assert reloaded.document.rows[0].carrier == "USER CHỌN"
     service.close()
 
 

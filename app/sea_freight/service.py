@@ -12,19 +12,44 @@ from .contracts import (
     GroupStatus,
     ReconciliationGroup,
     SupplementImportResult,
+    VesselVoyageSuggestion,
 )
 from .container_numbers import allocate_integer_amount
 from .matching import (
     BkVesselMatcher,
     SeaFreightMatchError,
     normalize_match_key,
-    validate_vessel_voyage,
+    vessel_voyage_keys,
+    vessel_voyage_text,
 )
 from .repository import DuplicateContributionError, SeaFreightRepository
 
 
 class SeaFreightReconciliationError(RuntimeError):
     pass
+
+
+class VesselVoyageNotFoundError(SeaFreightReconciliationError):
+    def __init__(
+        self,
+        *,
+        vessel_voyage: str,
+        bk_sheet: str,
+        suggestions: tuple[VesselVoyageSuggestion, ...] = (),
+        sheet_missing: bool = False,
+    ) -> None:
+        self.vessel_voyage = vessel_voyage
+        self.bk_sheet = bk_sheet
+        self.suggestions = suggestions
+        self.sheet_missing = sheet_missing
+        if sheet_missing:
+            message = f"Không tìm thấy sheet BK {bk_sheet}."
+        else:
+            message = (
+                f'Không tìm thấy tàu/chuyến “{vessel_voyage}” trong sheet {bk_sheet}. '
+                "Hãy kiểm tra và sửa lại thông tin tàu/chuyến, sau đó đối soát lại."
+            )
+        super().__init__(message)
 
 
 class SeaFreightReconciliationService:
@@ -81,14 +106,16 @@ class SeaFreightReconciliationService:
         except Exception:
             names = ()
         if sheet not in names:
-            vessel_key, voyage_key, combined_key = validate_vessel_voyage(
-                row.vessel_voyage_raw, row.vessel_name, row.voyage_no
+            vessel_key, voyage_key, combined_key = vessel_voyage_keys(
+                row.vessel_name, row.voyage_no
             )
             return (
                 BkContainerSnapshot(
                     bk_path=str(Path(bk_path).expanduser().resolve()),
                     bk_sheet=sheet,
-                    vessel_voyage_raw=str(row.vessel_voyage_raw),
+                    vessel_voyage_raw=vessel_voyage_text(
+                        row.vessel_name, row.voyage_no
+                    ),
                     vessel_key=vessel_key,
                     voyage_key=voyage_key,
                     combined_key=combined_key,
@@ -115,6 +142,7 @@ class SeaFreightReconciliationService:
         snapshot, issue = self._snapshot_for_period(
             row, bk_path=bk_path, month=month, year=year
         )
+        self._require_snapshot_match(row, snapshot, issue=issue)
         existing = self.repository.find_open_group(
             snapshot.bk_path, snapshot.bk_sheet, snapshot.vessel_key, snapshot.voyage_key
         )
@@ -160,6 +188,7 @@ class SeaFreightReconciliationService:
         source_kind: str = "INITIAL",
     ) -> ReconciliationGroup:
         snapshot = self.inspect(row, bk_path=bk_path, bk_sheet=bk_sheet)
+        self._require_snapshot_match(row, snapshot)
         month, year = self.period_from_sheet(bk_sheet)
         existing = self.repository.find_open_group(
             snapshot.bk_path, snapshot.bk_sheet, snapshot.vessel_key, snapshot.voyage_key
@@ -183,7 +212,7 @@ class SeaFreightReconciliationService:
             snapshot,
             month=month,
             year=year,
-            bk_issue="VESSEL_NOT_FOUND" if snapshot.container_count == 0 else None,
+            bk_issue=None,
         )
         self._add_row(
             group.id,
@@ -262,9 +291,8 @@ class SeaFreightReconciliationService:
             GroupStatus.ALLOCATED, GroupStatus.POSTED, GroupStatus.CANCELLED
         }:
             raise SeaFreightReconciliationError("Hồ sơ đã hoàn tất, không thể sửa.")
-        vessel_key, voyage_key, _ = validate_vessel_voyage(
-            vessel_voyage_raw, vessel_name, voyage_no
-        )
+        vessel_voyage_keys(vessel_name, voyage_no)
+        effective_vessel_voyage = vessel_voyage_text(vessel_name, voyage_no)
         seen_invoices: set[str] = set()
         normalized: list[dict[str, object]] = []
         for index, item in enumerate(invoices):
@@ -306,7 +334,7 @@ class SeaFreightReconciliationService:
                 amount=amount,
                 invoice_no=invoice_no,
                 carrier=str(item.get("carrier") or "").strip() or None,
-                vessel_voyage_raw=vessel_voyage_raw.strip(),
+                vessel_voyage_raw=effective_vessel_voyage,
                 vessel_name=vessel_name.strip(),
                 voyage_no=voyage_no.strip(),
                 invoice_container_count=count,
@@ -330,13 +358,14 @@ class SeaFreightReconciliationService:
             raise SeaFreightReconciliationError("Chưa xác định được tháng đối soát.")
         probe = DataRow(
             cont=None, bl=None, fee="CB", rule="HD", amount=0,
-            invoice_no="PROBE", vessel_voyage_raw=vessel_voyage_raw.strip(),
+            invoice_no="PROBE", vessel_voyage_raw=effective_vessel_voyage,
             vessel_name=vessel_name.strip(), voyage_no=voyage_no.strip(),
             invoice_container_count=1, container_count_basis="EXPLICIT",
         )
         snapshot, issue = self._snapshot_for_period(
             probe, bk_path=group.bk_path, month=month, year=year
         )
+        self._require_snapshot_match(probe, snapshot, issue=issue)
         return self.repository.save_contributions(
             group_id,
             normalized,
@@ -462,6 +491,7 @@ class SeaFreightReconciliationService:
             raise SeaFreightReconciliationError(
                 "Không đọc lại được dữ liệu BK để tạo phiên mới."
             ) from exc
+        self._require_snapshot_match(self._contribution_row(first), snapshot)
         return self.repository.create_revision(group_id, snapshot)
 
     def allocation_rows(self, group_id: int) -> list[DataRow]:
@@ -521,13 +551,44 @@ class SeaFreightReconciliationService:
     def _require_candidate(row: DataRow) -> None:
         if row.fee != "CB" or row.cont not in (None, ""):
             raise SeaFreightMatchError("Chỉ nhận HĐ cước biển chưa có số cont.")
-        validate_vessel_voyage(row.vessel_voyage_raw, row.vessel_name, row.voyage_no)
+        vessel_voyage_keys(row.vessel_name, row.voyage_no)
         if type(row.invoice_container_count) is not int or row.invoice_container_count <= 0:
             raise SeaFreightMatchError("Số cont HĐ phải là số nguyên dương.")
         if row.container_count_basis not in {"EXPLICIT", "CALCULATED"}:
             raise SeaFreightMatchError("Căn cứ số cont chưa hợp lệ.")
         if type(row.amount) is not int or row.amount < 0:
             raise SeaFreightMatchError("Số tiền HĐ chưa hợp lệ.")
+
+    def _require_snapshot_match(
+        self,
+        row: DataRow,
+        snapshot: BkContainerSnapshot,
+        *,
+        issue: str | None = None,
+    ) -> None:
+        if snapshot.container_count > 0:
+            return
+        suggestions: tuple[VesselVoyageSuggestion, ...] = ()
+        suggest = getattr(self.matcher, "suggestions", None)
+        if callable(suggest) and issue != "SHEET_MISSING":
+            try:
+                suggestions = tuple(
+                    suggest(
+                        snapshot.bk_path,
+                        snapshot.bk_sheet,
+                        vessel_name=str(row.vessel_name or ""),
+                        voyage_no=str(row.voyage_no or ""),
+                        limit=5,
+                    )
+                )
+            except Exception:
+                suggestions = ()
+        raise VesselVoyageNotFoundError(
+            vessel_voyage=vessel_voyage_text(row.vessel_name, row.voyage_no),
+            bk_sheet=snapshot.bk_sheet,
+            suggestions=suggestions,
+            sheet_missing=issue == "SHEET_MISSING",
+        )
 
     def _require_group(self, group_id: int) -> ReconciliationGroup:
         group = self.repository.get_group(group_id)

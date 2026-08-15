@@ -88,6 +88,18 @@ class SettingsPage(QWidget):
         bat_widget.setLayout(bat_row)
         form.addRow("File .bat mở Trợ lý ảo:", bat_widget)
 
+        bang_ke_bat_row = QHBoxLayout()
+        self.bang_ke_bat_edit = QLineEdit()
+        self.bang_ke_bat_edit.setObjectName("bangKeAssistantBatEdit")
+        self.bang_ke_bat_edit.setPlaceholderText("Chọn Mo_Tool_Bang_Ke.bat")
+        self.bang_ke_bat_edit.setClearButtonEnabled(True)
+        self.browse_bang_ke_bat_button = QPushButton("Chọn…")
+        bang_ke_bat_row.addWidget(self.bang_ke_bat_edit, 1)
+        bang_ke_bat_row.addWidget(self.browse_bang_ke_bat_button)
+        bang_ke_bat_widget = QWidget()
+        bang_ke_bat_widget.setLayout(bang_ke_bat_row)
+        form.addRow("File .bat mở tool bảng kê:", bang_ke_bat_widget)
+
         output_row = QHBoxLayout()
         self.output_edit = QLineEdit()
         self.output_edit.setObjectName("outputDirEdit")
@@ -172,6 +184,7 @@ class SettingsPage(QWidget):
         self.browse_payment_button = self.browse_payment_workbook_button
         for browse_button in (
             self.browse_bat_button,
+            self.browse_bang_ke_bat_button,
             self.browse_output_button,
             self.browse_rpa_expense_bat_button,
             self.browse_daily_workbook_button,
@@ -209,6 +222,7 @@ class SettingsPage(QWidget):
 
     def _connect_signals(self) -> None:
         self.browse_bat_button.clicked.connect(self._browse_bat)
+        self.browse_bang_ke_bat_button.clicked.connect(self._browse_bang_ke_bat)
         self.browse_output_button.clicked.connect(self._browse_output)
         self.browse_rpa_expense_bat_button.clicked.connect(
             self._browse_rpa_expense_bat
@@ -230,6 +244,7 @@ class SettingsPage(QWidget):
             )
         )
         self.bat_edit.textChanged.connect(self._validate_form)
+        self.bang_ke_bat_edit.textChanged.connect(self._validate_form)
         self.output_edit.textChanged.connect(self._validate_form)
         self.rpa_expense_bat_edit.textChanged.connect(self._validate_form)
         self.daily_workbook_edit.textChanged.connect(self._validate_form)
@@ -238,6 +253,9 @@ class SettingsPage(QWidget):
 
     def set_settings(self, settings: Any | None) -> None:
         self.bat_edit.setText(str(_setting(settings, "assistant_bat_path") or ""))
+        self.bang_ke_bat_edit.setText(
+            str(_setting(settings, "bang_ke_assistant_bat_path") or "")
+        )
         self.output_edit.setText(str(_setting(settings, "output_dir") or ""))
         self.daily_workbook_edit.setText(
             str(_setting(settings, "daily_workbook_path") or "")
@@ -256,6 +274,7 @@ class SettingsPage(QWidget):
     def settings_data(self) -> dict[str, Any]:
         return {
             "assistant_bat_path": self.bat_edit.text().strip(),
+            "bang_ke_assistant_bat_path": self.bang_ke_bat_edit.text().strip(),
             "output_dir": self.output_edit.text().strip(),
             "daily_workbook_path": self.daily_workbook_edit.text().strip(),
             "bk_workbook_path": self.bk_workbook_edit.text().strip(),
@@ -277,6 +296,11 @@ class SettingsPage(QWidget):
             problems.append("Không tìm thấy file BAT đã chọn.")
         if not output_text:
             problems.append("Cần chọn thư mục Output.")
+        bang_ke_bat = self.bang_ke_bat_edit.text().strip()
+        if bang_ke_bat and Path(bang_ke_bat).suffix.casefold() != ".bat":
+            problems.append("File mở tool bảng kê phải có đuôi .bat.")
+        elif bang_ke_bat and not Path(bang_ke_bat).is_file():
+            problems.append("Không tìm thấy file BAT mở tool bảng kê.")
         rpa_expense_bat = self.rpa_expense_bat_edit.text().strip()
         if (
             rpa_expense_bat
@@ -356,6 +380,16 @@ class SettingsPage(QWidget):
         )
         if directory:
             self.output_edit.setText(directory)
+
+    def _browse_bang_ke_bat(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn file BAT mở tool bảng kê",
+            self.bang_ke_bat_edit.text().strip(),
+            "Batch Windows (*.bat)",
+        )
+        if filename:
+            self.bang_ke_bat_edit.setText(filename)
 
     def _browse_rpa_expense_bat(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(

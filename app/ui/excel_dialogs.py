@@ -438,6 +438,7 @@ DEFAULT_ACTIONS: dict[str, tuple[str, ...]] = {
     "FEE_COLUMN_MISSING": ("SKIP", "CANCEL_ALL"),
     "BL_ONLY_NO_CONTAINER": ("SKIP", "SELECT_ROW"),
     "PARTIAL_KEY_MATCH": ("SKIP", "SELECT_ROW", "CANCEL_ALL"),
+    "NEGATIVE_ADJUSTMENT": ("ADD", "SKIP", "CANCEL_ALL"),
     "PAYMENT_SOURCE_INVALID": ("SKIP", "CANCEL_ALL"),
     "PAYMENT_CLEAR_VALUE": (
         "KEEP_EXISTING",
@@ -513,6 +514,7 @@ ACTION_LABELS = {
     "KEEP_EXISTING": "Giữ nguyên",
     "KEEP_FORMULA": "Giữ công thức",
     "OVERWRITE": "Ghi đè",
+    "ADD": "Áp dụng điều chỉnh giảm",
     "APPEND_CARRIER": "Ghi thêm",
     "POST_UNPOSTED_ONLY": "Chỉ nhập khoản chưa xử lý",
     "REANALYZE": "Đọc lại dữ liệu",
@@ -708,6 +710,8 @@ class ConflictResolutionDialog(QDialog):
         parent: QWidget | None = None,
         *,
         valid_fee_codes: Sequence[str] = VALID_FEE_CODES,
+        initial_resolutions: Mapping[str, Any] | None = None,
+        restore_info: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(parent)
         self.plan = plan_or_conflicts
@@ -719,6 +723,8 @@ class ConflictResolutionDialog(QDialog):
         )
         self.conflicts = list(_sequence(raw_conflicts))
         self.valid_fee_codes = tuple(valid_fee_codes)
+        self.initial_resolutions = dict(initial_resolutions or {})
+        self.restore_info = dict(restore_info or {})
         self._action_combos: dict[str, QComboBox] = {}
         self._selected_rows: dict[str, Any] = {}
         self._selected_source_sheets: dict[str, str] = {}
@@ -748,6 +754,40 @@ class ConflictResolutionDialog(QDialog):
         note.setWordWrap(True)
         note.setProperty("muted", True)
         layout.addWidget(note)
+
+        if bool(self.restore_info.get("found")):
+            status_labels = {
+                "ACTIVE": "Đang xử lý",
+                "SUCCEEDED": "Thành công",
+                "FAILED": "Thất bại",
+                "CANCELLED": "Đã hủy",
+            }
+            updated_at = str(self.restore_info.get("updated_at") or "")
+            display_time = updated_at.replace("T", " ").split("+")[0]
+            status = status_labels.get(
+                str(self.restore_info.get("status") or ""),
+                str(self.restore_info.get("status") or "Không xác định"),
+            )
+            restored_here = sum(
+                self._conflict_id(conflict, row) in self.initial_resolutions
+                for row, conflict in enumerate(self.conflicts)
+            )
+            if bool(self.restore_info.get("target_compatible", True)):
+                message = (
+                    f"Đã khôi phục {restored_here}/{len(self.conflicts)} lựa chọn "
+                    f"từ lần xử lý lúc {display_time} (kết quả: {status})."
+                )
+            else:
+                message = (
+                    f"Đã tìm thấy lần xử lý lúc {display_time} "
+                    f"(kết quả: {status}), nhưng workbook đích đã thay đổi; "
+                    "cần chọn lại toàn bộ."
+                )
+            self.restore_label = QLabel(message)
+            self.restore_label.setObjectName("conflictRestoreStatusLabel")
+            self.restore_label.setWordWrap(True)
+            self.restore_label.setProperty("status", "info")
+            layout.addWidget(self.restore_label)
 
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setObjectName("excelConflictTable")
@@ -862,6 +902,8 @@ class ConflictResolutionDialog(QDialog):
         default_action = _code(
             _value(conflict, "default_action", "default_resolution")
         ) or DEFAULT_RESOLUTION.get(conflict_type, _code(options[0]))
+        if conflict_type == "NEGATIVE_ADJUSTMENT":
+            action_combo.addItem("— Chọn cách xử lý —", "")
         for option in options:
             code = _code(option)
             label = ACTION_LABELS.get(
@@ -882,7 +924,9 @@ class ConflictResolutionDialog(QDialog):
                 }.get(code, label)
             action_combo.addItem(label, code)
         default_index = action_combo.findData(default_action)
-        action_combo.setCurrentIndex(max(0, default_index))
+        action_combo.setCurrentIndex(
+            0 if conflict_type == "NEGATIVE_ADJUSTMENT" else max(0, default_index)
+        )
         self._action_combos[conflict_id] = action_combo
         self.table.setCellWidget(row, 12, action_combo)
 
@@ -891,6 +935,59 @@ class ConflictResolutionDialog(QDialog):
             self.table.setCellWidget(row, 13, selector)
         else:
             self.table.setItem(row, 13, QTableWidgetItem("—"))
+        self._apply_initial_resolution(conflict_id, action_combo)
+
+    def _apply_initial_resolution(
+        self, conflict_id: str, action_combo: QComboBox
+    ) -> None:
+        """Điền lựa chọn gần nhất vào bảng để user vẫn có thể sửa."""
+
+        raw = self.initial_resolutions.get(conflict_id)
+        if not isinstance(raw, Mapping):
+            return
+
+        action = _code(raw.get("action"))
+        action_index = action_combo.findData(action)
+        if action_index >= 0:
+            action_combo.setCurrentIndex(action_index)
+
+        if conflict_id in self._selected_rows:
+            selected_row = raw.get("selected_row", raw.get("row"))
+            if selected_row is not None:
+                self._selected_rows[conflict_id] = selected_row
+                selected_sheet = raw.get(
+                    "selected_source_sheet", raw.get("selected_sheet")
+                )
+                if selected_sheet not in (None, ""):
+                    self._selected_source_sheets[conflict_id] = str(selected_sheet)
+                button = self._selector_buttons.get(conflict_id)
+                if button is not None:
+                    label = f"Dòng {selected_row}"
+                    if selected_sheet not in (None, ""):
+                        label = f"{selected_sheet} – dòng {selected_row}"
+                    button.setText(label)
+
+        combo_values = (
+            (self._selected_fees, ("selected_fee", "fee")),
+            (
+                self._selected_sheets,
+                ("selected_sheet_name", "selected_sheet", "sheet_name"),
+            ),
+            (self._selected_months, ("selected_month", "month")),
+            (self._selected_invoices, ("selected_invoice",)),
+            (self._selected_carriers, ("selected_carrier",)),
+            (self._selected_source_items, ("selected_source_item_index",)),
+        )
+        for widgets, names in combo_values:
+            combo = widgets.get(conflict_id)
+            if combo is None:
+                continue
+            value = next((raw.get(name) for name in names if name in raw), None)
+            if value is None:
+                continue
+            index = combo.findData(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
 
     def _selector_for(
         self,
@@ -914,6 +1011,7 @@ class ConflictResolutionDialog(QDialog):
             "REPEATED_SOURCE_CONTAINER",
             "BL_ONLY_NO_CONTAINER",
             "PARTIAL_KEY_MATCH",
+            "NEGATIVE_ADJUSTMENT",
         }:
             button = QPushButton("Chọn dòng…")
             button.setObjectName(f"selectConflictRow_{row}")
@@ -922,6 +1020,7 @@ class ConflictResolutionDialog(QDialog):
                     self._pick_row(c, key, b)
                 )
             )
+            self._selected_rows[conflict_id] = None
             self._selector_buttons[conflict_id] = button
             return button
 
@@ -1136,6 +1235,8 @@ class ConflictResolutionDialog(QDialog):
         for row, conflict in enumerate(self.conflicts):
             conflict_id = self._conflict_id(conflict, row)
             action = str(self._action_combos[conflict_id].currentData() or "")
+            if not action:
+                missing.append(f"dòng {row + 1}: chưa chọn cách xử lý")
             if action == "SELECT_ROW" and self._selected_rows.get(conflict_id) is None:
                 missing.append(f"dòng {row + 1}: chưa chọn dòng BK")
             if action == "SELECT_FEE":

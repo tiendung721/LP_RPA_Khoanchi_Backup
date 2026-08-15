@@ -51,6 +51,7 @@ def _saved_text(value: Any) -> str:
 
 class WorkflowPage(QWidget):
     open_assistant_requested = Signal()
+    open_bang_ke_assistant_requested = Signal()
     open_review_requested = Signal(object)
     sync_daily_requested = Signal()
     post_expenses_requested = Signal()
@@ -72,6 +73,9 @@ class WorkflowPage(QWidget):
         self._batch: Any | None = None
         self._build_ui()
         self.open_assistant_button.clicked.connect(self.open_assistant_requested)
+        self.open_bang_ke_assistant_button.clicked.connect(
+            self.open_bang_ke_assistant_requested
+        )
         self.review_button.clicked.connect(
             lambda: self.open_review_requested.emit(self._batch)
         )
@@ -153,11 +157,14 @@ class WorkflowPage(QWidget):
         self.open_assistant_button.setObjectName("openAssistantButton")
         self.open_assistant_button.setProperty("primary", True)
         self.open_assistant_button.setFixedWidth(primary_button_width)
-        step1_controls.addWidget(
-            self.open_assistant_button,
-            0,
-            Qt.AlignmentFlag.AlignRight,
-        )
+        self.open_bang_ke_assistant_button = QPushButton("Mở tool bảng kê")
+        self.open_bang_ke_assistant_button.setObjectName("openBangKeAssistantButton")
+        self.open_bang_ke_assistant_button.setFixedWidth(primary_button_width)
+        assistant_buttons = QHBoxLayout()
+        assistant_buttons.setSpacing(8)
+        assistant_buttons.addWidget(self.open_assistant_button)
+        assistant_buttons.addWidget(self.open_bang_ke_assistant_button)
+        step1_controls.addLayout(assistant_buttons)
         step1.addLayout(step1_controls)
         workflow_grid.addWidget(self.step1_card, 0, 0)
 
@@ -439,6 +446,12 @@ class WorkflowPage(QWidget):
                 "color: #A16207; background: #FFF8DB; border-radius: 5px; "
                 "padding: 4px 8px;"
             )
+        bang_ke_bat = str(
+            _get(settings, "bang_ke_assistant_bat_path", default="") or ""
+        ).strip()
+        self.open_bang_ke_assistant_button.setToolTip(
+            "" if bang_ke_bat else "Chưa cấu hình BAT mở tool bảng kê."
+        )
         rpa_bat = str(
             _get(settings, "rpa_expense_bat_path", default="") or ""
         ).strip()

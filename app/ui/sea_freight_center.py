@@ -9,7 +9,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -194,22 +193,30 @@ class SeaFreightReconciliationDialog(QDialog):
         title.setStyleSheet("font-size: 18pt; font-weight: 700;")
         heading.addWidget(title)
         heading.addStretch(1)
-        heading.addWidget(QLabel("Hồ sơ trong tháng:"))
-        self.group_combo = QComboBox()
-        self.group_combo.setMinimumWidth(300)
-        heading.addWidget(self.group_combo)
+        heading.addWidget(QLabel("Hồ sơ đang mở:"))
+        self.group_value = QLineEdit()
+        self.group_value.setObjectName("currentReconciliationProfile")
+        self.group_value.setReadOnly(True)
+        self.group_value.setMinimumWidth(420)
+        self.group_value.setToolTip(
+            "Hồ sơ được cố định theo dòng đã chọn ở màn hình kiểm tra dữ liệu bóc tách."
+        )
+        heading.addWidget(self.group_value)
         root.addLayout(heading)
 
         common = QGroupBox("Thông tin chung")
         common_layout = QGridLayout(common)
         self.period_value = QLabel()
-        self.vessel_raw_edit = QLineEdit()
         self.vessel_name_edit = QLineEdit()
         self.voyage_edit = QLineEdit()
+        self.vessel_preview = QLabel("—")
+        self.vessel_preview.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
         common_layout.addWidget(QLabel("Tháng đối soát:"), 0, 0)
         common_layout.addWidget(self.period_value, 0, 1)
-        common_layout.addWidget(QLabel("Tàu/chuyến:"), 0, 2)
-        common_layout.addWidget(self.vessel_raw_edit, 0, 3)
+        common_layout.addWidget(QLabel("Tàu/chuyến dùng để đối soát:"), 0, 2)
+        common_layout.addWidget(self.vessel_preview, 0, 3)
         common_layout.addWidget(QLabel("Tên tàu:"), 1, 0)
         common_layout.addWidget(self.vessel_name_edit, 1, 1)
         common_layout.addWidget(QLabel("Số chuyến:"), 1, 2)
@@ -296,10 +303,8 @@ class SeaFreightReconciliationDialog(QDialog):
         root.addLayout(actions)
 
     def _connect_signals(self) -> None:
-        self.group_combo.currentIndexChanged.connect(self._group_changed)
-        self.vessel_raw_edit.textChanged.connect(self._mark_dirty)
-        self.vessel_name_edit.textChanged.connect(self._mark_dirty)
-        self.voyage_edit.textChanged.connect(self._mark_dirty)
+        self.vessel_name_edit.textChanged.connect(self._vessel_fields_changed)
+        self.voyage_edit.textChanged.connect(self._vessel_fields_changed)
         self.invoice_table.itemChanged.connect(self._invoice_changed)
         self.assistant_button.clicked.connect(self._open_assistant)
         self.add_button.clicked.connect(self.add_invoice)
@@ -317,17 +322,17 @@ class SeaFreightReconciliationDialog(QDialog):
         self.group_id = group_id
         self._loading = True
         try:
-            self._reload_selector(group)
+            self._show_current_group(group)
             self.period_value.setText(
                 f"{group.reconciliation_month:02d}/{group.reconciliation_year}"
                 if group.reconciliation_month and group.reconciliation_year
                 else group.bk_sheet
             )
-            self.vessel_raw_edit.setText(group.vessel_voyage_raw)
             contributions = self.service.repository.list_contributions(group_id)
             first = contributions[0] if contributions else None
             self.vessel_name_edit.setText(first.vessel_name if first else "")
             self.voyage_edit.setText(first.voyage_no if first else "")
+            self._update_vessel_preview()
             self._load_invoices(contributions)
             self._load_containers(self.service.repository.list_container_rows(group_id))
             self._refresh_summary(group)
@@ -343,26 +348,17 @@ class SeaFreightReconciliationDialog(QDialog):
             self._loading = False
             self._dirty = False
 
-    def _reload_selector(self, current: Any) -> None:
-        groups = self.service.repository.list_groups_for_period(
-            int(current.reconciliation_month or 0), int(current.reconciliation_year or 0)
-        ) if current.reconciliation_month and current.reconciliation_year else [current]
-        self.group_combo.blockSignals(True)
-        self.group_combo.clear()
-        selected = 0
-        for index, group in enumerate(groups):
-            self.group_combo.addItem(
-                (
-                    f"{group.vessel_voyage_raw} – Lần {group.revision_no} – "
-                    f"{group_status_text(group)}"
-                    + (" – Phiên cũ" if not group.is_current else "")
-                ),
-                group.id,
-            )
-            if group.id == current.id:
-                selected = index
-        self.group_combo.setCurrentIndex(selected)
-        self.group_combo.blockSignals(False)
+    def _show_current_group(self, group: Any) -> None:
+        label = (
+            f"{group.vessel_voyage_raw} – Lần {group.revision_no} – "
+            f"{group_status_text(group)}"
+            + (" – Phiên cũ" if not group.is_current else "")
+        )
+        self.group_value.setText(label)
+        self.group_value.setToolTip(
+            "Hồ sơ được cố định theo dòng đã chọn ở màn hình kiểm tra dữ liệu bóc tách. "
+            f"ID hồ sơ: {group.id}."
+        )
 
     def _load_invoices(self, contributions: list[Any]) -> None:
         self.invoice_table.setRowCount(len(contributions))
@@ -435,7 +431,7 @@ class SeaFreightReconciliationDialog(QDialog):
 
     def _set_editable(self, editable: bool) -> None:
         for widget in (
-            self.vessel_raw_edit, self.vessel_name_edit, self.voyage_edit,
+            self.vessel_name_edit, self.voyage_edit,
             self.invoice_table, self.assistant_button, self.add_button,
             self.delete_button, self.save_button,
         ):
@@ -445,6 +441,17 @@ class SeaFreightReconciliationDialog(QDialog):
         if not self._loading:
             self._dirty = True
             self.confirm_button.setEnabled(False)
+
+    def _update_vessel_preview(self) -> None:
+        vessel = " ".join(self.vessel_name_edit.text().strip().split())
+        voyage = " ".join(self.voyage_edit.text().strip().split())
+        self.vessel_preview.setText(
+            " ".join(part for part in (vessel, voyage) if part) or "—"
+        )
+
+    def _vessel_fields_changed(self, *_args: Any) -> None:
+        self._update_vessel_preview()
+        self._mark_dirty()
 
     def _invoice_changed(self, *_args: Any) -> None:
         self._mark_dirty()
@@ -477,20 +484,6 @@ class SeaFreightReconciliationDialog(QDialog):
             text = f"Đủ {invoice_containers}/{bk_count} cont"
         self.status_label.setText(text + " • Chưa lưu")
         self.result_table.setRowCount(0)
-
-    def _group_changed(self) -> None:
-        group_id = self.group_combo.currentData()
-        if group_id is None or int(group_id) == self.group_id:
-            return
-        if not self._resolve_unsaved():
-            self._loading = True
-            try:
-                index = self.group_combo.findData(self.group_id)
-                self.group_combo.setCurrentIndex(index)
-            finally:
-                self._loading = False
-            return
-        self.load_group(int(group_id))
 
     def add_invoice(self) -> None:
         row = self.invoice_table.rowCount()
@@ -540,7 +533,7 @@ class SeaFreightReconciliationDialog(QDialog):
         try:
             group = self.service.save_group(
                 self.group_id,
-                vessel_voyage_raw=self.vessel_raw_edit.text().strip(),
+                vessel_voyage_raw=self.vessel_preview.text().strip(),
                 vessel_name=self.vessel_name_edit.text().strip(),
                 voyage_no=self.voyage_edit.text().strip(),
                 invoices=self._invoice_payload(),
@@ -649,9 +642,9 @@ class SeaFreightReconciliationDialog(QDialog):
             return True
         box = QMessageBox(self)
         box.setWindowTitle("Thay đổi chưa lưu")
-        box.setText("Hồ sơ có thay đổi chưa lưu.")
-        save = box.addButton("Lưu và tiếp tục", QMessageBox.ButtonRole.AcceptRole)
-        discard = box.addButton("Không lưu", QMessageBox.ButtonRole.DestructiveRole)
+        box.setText("Hồ sơ có thay đổi chưa lưu. Bạn có muốn lưu trước khi đóng?")
+        save = box.addButton("Lưu và đóng", QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton("Đóng không lưu", QMessageBox.ButtonRole.DestructiveRole)
         box.addButton("Tiếp tục chỉnh sửa", QMessageBox.ButtonRole.RejectRole)
         box.exec()
         if box.clickedButton() is save:

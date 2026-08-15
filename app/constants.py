@@ -25,16 +25,23 @@ FEE_CATALOG = MappingProxyType(
             "seal, THC hoặc terminal độc lập"
         ),
         "LC": (
-            "Lưu container, lưu vỏ, lưu hàng xuất, gia hạn, demurrage, "
+            "Lưu container, lưu vỏ, lưu hàng xuất, demurrage, "
             "detention, storage"
         ),
         "QT": "Quá tải, quá trọng lượng hoặc phụ thu trọng lượng",
+        "VAT": "Thuế GTGT",
+        "GH": "Gia hạn",
         "LL": "Phí/công làm lệnh riêng",
         "SC": "Sửa chữa hoặc hư hỏng container",
         "CXD": "Chưa đủ căn cứ hoặc loại phí chưa có mã chính thức",
     }
 )
 FEE_CODES: Final = frozenset(FEE_CATALOG)
+
+# Ba loại cước này lấy bên vận tải chuẩn từ workbook Hàng ngày. ``carrier`` do
+# GPT bóc cho chúng chỉ là dữ liệu trùng nguồn và phải được bỏ trước màn hình
+# review; người dùng vẫn có thể nhập lại thủ công khi cần xử lý ngoại lệ.
+DAILY_SYNC_CARRIER_FEE_CODES: Final = frozenset({"CB", "CBDH", "VTN"})
 
 RULE_CATALOG = MappingProxyType(
     {
@@ -84,4 +91,4 @@ APP_STATE_MAIN_WINDOW_GEOMETRY: Final = "main_window_geometry"
 APP_STATE_MAIN_WINDOW_STATE: Final = "main_window_state"
 APP_STATE_LAST_PAGE: Final = "last_page"
 
-SQLITE_SCHEMA_VERSION: Final = 13
+SQLITE_SCHEMA_VERSION: Final = 15

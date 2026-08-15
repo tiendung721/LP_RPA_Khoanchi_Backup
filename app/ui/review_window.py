@@ -45,6 +45,7 @@ from .review_table_model import (
 from app.constants import SCHEMA_VERSION
 from app.models import DataRow
 from app.sea_freight.contracts import GroupStatus, group_status_text
+from app.sea_freight.service import VesselVoyageNotFoundError
 from app.ui.sea_freight_center import ReconciliationPeriodDialog
 from app.ui.feedback import LinearLoadingBar, set_button_loading
 
@@ -132,6 +133,56 @@ class RawJsonDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class VesselVoyageNotFoundDialog(QDialog):
+    EDIT_RESULT = 2
+
+    def __init__(
+        self,
+        error: VesselVoyageNotFoundError,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Không tìm thấy tàu/chuyến")
+        self.setModal(True)
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        title = QLabel("Không tìm thấy tàu/chuyến tương ứng trong BK")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+        message = QLabel(
+            f'Không tìm thấy “{error.vessel_voyage}” trong sheet {error.bk_sheet}.\n'
+            "Hãy kiểm tra, sửa lại tên tàu hoặc số chuyến rồi bấm Đối soát lại."
+        )
+        message.setWordWrap(True)
+        layout.addWidget(message)
+        if error.suggestions:
+            suggestion_title = QLabel("Tàu/chuyến có thể tương ứng trong BK:")
+            suggestion_title.setStyleSheet("font-weight: 600;")
+            layout.addWidget(suggestion_title)
+            suggestion_text = QLabel(
+                "\n".join(
+                    f"• {item.vessel_voyage} — {item.container_count} container"
+                    for item in error.suggestions
+                )
+            )
+            suggestion_text.setObjectName("vesselVoyageSuggestions")
+            suggestion_text.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            layout.addWidget(suggestion_text)
+        buttons = QDialogButtonBox()
+        self.close_button = buttons.addButton(
+            "Đóng", QDialogButtonBox.ButtonRole.RejectRole
+        )
+        self.edit_button = buttons.addButton(
+            "Sửa dòng", QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        self.edit_button.setProperty("primary", True)
+        self.close_button.clicked.connect(self.reject)
+        self.edit_button.clicked.connect(lambda: self.done(self.EDIT_RESULT))
+        layout.addWidget(buttons)
+
+
 class ReviewWindow(QMainWindow):
     """Cửa sổ review hoàn chỉnh, nhận service/callback qua dependency injection."""
 
@@ -174,8 +225,16 @@ class ReviewWindow(QMainWindow):
         self._status = str(_value(self._metadata, "status", default="REVIEWING"))
         self._status = self._status.split(".")[-1].upper()
         self._saving = False
+        self._allow_negative = (
+            str(_value(self._metadata, "source_kind", default="ASSISTANT"))
+            == "BANG_KE"
+        )
 
-        self.model = ReviewTableModel(initial_rows, validator=validator)
+        self.model = ReviewTableModel(
+            initial_rows,
+            validator=validator,
+            allow_negative=self._allow_negative,
+        )
         self._source_index_by_runtime = {
             self.model.runtime_id_at(index): index
             for index in range(self.model.rowCount())
@@ -321,6 +380,7 @@ class ReviewWindow(QMainWindow):
         self.table.setObjectName("reviewTable")
         self.table.setModel(self.proxy_model)
         for column in (
+            ReviewTableModel.COLUMN_CONTAINER_COUNT_BASIS,
             ReviewTableModel.COLUMN_FEE,
             ReviewTableModel.COLUMN_RULE,
             ReviewTableModel.COLUMN_RULE_NAME,
@@ -345,11 +405,11 @@ class ReviewWindow(QMainWindow):
         header.setSectionResizeMode(ReviewTableModel.COLUMN_MESSAGES, QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_CONT, 140)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_BL, 130)
+        self.table.setColumnWidth(ReviewTableModel.COLUMN_VESSEL_VOYAGE, 190)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_INVOICE_NO, 130)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_CARRIER, 190)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_AMOUNT, 185)
-        self.table.setColumnWidth(ReviewTableModel.COLUMN_LOOKUP_RESULT, 190)
-        self.table.setColumnWidth(ReviewTableModel.COLUMN_LOOKUP_ACTION, 120)
+        self.table.setColumnWidth(ReviewTableModel.COLUMN_LOOKUP_ACTION, 105)
         self.lookup_action_delegate = InlineActionDelegate(self.table)
         self.table.setItemDelegateForColumn(
             ReviewTableModel.COLUMN_LOOKUP_ACTION,
@@ -527,7 +587,11 @@ class ReviewWindow(QMainWindow):
             self.table.scrollTo(proxy_index, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def add_row(self) -> None:
-        dialog = EditRowDialog(parent=self, validator=self._validator)
+        dialog = EditRowDialog(
+            parent=self,
+            validator=self._validator,
+            allow_negative=self._allow_negative,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         position = self.model.add_row(dialog.row_data())
@@ -541,6 +605,9 @@ class ReviewWindow(QMainWindow):
         source_row = self._selected_source_row()
         if source_row is None:
             return
+        self._edit_source_row(source_row)
+
+    def _edit_source_row(self, source_row: int, *, focus_vessel: bool = False) -> bool:
         runtime_id = self.model.runtime_id_at(source_row)
         if self.model.lookup_presentation(runtime_id).session_id:
             QMessageBox.information(
@@ -548,16 +615,20 @@ class ReviewWindow(QMainWindow):
                 "Dòng đã có hồ sơ đối soát",
                 "Hãy bấm Mở hồ sơ và sửa HĐ trực tiếp trong cửa sổ Đối soát số cont.",
             )
-            return
+            return False
         dialog = EditRowDialog(
             self.model.row_at(source_row),
             parent=self,
             validator=self._validator,
+            allow_negative=self._allow_negative,
         )
+        if focus_vessel:
+            dialog.focus_vessel_fields()
         if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+            return False
         self.model.update_row(source_row, dialog.row_data())
         self._select_source_row(source_row)
+        return True
 
     def delete_selected_row(self) -> None:
         source_row = self._selected_source_row()
@@ -787,6 +858,11 @@ class ReviewWindow(QMainWindow):
         document = _value(result, "document")
         if metadata is not None:
             self._metadata = metadata
+            self._allow_negative = (
+                str(_value(metadata, "source_kind", default="ASSISTANT"))
+                == "BANG_KE"
+            )
+            self.model.set_allow_negative(self._allow_negative)
             self._batch_id = _value(metadata, "id", "batch_id", default=self._batch_id)
             status = _value(metadata, "status")
             if status is not None:
@@ -812,6 +888,11 @@ class ReviewWindow(QMainWindow):
             raise RuntimeError("Không thể nạp lại khi còn thay đổi chưa lưu.")
         metadata, rows = _extract_review(review, None)
         self._metadata = metadata
+        self._allow_negative = (
+            str(_value(metadata, "source_kind", default="ASSISTANT"))
+            == "BANG_KE"
+        )
+        self.model.set_allow_negative(self._allow_negative)
         self._batch_id = _value(metadata, "id", "batch_id")
         self._status = str(_value(metadata, "status", default="REVIEWING")).split(".")[-1].upper()
         self._last_saved_at = _value(metadata, "last_saved_at")
@@ -886,6 +967,38 @@ class ReviewWindow(QMainWindow):
             return
         self._reconcile_source_row(source_row)
 
+    @staticmethod
+    def _missing_reconciliation_fields(row: ReviewRow) -> tuple[str, ...]:
+        missing: list[str] = []
+        if not isinstance(row.vessel_name, str) or not row.vessel_name.strip():
+            missing.append("Tên tàu")
+        if not isinstance(row.voyage_no, str) or not row.voyage_no.strip():
+            missing.append("Số chuyến")
+        if type(row.invoice_container_count) is not int or row.invoice_container_count <= 0:
+            missing.append("SL cont HĐ")
+        if row.container_count_basis not in {"EXPLICIT", "CALCULATED"}:
+            missing.append("Căn cứ SL")
+        if type(row.amount) is not int or row.amount < 0:
+            missing.append("Số tiền")
+        return tuple(missing)
+
+    def _offer_edit_for_reconciliation(
+        self,
+        source_row: int,
+        *,
+        title: str,
+        message: str,
+    ) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(title)
+        box.setText(message)
+        edit_button = box.addButton("Sửa dòng", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Đóng", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is edit_button:
+            self._edit_source_row(source_row, focus_vessel=True)
+
     def _reconcile_source_row(self, source_row: int) -> bool:
         service = self._sea_freight_service
         if service is None:
@@ -893,6 +1006,18 @@ class ReviewWindow(QMainWindow):
             return False
         bk_path = str(_value(self._settings, "bk_workbook_path", default="") or "")
         row = self.model.row_at(source_row)
+        missing = self._missing_reconciliation_fields(row)
+        if missing:
+            self._offer_edit_for_reconciliation(
+                source_row,
+                title="Chưa đủ thông tin đối soát",
+                message=(
+                    "Dòng cước biển còn thiếu hoặc chưa hợp lệ: "
+                    + ", ".join(missing)
+                    + ".\nHãy sửa dòng rồi bấm Đối soát lại."
+                ),
+            )
+            return False
         data_row = DataRow.from_mapping(row.to_object())
         default_month: int | None = None
         default_year: int | None = None
@@ -935,6 +1060,14 @@ class ReviewWindow(QMainWindow):
                 source_item_index=self._source_index_by_runtime.get(row.runtime_id, source_row),
                 source_sha256=str(_value(self._metadata, "sha256", default="") or ""),
             )
+        except VesselVoyageNotFoundError as exc:
+            if exc.sheet_missing:
+                QMessageBox.warning(self, "Không tìm thấy sheet BK", str(exc))
+            else:
+                dialog = VesselVoyageNotFoundDialog(exc, self)
+                if dialog.exec() == VesselVoyageNotFoundDialog.EDIT_RESULT:
+                    self._edit_source_row(source_row, focus_vessel=True)
+            return False
         except Exception as exc:
             QMessageBox.warning(self, "Chưa thể đối soát số cont", str(exc))
             return False

@@ -88,6 +88,7 @@ def test_settings_round_trip_utf8(tmp_path: Path) -> None:
     settings = AppSettings(
         data_root=root,
         assistant_bat_path=str(root / "Mở trợ lý.bat"),
+        bang_ke_assistant_bat_path=str(root / "Mở tool bảng kê.bat"),
         output_dir=tmp_path / "Kết quả",
         daily_workbook_path=root / "Hàng ngày 2026.xlsx",
         bk_workbook_path=root / "BK Tổng hợp 2026.xlsm",
@@ -98,6 +99,7 @@ def test_settings_round_trip_utf8(tmp_path: Path) -> None:
     loaded = manager.load()
 
     assert loaded.assistant_bat_path == settings.assistant_bat_path
+    assert loaded.bang_ke_assistant_bat_path == settings.bang_ke_assistant_bat_path
     assert loaded.output_dir == settings.output_dir
     assert loaded.daily_workbook_path == settings.daily_workbook_path
     assert loaded.bk_workbook_path == settings.bk_workbook_path
@@ -179,7 +181,8 @@ def test_legacy_settings_are_rewritten_without_browser_or_inbox_keys(
     assert loaded.payment_workbook_path == ""
     assert set(rewritten) == {
         "data_root",
-        "assistant_bat_path",
+            "assistant_bat_path",
+            "bang_ke_assistant_bat_path",
         "output_dir",
         "daily_workbook_path",
         "bk_workbook_path",
@@ -208,6 +211,107 @@ def test_database_v6_removes_legacy_pad_lookup_jobs(tmp_path: Path) -> None:
     assert row is None
     assert database.query_one("PRAGMA user_version")[0] == SQLITE_SCHEMA_VERSION
     database.close()
+
+
+def test_database_creates_excel_resolution_draft_storage(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+
+    columns = {
+        row["name"]
+        for row in database.query_all(
+            "PRAGMA table_info(excel_resolution_drafts)"
+        )
+    }
+
+    assert {
+        "context_key",
+        "operation",
+        "context_json",
+        "payload_json",
+        "status",
+        "last_error",
+    }.issubset(columns)
+    assert database.query_one("PRAGMA user_version")[0] == SQLITE_SCHEMA_VERSION
+    database.close()
+
+
+def test_database_creates_latest_resolution_storage_by_source_file(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "app.db")
+
+    columns = {
+        row["name"]
+        for row in database.query_all(
+            "PRAGMA table_info(excel_resolution_latest)"
+        )
+    }
+
+    assert {
+        "source_file_key",
+        "operation",
+        "context_json",
+        "payload_json",
+        "status",
+        "run_id",
+        "last_error",
+    }.issubset(columns)
+    assert database.query_one("PRAGMA user_version")[0] == SQLITE_SCHEMA_VERSION
+    database.close()
+
+
+def test_database_migrates_legacy_resolution_without_reimporting_it(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "app.db"
+    seed = Database(path)
+    seed.execute("DROP TABLE excel_resolution_latest")
+    seed.execute("DELETE FROM excel_resolution_drafts")
+    context = {
+        "operation": "posting",
+        "batch_id": 43,
+        "source_path": "c:/output/ready.json",
+        "target_path": "c:/output/bk.xlsx",
+    }
+    seed.execute(
+        """
+        INSERT INTO excel_resolution_drafts (
+            context_key, operation, context_json, payload_json, status,
+            created_at, updated_at, completed_at, last_error
+        ) VALUES (?, 'posting', ?, ?, 'FAILED', ?, ?, NULL, ?)
+        """,
+        (
+            "legacy-key",
+            json.dumps(context),
+            json.dumps({"version": 1, "entries": {}, "globals": {}}),
+            "2026-08-14T10:00:00+07:00",
+            "2026-08-14T10:05:00+07:00",
+            "temporary error",
+        ),
+    )
+    seed.connection.execute("PRAGMA user_version = 14")
+    seed.close()
+
+    migrated = Database(path)
+    row = migrated.query_one(
+        "SELECT * FROM excel_resolution_latest WHERE source_file_key = ?",
+        ("posting:batch:43",),
+    )
+    assert row is not None
+    assert row["status"] == "FAILED"
+    migrated.execute(
+        "UPDATE excel_resolution_latest SET status = 'SUCCEEDED' "
+        "WHERE source_file_key = ?",
+        ("posting:batch:43",),
+    )
+    migrated.close()
+
+    reopened = Database(path)
+    assert reopened.query_one(
+        "SELECT status FROM excel_resolution_latest WHERE source_file_key = ?",
+        ("posting:batch:43",),
+    )["status"] == "SUCCEEDED"
+    reopened.close()
 
 
 def test_copied_settings_rebase_paths_inside_the_old_bundle(tmp_path: Path) -> None:
