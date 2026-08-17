@@ -14,6 +14,12 @@ from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 
+from app.services.excel.review import (
+    CorrectionRequiredError,
+    ReviewOutcome,
+    validate_conflict_resolutions,
+)
+
 
 def _value(source: Any, *names: str, default: Any = None) -> Any:
     if source is None:
@@ -55,6 +61,7 @@ class ExcelTaskController(QObject):
     - ``started(str operation)``
     - ``progress(str operation, str message)``
     - ``analysis_ready(object plan)``
+    - ``correction_required(object ReviewOutcome)``
     - ``completed(object result)``
     - ``failed(object exception)``
     - ``finished(str operation)``
@@ -63,6 +70,7 @@ class ExcelTaskController(QObject):
     started = Signal(str)
     progress = Signal(str, str)
     analysis_ready = Signal(object)
+    correction_required = Signal(object)
     completed = Signal(object)
     failed = Signal(object)
     finished = Signal(str)
@@ -93,6 +101,9 @@ class ExcelTaskController(QObject):
         self._phase = "idle"
         self._future: Future[Any] | None = None
         self._waiting_plan: Any | None = None
+        self._base_plan: Any | None = None
+        self._review_resolutions: dict[str, Any] = {}
+        self._review_conflicts: list[Any] = []
         self._draft_context_key: str | None = None
         self._draft_saved_this_run = False
         self._saved_resolution_info: dict[str, Any] = {}
@@ -372,7 +383,22 @@ class ExcelTaskController(QObject):
         *,
         operation: Any | None = None,
     ) -> Future[Any]:
-        """Phân tích lại plan sau lựa chọn dòng/mã phí, vẫn trên worker duy nhất."""
+        """Compatibility alias for the full base-plan review preparation."""
+
+        return self.prepare_plan(
+            plan,
+            resolutions,
+            operation=operation,
+        )
+
+    def prepare_plan(
+        self,
+        plan: Any,
+        resolutions: Any,
+        *,
+        operation: Any | None = None,
+    ) -> Future[Any]:
+        """Replay every choice from the base plan before any workbook write."""
 
         normalized = (
             self.normalize_operation(operation)
@@ -381,26 +407,24 @@ class ExcelTaskController(QObject):
         )
         service = self._service_for(normalized)
         self.save_draft(plan, resolutions, operation=normalized)
-        refine = getattr(service, "refine", None)
-        if not callable(refine):
-            return self.apply_plan(
-                plan, resolutions, operation=normalized
-            )
         with self._state_lock:
             if (
                 self._active_operation != normalized
                 or self._phase != "waiting_user"
             ):
                 raise RuntimeError("Kế hoạch Excel chưa ở trạng thái chờ xử lý.")
-            self._phase = "refining"
+            self._phase = "preparing_review"
             self._waiting_plan = None
+            base_plan = self._base_plan or plan
+            self._review_resolutions = dict(resolutions or {})
         callback = self._progress_callback(normalized)
         try:
             future = self._executor.submit(
-                refine,
-                plan,
-                resolutions,
-                progress_callback=callback,
+                self._prepare_review,
+                service,
+                base_plan,
+                dict(resolutions or {}),
+                callback,
             )
         except BaseException as exc:
             self._finish_failure(normalized, exc)
@@ -412,6 +436,63 @@ class ExcelTaskController(QObject):
             )
         )
         return future
+
+    @staticmethod
+    def _prepare_review(
+        service: Any,
+        base_plan: Any,
+        resolutions: Mapping[str, Any],
+        progress_callback: Callable[..., None],
+    ) -> ReviewOutcome:
+        current = base_plan
+        seen_states: set[tuple[str, ...]] = set()
+        refine = getattr(service, "refine", None)
+
+        for _stage in range(32):
+            conflicts = list(
+                _items(_value(current, "conflicts", "unresolved_conflicts", default=()))
+            )
+            # Mỗi lần refine là một bước quyết định mới. Chỉ đưa các conflict
+            # hiện tại về dialog để lựa chọn nguồn đã xử lý không xuất hiện
+            # ngang cấp với conflict ô đích vừa được phát hiện.
+            issues = validate_conflict_resolutions(conflicts, resolutions)
+            if issues:
+                return ReviewOutcome.needs_correction(
+                    conflicts=conflicts,
+                    issues=issues,
+                    resolutions=resolutions,
+                )
+            if not conflicts or not callable(refine):
+                return ReviewOutcome(
+                    prepared_plan=current,
+                    conflicts=conflicts,
+                    resolutions=dict(resolutions),
+                )
+
+            state = tuple(
+                str(_value(conflict, "conflict_id", "id", default=""))
+                for conflict in conflicts
+            )
+            if state in seen_states:
+                return ReviewOutcome.needs_correction(
+                    conflicts=conflicts,
+                    resolutions=resolutions,
+                )
+            seen_states.add(state)
+            progress_callback("Đang kiểm tra lại toàn bộ lựa chọn xung đột…")
+            current = refine(
+                current,
+                resolutions,
+                progress_callback=progress_callback,
+            )
+
+        remaining = list(
+            _items(_value(current, "conflicts", "unresolved_conflicts", default=()))
+        )
+        return ReviewOutcome.needs_correction(
+            conflicts=remaining,
+            resolutions=resolutions,
+        )
 
     def cancel_waiting(self) -> bool:
         """Giải phóng controller khi người dùng đóng dialog xung đột."""
@@ -452,6 +533,18 @@ class ExcelTaskController(QObject):
                 if self._active_operation == operation:
                     self._phase = "waiting_user"
                     self._waiting_plan = plan
+                    self._base_plan = plan
+                    self._review_resolutions = {}
+                    self._review_conflicts = list(
+                        _items(
+                            _value(
+                                plan,
+                                "conflicts",
+                                "unresolved_conflicts",
+                                default=(),
+                            )
+                        )
+                    )
             self.analysis_ready.emit(plan)
             return
 
@@ -472,18 +565,55 @@ class ExcelTaskController(QObject):
         future: Future[Any],
     ) -> None:
         try:
-            plan = future.result()
+            outcome = future.result()
+        except CorrectionRequiredError as exc:
+            self._return_to_review(
+                operation,
+                ReviewOutcome.needs_correction(
+                    conflicts=self._review_conflicts,
+                    issues=exc.issues,
+                    resolutions=self._review_resolutions,
+                ),
+            )
+            return
         except BaseException as exc:
             self._finish_failure(operation, exc)
             return
-        if self._requires_user_input(plan):
+        if not isinstance(outcome, ReviewOutcome):
+            outcome = ReviewOutcome(prepared_plan=outcome)
+        if not outcome.ready:
+            self._return_to_review(operation, outcome)
+            return
+
+        plan = outcome.prepared_plan
+        with self._state_lock:
+            self._review_conflicts = list(outcome.conflicts)
+        refine = getattr(service, "refine", None)
+        if callable(refine) and self._requires_user_input(plan):
             with self._state_lock:
                 if self._active_operation == operation:
                     self._phase = "waiting_user"
                     self._waiting_plan = plan
             self.analysis_ready.emit(plan)
             return
-        self._submit_apply(operation, service, plan, {})
+        self._submit_apply(
+            operation,
+            service,
+            plan,
+            outcome.resolutions if not callable(refine) else {},
+        )
+
+    def _return_to_review(
+        self, operation: str, outcome: ReviewOutcome
+    ) -> None:
+        with self._state_lock:
+            if self._active_operation != operation:
+                return
+            self._phase = "waiting_user"
+            self._waiting_plan = self._base_plan
+            self._review_resolutions = dict(outcome.resolutions)
+            self._review_conflicts = list(outcome.conflicts)
+        self.correction_required.emit(outcome)
 
     def _submit_apply(
         self,
@@ -505,13 +635,49 @@ class ExcelTaskController(QObject):
             raise
         self._future = future
         future.add_done_callback(
-            lambda done, op=operation: self._apply_done(op, done)
+            lambda done, op=operation, owner=service, current_plan=plan, current_resolutions=resolutions: self._apply_done(
+                op,
+                owner,
+                current_plan,
+                current_resolutions,
+                done,
+            )
         )
         return future
 
-    def _apply_done(self, operation: str, future: Future[Any]) -> None:
+    def _apply_done(
+        self,
+        operation: str,
+        service: Any,
+        plan: Any,
+        resolutions: Any,
+        future: Future[Any],
+    ) -> None:
         try:
             result = future.result()
+        except CorrectionRequiredError as exc:
+            self._return_to_review(
+                operation,
+                ReviewOutcome.needs_correction(
+                    conflicts=self._review_conflicts
+                    or list(
+                        _items(
+                            _value(
+                                self._base_plan or plan,
+                                "conflicts",
+                                default=(),
+                            )
+                        )
+                    ),
+                    issues=exc.issues,
+                    resolutions=(
+                        resolutions
+                        if isinstance(resolutions, Mapping)
+                        else self._review_resolutions
+                    ),
+                ),
+            )
+            return
         except BaseException as exc:
             self._finish_failure(operation, exc)
             return
@@ -564,6 +730,9 @@ class ExcelTaskController(QObject):
                 self._phase = "idle"
                 self._future = None
                 self._waiting_plan = None
+                self._base_plan = None
+                self._review_resolutions = {}
+                self._review_conflicts = []
                 self._draft_context_key = None
                 self._draft_saved_this_run = False
 

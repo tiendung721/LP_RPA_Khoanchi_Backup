@@ -390,7 +390,10 @@ class ReviewWindow(QMainWindow):
         self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setToolTip(
+            "Giữ Ctrl để chọn từng dòng hoặc Shift để chọn một dải dòng."
+        )
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setWordWrap(False)
         self.table.verticalHeader().setVisible(False)
@@ -558,9 +561,16 @@ class ReviewWindow(QMainWindow):
             )
 
     def _update_action_state(self, *_args: Any) -> None:
-        selected = bool(self.table.selectionModel().selectedRows()) if self.table.model() else False
-        self.edit_button.setEnabled(selected)
-        self.delete_button.setEnabled(selected)
+        selected_count = (
+            len(self.table.selectionModel().selectedRows())
+            if self.table.model()
+            else 0
+        )
+        self.edit_button.setEnabled(selected_count == 1)
+        self.delete_button.setEnabled(selected_count > 0)
+        self.delete_button.setText(
+            f"Xóa {selected_count} dòng" if selected_count > 1 else "Xóa dòng"
+        )
 
     def clear_filters(self) -> None:
         self.search_edit.clear()
@@ -570,11 +580,17 @@ class ReviewWindow(QMainWindow):
         self._update_visible_count()
 
     def _selected_source_row(self) -> int | None:
+        selected = self._selected_source_rows()
+        return selected[0] if len(selected) == 1 else None
+
+    def _selected_source_rows(self) -> list[int]:
         selected = self.table.selectionModel().selectedRows()
-        if not selected:
-            return None
-        source_index = self.proxy_model.mapToSource(selected[0])
-        return source_index.row() if source_index.isValid() else None
+        source_rows = {
+            source_index.row()
+            for proxy_index in selected
+            if (source_index := self.proxy_model.mapToSource(proxy_index)).isValid()
+        }
+        return sorted(source_rows)
 
     def _select_source_row(self, source_row: int) -> None:
         source_index = self.model.index(source_row, ReviewTableModel.COLUMN_NO)
@@ -631,8 +647,8 @@ class ReviewWindow(QMainWindow):
         return True
 
     def delete_selected_row(self) -> None:
-        source_row = self._selected_source_row()
-        if source_row is None:
+        source_rows = self._selected_source_rows()
+        if not source_rows:
             return
         if any(
             self.model.lookup_presentation(self.model.runtime_id_at(index)).session_id
@@ -645,19 +661,38 @@ class ReviewWindow(QMainWindow):
                 "Hãy mở hồ sơ đối soát và xóa HĐ tại đó.",
             )
             return
+        if len(source_rows) == 1:
+            confirmation = (
+                f"Bạn có chắc muốn xóa dòng số {source_rows[0] + 1}? Dòng sẽ chỉ bị xóa "
+                "khỏi bản làm việc sau khi bạn lưu."
+            )
+        else:
+            display_numbers = [str(row + 1) for row in source_rows[:10]]
+            if len(source_rows) > 10:
+                display_numbers.append("…")
+            confirmation = (
+                f"Bạn có chắc muốn xóa {len(source_rows)} dòng đã chọn "
+                f"(STT {', '.join(display_numbers)})? Các dòng sẽ chỉ bị xóa "
+                "khỏi bản làm việc sau khi bạn lưu."
+            )
+        selected_proxy_rows = [
+            index.row() for index in self.table.selectionModel().selectedRows()
+        ]
+        next_proxy_row = min(selected_proxy_rows)
         answer = QMessageBox.question(
             self,
-            "Xóa dòng dữ liệu",
-            f"Bạn có chắc muốn xóa dòng số {source_row + 1}? Dòng sẽ chỉ bị xóa "
-            "khỏi bản làm việc sau khi bạn lưu.",
+            "Xóa dữ liệu đã chọn",
+            confirmation,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.model.remove_row(source_row)
+        self.model.remove_rows(source_rows)
         if self.proxy_model.rowCount():
-            self.table.selectRow(min(source_row, self.proxy_model.rowCount() - 1))
+            self.table.selectRow(
+                min(next_proxy_row, self.proxy_model.rowCount() - 1)
+            )
 
     def show_raw_json(self) -> None:
         RawJsonDialog(self.model.to_document(), self).exec()

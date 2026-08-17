@@ -74,6 +74,14 @@ from .resolvers import (
     YearResolutionError,
     YearResolver,
 )
+from .review import (
+    CorrectionIssue,
+    CorrectionRequiredError,
+    ReviewOutcome,
+    SourceDataChangedError,
+    issues_for_conflicts,
+    validate_conflict_resolutions,
+)
 from .workbook import (
     SUPPORTED_EXTENSIONS,
     ExcelBackupService,
@@ -97,6 +105,8 @@ __all__ = [
     "ConfigurationCheck",
     "ConfigurationValidationResult",
     "ConflictType",
+    "CorrectionIssue",
+    "CorrectionRequiredError",
     "DailySyncError",
     "DailySyncService",
     "ExcelBackupService",
@@ -129,6 +139,7 @@ __all__ = [
     "NAMSheetProfile",
     "PaymentSheetName",
     "ResolutionAction",
+    "ReviewOutcome",
     "RowCandidate",
     "SourceSheetCandidate",
     "SyncConflict",
@@ -138,6 +149,7 @@ __all__ = [
     "SyncResolution",
     "SyncResult",
     "SyncRow",
+    "SourceDataChangedError",
     "TargetCellKind",
     "TargetCellState",
     "WorkbookChangedError",
@@ -154,6 +166,8 @@ __all__ = [
     "validate_configuration",
     "workbook_fingerprint",
     "workbook_has_vba",
+    "issues_for_conflicts",
+    "validate_conflict_resolutions",
     "DATE_HEADER",
     "SUMMARY_HEADERS",
     "normalize_bk_workbook",

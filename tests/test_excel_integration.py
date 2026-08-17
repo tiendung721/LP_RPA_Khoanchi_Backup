@@ -34,6 +34,7 @@ from app.services.excel.posting import (
     ExpensePostingError,
     ExpensePostingService,
 )
+from app.services.excel.review import CorrectionRequiredError, SourceDataChangedError
 from app.services.excel.workbook import WorkbookChangedError
 
 
@@ -1440,12 +1441,21 @@ def test_posting_cell_conflicts_never_offer_add(
         ConflictType.TARGET_CELL_FORMULA,
         ConflictType.TARGET_CELL_TEXT,
     }
-    assert conflicts[
-        ConflictType.TARGET_CELL_OCCUPIED
-    ].default_action is ResolutionAction.KEEP_EXISTING
+    assert conflicts[ConflictType.TARGET_CELL_OCCUPIED].default_action is None
+    assert conflicts[ConflictType.TARGET_CELL_OCCUPIED].allowed_actions == (
+        ResolutionAction.KEEP_EXISTING,
+        ResolutionAction.OVERWRITE,
+    )
+    assert all(
+        conflict.default_action is None
+        and ResolutionAction.SKIP not in conflict.allowed_actions
+        for conflict in conflicts.values()
+    )
     assert ResolutionAction.ADD not in conflicts[
         ConflictType.TARGET_CELL_OCCUPIED
     ].allowed_actions
+    with pytest.raises(CorrectionRequiredError):
+        service.apply(plan, {})
     resolutions = {
         conflicts[ConflictType.TARGET_CELL_OCCUPIED].conflict_id: {
             "action": "OVERWRITE"
@@ -1454,7 +1464,7 @@ def test_posting_cell_conflicts_never_offer_add(
             "action": "OVERWRITE"
         },
         conflicts[ConflictType.TARGET_CELL_TEXT].conflict_id: {
-            "action": "SKIP"
+            "action": "KEEP_EXISTING"
         },
     }
 
@@ -1715,6 +1725,78 @@ def test_refine_cxd_surfaces_target_cell_conflict_before_apply(
     assert [
         item.conflict_type for item in refined.conflicts
     ] == [ConflictType.TARGET_CELL_OCCUPIED]
+
+
+def test_refine_compares_each_json_member_instead_of_bundle_hash(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready.json"
+    target = tmp_path / "BK 2026.xlsx"
+    _save_ready(ready, [["DRYU3026167", None, "CXD", "ST", 100]])
+    workbook = Workbook()
+    sheet = _new_posting_sheet(workbook, "T07 26")
+    _add_posting_row(sheet, 2, "DRYU3026167")
+    workbook.save(target)
+    workbook.close()
+
+    service = _posting_service(ready, target, tmp_path / "Excel")
+    plan = service.analyze(sheet_name="T07 26")
+    conflict = next(
+        item
+        for item in plan.conflicts
+        if item.conflict_type is ConflictType.UNKNOWN_FEE_CODE
+    )
+    assert plan.source_members
+    assert plan.source_members[0]["sha256"] == _sha256(ready)
+
+    # A real posting bundle may combine several JSON members, so this digest
+    # intentionally differs from every member's raw file hash.
+    plan.batch_hash = hashlib.sha256(b"combined posting bundle").hexdigest()
+
+    refined = service.refine(
+        plan,
+        {
+            conflict.conflict_id: {
+                "action": "SELECT_FEE",
+                "selected_fee": "VTN",
+            }
+        },
+    )
+
+    assert refined.items[0].selected_fee == "VTN"
+
+
+def test_refine_reports_when_a_json_member_really_changed(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready.json"
+    target = tmp_path / "BK 2026.xlsx"
+    _save_ready(ready, [["DRYU3026167", None, "CXD", "ST", 100]])
+    workbook = Workbook()
+    sheet = _new_posting_sheet(workbook, "T07 26")
+    _add_posting_row(sheet, 2, "DRYU3026167")
+    workbook.save(target)
+    workbook.close()
+
+    service = _posting_service(ready, target, tmp_path / "Excel")
+    plan = service.analyze(sheet_name="T07 26")
+    conflict = next(
+        item
+        for item in plan.conflicts
+        if item.conflict_type is ConflictType.UNKNOWN_FEE_CODE
+    )
+    _save_ready(ready, [["DRYU3026167", None, "CXD", "ST", 250]])
+
+    with pytest.raises(SourceDataChangedError):
+        service.refine(
+            plan,
+            {
+                conflict.conflict_id: {
+                    "action": "SELECT_FEE",
+                    "selected_fee": "VTN",
+                }
+            },
+        )
 
 
 def test_refine_manual_row_surfaces_formula_conflict(

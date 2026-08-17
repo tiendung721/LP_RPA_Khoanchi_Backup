@@ -216,7 +216,20 @@ def test_bang_ke_posting_skips_global_month_and_applies_multi_sheet_plan(
         confirmation_done=False,
         original_source_count=5,
         reconciliation_source_count=0,
-        items=[object(), object()],
+        items=[
+            SimpleNamespace(
+                source_indices=[0],
+                status="PLANNED",
+                action="OVERWRITE",
+                cell_state=SimpleNamespace(kind="EMPTY"),
+            ),
+            SimpleNamespace(
+                source_indices=[1],
+                status="USER_SKIPPED",
+                action="KEEP_EXISTING",
+                cell_state=SimpleNamespace(kind="NUMBER"),
+            ),
+        ],
     )
 
     class Tasks:
@@ -277,7 +290,59 @@ def test_bang_ke_posting_skips_global_month_and_applies_multi_sheet_plan(
     assert tasks.cancel_calls == 0
     assert plan.confirmation_done is True
     assert captured["title"] == "Xác nhận nhập khoản chi"
-    assert "Sheet đích: T01 26, T04 26" in captured["text"]
+    assert "Sheet BK: T01 26, T04 26" in captured["text"]
+    assert "File BK sẽ thay đổi 1 ô" in captured["text"]
+    assert "Ghi vào ô trống: 1 khoản" in captured["text"]
+    assert "Giữ nguyên: 1 khoản" in captured["text"]
+
+
+def test_posting_confirmation_summarizes_file_effects_in_plain_language() -> None:
+    plan = SimpleNamespace(
+        selected_sheet="T07 26",
+        target_sheets=set(),
+        items=[
+            SimpleNamespace(
+                source_indices=[0],
+                status="PLANNED",
+                action="OVERWRITE",
+                cell_state=SimpleNamespace(kind="EMPTY"),
+            ),
+            SimpleNamespace(
+                source_indices=[1],
+                status="PLANNED",
+                action="OVERWRITE",
+                cell_state=SimpleNamespace(kind="NUMBER"),
+            ),
+            SimpleNamespace(
+                source_indices=[2],
+                status="USER_SKIPPED",
+                action="KEEP_EXISTING",
+                cell_state=SimpleNamespace(kind="NUMBER"),
+            ),
+            SimpleNamespace(
+                source_indices=[3, 4],
+                status="USER_SKIPPED",
+                action="SKIP",
+                cell_state=None,
+            ),
+            SimpleNamespace(
+                source_indices=[5],
+                status="ALREADY_EXISTS",
+                action=None,
+                cell_state=SimpleNamespace(kind="SAME_VALUE"),
+            ),
+        ],
+    )
+
+    text = main_window_module._posting_confirmation_text(plan)
+
+    assert "Sheet BK: T07 26" in text
+    assert "File BK sẽ thay đổi 2 ô" in text
+    assert "Ghi vào ô trống: 1 khoản" in text
+    assert "Ghi đè dữ liệu hiện có: 1 khoản" in text
+    assert "Giữ nguyên: 1 khoản" in text
+    assert "Bỏ qua: 2 khoản" in text
+    assert "Đã có đúng số tiền: 1 khoản" in text
 
 
 def test_regular_posting_still_reanalyzes_the_selected_month(monkeypatch) -> None:
@@ -804,7 +869,7 @@ def test_payment_sync_reopens_dialog_with_saved_resolution(
     ]
 
 
-def test_conflict_choices_are_saved_before_final_confirmation(
+def test_conflict_choices_are_prepared_before_final_confirmation(
     monkeypatch,
 ) -> None:
     conflict = SimpleNamespace(conflict_id="occupied")
@@ -832,6 +897,7 @@ def test_conflict_choices_are_saved_before_final_confirmation(
         def __init__(self) -> None:
             self.saved: list[Any] = []
             self.cancelled = 0
+            self.prepared: list[Any] = []
 
         @staticmethod
         def normalize_operation(_operation: Any) -> str:
@@ -849,6 +915,11 @@ def test_conflict_choices_are_saved_before_final_confirmation(
         def cancel_waiting(self) -> None:
             self.cancelled += 1
 
+        def prepare_plan(
+            self, value: Any, resolutions: Any, *, operation: str
+        ) -> None:
+            self.prepared.append((value, resolutions, operation))
+
     class Dialog:
         def __init__(
             self, _conflicts: Any, _parent: Any, **_kwargs: Any
@@ -864,10 +935,11 @@ def test_conflict_choices_are_saved_before_final_confirmation(
             return expected
 
     monkeypatch.setattr(main_window_module, "ConflictResolutionDialog", Dialog)
+    confirmation_calls: list[Any] = []
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.No,
+        lambda *_args, **_kwargs: confirmation_calls.append(_args),
     )
     tasks = Tasks()
     owner = SimpleNamespace(
@@ -879,7 +951,9 @@ def test_conflict_choices_are_saved_before_final_confirmation(
     MainWindow._excel_analysis_ready(owner, plan)
 
     assert tasks.saved == [(plan, expected, "posting")]
-    assert tasks.cancelled == 1
+    assert tasks.prepared == [(plan, expected, "posting")]
+    assert tasks.cancelled == 0
+    assert confirmation_calls == []
 
 
 def test_payment_sync_confirmation_discloses_new_sheet_template(
@@ -1795,13 +1869,136 @@ def test_conflict_actions_are_short_vietnamese_labels(qtbot) -> None:
         for index in range(dialog._action_combos["occupied"].count())
     ]
 
-    assert duplicate_labels == ["Bỏ qua", "Chọn dòng"]
-    assert occupied_labels == ["Giữ nguyên", "Ghi đè", "Bỏ qua"]
+    assert duplicate_labels == ["", "Chọn dòng", "Bỏ qua"]
+    assert occupied_labels == ["", "Giữ nguyên", "Ghi đè"]
     assert "repeated" in dialog._selector_buttons
     assert not any(
         "_" in label
         for label in duplicate_labels + occupied_labels
     )
+
+
+def test_conflict_bulk_action_applies_to_all_compatible_rows_and_allows_override(
+    qtbot,
+) -> None:
+    dialog = ConflictResolutionDialog(
+        [
+            {
+                "conflict_id": "row-a",
+                "type": "MULTIPLE_CONTAINER_MATCH",
+                "allowed_actions": ["SELECT_ROW", "SKIP"],
+                "row_candidates": [{"row_number": 12}],
+            },
+            {
+                "conflict_id": "row-b",
+                "type": "CONTAINER_NOT_FOUND",
+                "allowed_actions": ["SELECT_ROW", "SKIP"],
+                "row_candidates": [{"row_number": 13}],
+            },
+            {
+                "conflict_id": "occupied",
+                "type": "TARGET_CELL_OCCUPIED",
+                "allowed_actions": ["KEEP_EXISTING", "OVERWRITE"],
+            },
+        ]
+    )
+    qtbot.addWidget(dialog)
+
+    skip_index = next(
+        index
+        for index in range(dialog.bulk_action_combo.count())
+        if "SKIP" in dialog.bulk_action_combo.itemData(index)
+    )
+    dialog.bulk_action_combo.setCurrentIndex(skip_index)
+
+    assert dialog.bulk_apply_button.isEnabled()
+    assert dialog.bulk_action_combo.currentText() == "Bỏ qua (2 dòng)"
+
+    dialog.bulk_apply_button.click()
+
+    assert dialog._action_combos["row-a"].currentData() == "SKIP"
+    assert dialog._action_combos["row-b"].currentData() == "SKIP"
+    assert dialog._action_combos["occupied"].currentData() == ""
+    assert "2/3 dòng" in dialog.bulk_result_label.text()
+
+    row_a = dialog._action_combos["row-a"]
+    row_a.setCurrentIndex(row_a.findData("SELECT_ROW"))
+
+    assert row_a.currentData() == "SELECT_ROW"
+    assert dialog._action_combos["row-b"].currentData() == "SKIP"
+
+
+def test_skipping_row_selection_disables_and_clears_target_value_choice(
+    qtbot,
+) -> None:
+    dialog = ConflictResolutionDialog(
+        [
+            {
+                "conflict_id": "row",
+                "item_index": 4,
+                "type": "MULTIPLE_CONTAINER_MATCH",
+                "allowed_actions": ["SELECT_ROW", "SKIP"],
+                "row_candidates": [
+                    {"source_sheet": "T07 26", "row_number": 18}
+                ],
+            },
+            {
+                "conflict_id": "cell",
+                "item_index": 4,
+                "type": "TARGET_CELL_OCCUPIED",
+                "allowed_actions": ["KEEP_EXISTING", "OVERWRITE", "SKIP"],
+            },
+        ],
+        initial_resolutions={
+            "row": {
+                "action": "SELECT_ROW",
+                "selected_source_sheet": "T07 26",
+                "selected_row": 18,
+            },
+            "cell": {"action": "OVERWRITE"},
+        },
+    )
+    qtbot.addWidget(dialog)
+
+    row_combo = dialog._action_combos["row"]
+    cell_combo = dialog._action_combos["cell"]
+    assert row_combo.currentData() == "SELECT_ROW"
+    assert cell_combo.currentData() == "OVERWRITE"
+    assert cell_combo.isEnabled()
+
+    row_combo.setCurrentIndex(row_combo.findData("SKIP"))
+
+    assert not cell_combo.isEnabled()
+    assert cell_combo.currentData() == ""
+    assert dialog._selected_rows["row"] is None
+    assert dialog._selector_buttons["row"].text() == "Chọn dòng…"
+    dialog._validate_and_accept()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_target_value_choice_starts_blank_and_is_required(qtbot) -> None:
+    dialog = ConflictResolutionDialog(
+        [
+            {
+                "conflict_id": "occupied",
+                "type": "TARGET_CELL_OCCUPIED",
+                "allowed_actions": ["KEEP_EXISTING", "OVERWRITE", "SKIP"],
+            }
+        ]
+    )
+    qtbot.addWidget(dialog)
+
+    combo = dialog._action_combos["occupied"]
+    assert [combo.itemText(index) for index in range(combo.count())] == [
+        "",
+        "Giữ nguyên",
+        "Ghi đè",
+    ]
+    assert combo.currentData() == ""
+
+    dialog._validate_and_accept()
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    assert "chưa chọn cách xử lý" in dialog.validation_label.text()
 
 
 def test_invoice_conflict_dialog_selects_one_invoice_and_has_only_two_value_actions(

@@ -644,13 +644,38 @@ class ReviewTableModel(QAbstractTableModel):
         self._after_mutation()
 
     def remove_row(self, position: int) -> ReviewRow:
-        if not (0 <= position < len(self._rows)):
+        return self.remove_rows([position])[0]
+
+    def remove_rows(self, positions: Iterable[int]) -> list[ReviewRow]:
+        """Xóa nhiều dòng nguồn trong một lần cập nhật validation/dirty state."""
+
+        targets = sorted(set(positions))
+        if not targets:
+            return []
+        if targets[0] < 0 or targets[-1] >= len(self._rows):
             raise IndexError("Dòng cần xóa không tồn tại.")
-        self.beginRemoveRows(QModelIndex(), position, position)
-        removed = self._rows.pop(position)
-        self._lookup_presentations.pop(removed.runtime_id, None)
-        self._validation.pop(position)
-        self.endRemoveRows()
+
+        removed = [self._rows[position] for position in targets]
+        ranges: list[tuple[int, int]] = []
+        start = end = targets[0]
+        for position in targets[1:]:
+            if position == end + 1:
+                end = position
+                continue
+            ranges.append((start, end))
+            start = end = position
+        ranges.append((start, end))
+
+        # Xóa từ cuối lên đầu để chỉ mục của các vùng phía trước không bị dịch.
+        for start, end in reversed(ranges):
+            self.beginRemoveRows(QModelIndex(), start, end)
+            removed_range = self._rows[start : end + 1]
+            del self._rows[start : end + 1]
+            del self._validation[start : end + 1]
+            for row in removed_range:
+                self._lookup_presentations.pop(row.runtime_id, None)
+            self.endRemoveRows()
+
         self._after_mutation()
         return removed
 

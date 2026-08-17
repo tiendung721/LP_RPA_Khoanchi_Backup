@@ -26,7 +26,19 @@ class WorkbookError(RuntimeError):
 
 
 class WorkbookChangedError(WorkbookError):
-    pass
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        label: str = "Workbook",
+        path: str | Path | None = None,
+    ) -> None:
+        self.label = label
+        self.path = Path(path) if path is not None else None
+        super().__init__(
+            message
+            or f"{label} đã thay đổi sau khi phân tích; vui lòng đọc lại."
+        )
 
 
 class WorkbookLockedError(WorkbookError):
@@ -98,9 +110,7 @@ class WorkbookGateway:
     ) -> None:
         current = self.fingerprint(path)
         if current != expected:
-            raise WorkbookChangedError(
-                f"{label} đã thay đổi sau khi phân tích; vui lòng đọc lại."
-            )
+            raise WorkbookChangedError(label=label, path=path)
 
     def copy(
         self, source: str | Path, destination: str | Path

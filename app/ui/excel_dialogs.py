@@ -428,16 +428,16 @@ DEFAULT_ACTIONS: dict[str, tuple[str, ...]] = {
     "SYNC_GROUP_COUNT_MISMATCH": ("CANCEL_ALL",),
     "TARGET_MONTH_AMBIGUOUS": ("SELECT_MONTH", "CANCEL"),
     "TARGET_SHEET_AMBIGUOUS": ("SELECT_SHEET", "CANCEL"),
-    "CONTAINER_NOT_FOUND": ("SKIP", "SELECT_ROW"),
-    "MULTIPLE_CONTAINER_MATCH": ("SKIP", "SELECT_ROW"),
-    "REPEATED_SOURCE_CONTAINER": ("SKIP", "SELECT_ROW"),
-    "TARGET_CELL_OCCUPIED": ("KEEP_EXISTING", "OVERWRITE", "SKIP"),
-    "TARGET_CELL_FORMULA": ("KEEP_FORMULA", "OVERWRITE", "SKIP"),
-    "TARGET_CELL_TEXT": ("KEEP_EXISTING", "OVERWRITE", "SKIP"),
+    "CONTAINER_NOT_FOUND": ("SELECT_ROW", "SKIP"),
+    "MULTIPLE_CONTAINER_MATCH": ("SELECT_ROW", "SKIP"),
+    "REPEATED_SOURCE_CONTAINER": ("SELECT_ROW", "SKIP"),
+    "TARGET_CELL_OCCUPIED": ("KEEP_EXISTING", "OVERWRITE"),
+    "TARGET_CELL_FORMULA": ("KEEP_FORMULA", "OVERWRITE"),
+    "TARGET_CELL_TEXT": ("KEEP_EXISTING", "OVERWRITE"),
     "UNKNOWN_FEE_CODE": ("SELECT_FEE", "SKIP"),
     "FEE_COLUMN_MISSING": ("SKIP", "CANCEL_ALL"),
-    "BL_ONLY_NO_CONTAINER": ("SKIP", "SELECT_ROW"),
-    "PARTIAL_KEY_MATCH": ("SKIP", "SELECT_ROW", "CANCEL_ALL"),
+    "BL_ONLY_NO_CONTAINER": ("SELECT_ROW", "SKIP"),
+    "PARTIAL_KEY_MATCH": ("SELECT_ROW", "SKIP"),
     "NEGATIVE_ADJUSTMENT": ("ADD", "SKIP", "CANCEL_ALL"),
     "PAYMENT_SOURCE_INVALID": ("SKIP", "CANCEL_ALL"),
     "PAYMENT_CLEAR_VALUE": (
@@ -474,9 +474,6 @@ DEFAULT_RESOLUTION: dict[str, str] = {
     "CONTAINER_NOT_FOUND": "SKIP",
     "MULTIPLE_CONTAINER_MATCH": "SKIP",
     "REPEATED_SOURCE_CONTAINER": "SKIP",
-    "TARGET_CELL_OCCUPIED": "KEEP_EXISTING",
-    "TARGET_CELL_FORMULA": "KEEP_FORMULA",
-    "TARGET_CELL_TEXT": "KEEP_EXISTING",
     "UNKNOWN_FEE_CODE": "SKIP",
     "FEE_COLUMN_MISSING": "SKIP",
     "BL_ONLY_NO_CONTAINER": "SKIP",
@@ -512,7 +509,7 @@ ACTION_LABELS = {
     "SELECT_SOURCE_ITEM": "Chọn một dòng JSON",
     "SELECT_CARRIER": "Chọn bên vận tải",
     "KEEP_EXISTING": "Giữ nguyên",
-    "KEEP_FORMULA": "Giữ công thức",
+    "KEEP_FORMULA": "Giữ nguyên",
     "OVERWRITE": "Ghi đè",
     "ADD": "Áp dụng điều chỉnh giảm",
     "APPEND_CARRIER": "Ghi thêm",
@@ -520,6 +517,36 @@ ACTION_LABELS = {
     "REANALYZE": "Đọc lại dữ liệu",
     "RETRY": "Thử lại",
 }
+
+
+BULK_ACTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Bỏ qua", ("SKIP", "SKIP_INVOICE", "SKIP_INVALID")),
+    ("Giữ nguyên", ("KEEP_EXISTING", "KEEP_FORMULA")),
+    ("Ghi đè", ("OVERWRITE",)),
+)
+
+
+ROW_SELECTION_CONFLICT_TYPES = frozenset(
+    {
+        "CONTAINER_NOT_FOUND",
+        "MULTIPLE_CONTAINER_MATCH",
+        "REPEATED_SOURCE_CONTAINER",
+        "BL_ONLY_NO_CONTAINER",
+        "PARTIAL_KEY_MATCH",
+    }
+)
+
+TARGET_VALUE_CONFLICT_TYPES = frozenset(
+    {
+        "TARGET_CELL_OCCUPIED",
+        "TARGET_CELL_FORMULA",
+        "TARGET_CELL_TEXT",
+    }
+)
+
+EXPLICIT_ACTION_CONFLICT_TYPES = (
+    ROW_SELECTION_CONFLICT_TYPES | TARGET_VALUE_CONFLICT_TYPES
+)
 
 
 class RepostSelectionDialog(QDialog):
@@ -712,6 +739,7 @@ class ConflictResolutionDialog(QDialog):
         valid_fee_codes: Sequence[str] = VALID_FEE_CODES,
         initial_resolutions: Mapping[str, Any] | None = None,
         restore_info: Mapping[str, Any] | None = None,
+        issues: Sequence[Any] | None = None,
     ) -> None:
         super().__init__(parent)
         self.plan = plan_or_conflicts
@@ -725,6 +753,7 @@ class ConflictResolutionDialog(QDialog):
         self.valid_fee_codes = tuple(valid_fee_codes)
         self.initial_resolutions = dict(initial_resolutions or {})
         self.restore_info = dict(restore_info or {})
+        self.issues = list(issues or ())
         self._action_combos: dict[str, QComboBox] = {}
         self._selected_rows: dict[str, Any] = {}
         self._selected_source_sheets: dict[str, str] = {}
@@ -735,6 +764,8 @@ class ConflictResolutionDialog(QDialog):
         self._selected_invoices: dict[str, QComboBox] = {}
         self._selected_carriers: dict[str, QComboBox] = {}
         self._selector_buttons: dict[str, QPushButton] = {}
+        self._conflicts_by_id: dict[str, Any] = {}
+        self._inactive_conflict_ids: set[str] = set()
         self.setObjectName("excelConflictResolutionDialog")
         self.setWindowTitle("Xử lý xung đột Excel")
         self.resize(1320, 660)
@@ -742,11 +773,11 @@ class ConflictResolutionDialog(QDialog):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        title = QLabel(
+        self.title_label = QLabel(
             f"Có {len(self.conflicts)} mục cần xử lý trước khi ghi workbook."
         )
-        title.setStyleSheet("font-size: 12pt; font-weight: 700;")
-        layout.addWidget(title)
+        self.title_label.setStyleSheet("font-size: 12pt; font-weight: 700;")
+        layout.addWidget(self.title_label)
         note = QLabel(
             "Kiểm tra giá trị hiện tại và chọn cách xử lý cho từng mục. "
             "Workbook chỉ được ghi sau khi toàn bộ lựa chọn hợp lệ."
@@ -789,6 +820,24 @@ class ConflictResolutionDialog(QDialog):
             self.restore_label.setProperty("status", "info")
             layout.addWidget(self.restore_label)
 
+        bulk_layout = QHBoxLayout()
+        bulk_label = QLabel("Xử lý hàng loạt:")
+        bulk_label.setObjectName("conflictBulkActionLabel")
+        self.bulk_action_combo = QComboBox()
+        self.bulk_action_combo.setObjectName("conflictBulkActionCombo")
+        self.bulk_action_combo.setMinimumWidth(230)
+        self.bulk_apply_button = QPushButton("Áp dụng cho toàn bộ")
+        self.bulk_apply_button.setObjectName("conflictBulkApplyButton")
+        self.bulk_apply_button.setEnabled(False)
+        self.bulk_result_label = QLabel()
+        self.bulk_result_label.setObjectName("conflictBulkResultLabel")
+        self.bulk_result_label.setProperty("muted", True)
+        bulk_layout.addWidget(bulk_label)
+        bulk_layout.addWidget(self.bulk_action_combo)
+        bulk_layout.addWidget(self.bulk_apply_button)
+        bulk_layout.addWidget(self.bulk_result_label, 1)
+        layout.addLayout(bulk_layout)
+
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setObjectName("excelConflictTable")
         self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
@@ -807,7 +856,14 @@ class ConflictResolutionDialog(QDialog):
 
         for index, conflict in enumerate(self.conflicts):
             self._add_conflict(index, conflict)
+        self._wire_action_dependencies()
+        self._refresh_bulk_actions()
         _enable_user_sorting(self.table)
+
+        self.bulk_action_combo.currentIndexChanged.connect(
+            self._update_bulk_apply_enabled
+        )
+        self.bulk_apply_button.clicked.connect(self._apply_bulk_action)
 
         self.validation_label = QLabel()
         self.validation_label.setObjectName("conflictValidationLabel")
@@ -820,16 +876,221 @@ class ConflictResolutionDialog(QDialog):
             | QDialogButtonBox.StandardButton.Cancel
         )
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
-            "Áp dụng lựa chọn"
+            "Xác nhận lựa chọn"
         )
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Hủy")
         self.buttons.accepted.connect(self._validate_and_accept)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
+        self.show_issues(self.issues)
+
+    def set_review(
+        self,
+        conflicts: Sequence[Any],
+        *,
+        issues: Sequence[Any] = (),
+        initial_resolutions: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Reuse this dialog for the next correction round."""
+
+        carried = self.resolution_map() if self._action_combos else {}
+        carried.update(dict(initial_resolutions or {}))
+        self.conflicts = list(conflicts)
+        self.initial_resolutions = carried
+        self.issues = list(issues)
+        self.table.setSortingEnabled(False)
+        self.table.clearContents()
+        self.table.setRowCount(0)
+        self._action_combos.clear()
+        self._selected_rows.clear()
+        self._selected_source_sheets.clear()
+        self._selected_source_items.clear()
+        self._selected_fees.clear()
+        self._selected_sheets.clear()
+        self._selected_months.clear()
+        self._selected_invoices.clear()
+        self._selected_carriers.clear()
+        self._selector_buttons.clear()
+        self._conflicts_by_id.clear()
+        self._inactive_conflict_ids.clear()
+        for index, conflict in enumerate(self.conflicts):
+            self._add_conflict(index, conflict)
+        self._wire_action_dependencies()
+        self._refresh_bulk_actions()
+        self.bulk_result_label.clear()
+        self.table.setSortingEnabled(True)
+        self.setResult(0)
+        self.show_issues(self.issues)
+
+    @staticmethod
+    def _issue_conflict_ids(issue: Any) -> tuple[str, ...]:
+        raw = _value(issue, "conflict_ids", default=())
+        values = tuple(str(value) for value in _sequence(raw) if str(value))
+        if values:
+            return values
+        single = _value(issue, "conflict_id", default=None)
+        return (str(single),) if single not in (None, "") else ()
+
+    def show_issues(self, issues: Sequence[Any]) -> None:
+        """Paint latest validation issues without reacting to later edits."""
+
+        self.issues = list(issues)
+        messages: dict[str, list[str]] = {}
+        for issue in self.issues:
+            message = str(_value(issue, "message", default="Chưa hợp lệ."))
+            for conflict_id in self._issue_conflict_ids(issue):
+                messages.setdefault(conflict_id, []).append(message)
+
+        problem_widget_style = (
+            "QComboBox, QPushButton { background-color: #fff7d6; "
+            "border: 1px solid #d6a700; }"
+        )
+        first_problem_row: int | None = None
+        problem_column = self.COLUMNS.index("Vấn đề")
+        for row in range(self.table.rowCount()):
+            identity_item = self.table.item(row, 0)
+            conflict_id = (
+                str(identity_item.data(Qt.ItemDataRole.UserRole + 1))
+                if identity_item is not None
+                else ""
+            )
+            row_messages = messages.get(conflict_id, [])
+            for column in range(self.table.columnCount()):
+                widget = self.table.cellWidget(row, column)
+                if widget is not None:
+                    widget.setStyleSheet(
+                        problem_widget_style if row_messages else ""
+                    )
+            if row_messages:
+                if first_problem_row is None:
+                    first_problem_row = row
+                issue_item = self.table.item(row, problem_column)
+                if issue_item is not None:
+                    original = issue_item.toolTip() or issue_item.text()
+                    latest = " • ".join(dict.fromkeys(row_messages))
+                    issue_item.setText(latest)
+                    issue_item.setToolTip(
+                        f"{latest}\n\nXung đột ban đầu: {original}"
+                    )
+
+        if messages:
+            count = len(messages)
+            self.title_label.setText(
+                f"Có {count} dòng cần sửa trong {len(self.conflicts)} mục xung đột."
+            )
+            self.validation_label.setText(
+                "Kiểm tra các ô được đánh dấu và chọn đủ cách xử lý."
+            )
+        else:
+            self.title_label.setText(
+                f"Có {len(self.conflicts)} mục cần xử lý trước khi ghi workbook."
+            )
+            self.validation_label.clear()
+        if first_problem_row is not None:
+            self.table.selectRow(first_problem_row)
+            item = self.table.item(first_problem_row, 0)
+            if item is not None:
+                self.table.scrollToItem(
+                    item, QAbstractItemView.ScrollHint.PositionAtCenter
+                )
+
+    def _refresh_bulk_actions(self) -> None:
+        """Liệt kê các cách xử lý có thể áp dụng cho ít nhất một dòng."""
+
+        available_codes: list[str] = []
+        for combo in self._action_combos.values():
+            for index in range(combo.count()):
+                code = str(combo.itemData(index) or "")
+                if code and code not in available_codes:
+                    available_codes.append(code)
+
+        grouped_codes: set[str] = set()
+        options: list[tuple[str, tuple[str, ...], int]] = []
+        for label, action_codes in BULK_ACTION_GROUPS:
+            present_codes = tuple(
+                code for code in action_codes if code in available_codes
+            )
+            if not present_codes:
+                continue
+            grouped_codes.update(present_codes)
+            applicable_count = sum(
+                any(combo.findData(code) >= 0 for code in present_codes)
+                for combo in self._action_combos.values()
+            )
+            options.append((label, present_codes, applicable_count))
+
+        for code in available_codes:
+            if code in grouped_codes:
+                continue
+            applicable_count = sum(
+                combo.findData(code) >= 0
+                for combo in self._action_combos.values()
+            )
+            options.append(
+                (ACTION_LABELS.get(code, code), (code,), applicable_count)
+            )
+
+        was_blocked = self.bulk_action_combo.blockSignals(True)
+        try:
+            self.bulk_action_combo.clear()
+            self.bulk_action_combo.addItem("— Chọn cách xử lý —", ())
+            for label, action_codes, applicable_count in options:
+                self.bulk_action_combo.addItem(
+                    f"{label} ({applicable_count} dòng)", action_codes
+                )
+            self.bulk_action_combo.setCurrentIndex(0)
+        finally:
+            self.bulk_action_combo.blockSignals(was_blocked)
+        self._update_bulk_apply_enabled()
+
+    def _update_bulk_apply_enabled(self, _index: int = -1) -> None:
+        action_codes = self.bulk_action_combo.currentData()
+        self.bulk_apply_button.setEnabled(bool(action_codes))
+
+    def _apply_bulk_action(self) -> None:
+        """Đặt lựa chọn chung; từng dòng vẫn có thể được sửa lại sau đó."""
+
+        raw_codes = self.bulk_action_combo.currentData()
+        action_codes = tuple(str(code) for code in _sequence(raw_codes) if code)
+        if not action_codes:
+            return
+
+        applied_count = 0
+        for conflict_id, combo in self._action_combos.items():
+            if conflict_id in self._inactive_conflict_ids:
+                continue
+            target_index = next(
+                (
+                    combo.findData(code)
+                    for code in action_codes
+                    if combo.findData(code) >= 0
+                ),
+                -1,
+            )
+            if target_index < 0:
+                continue
+            combo.setCurrentIndex(target_index)
+            applied_count += 1
+
+        total_count = len(self._action_combos)
+        selected_label = self.bulk_action_combo.currentText().rsplit(" (", 1)[0]
+        if applied_count == total_count:
+            message = (
+                f"Đã áp dụng “{selected_label}” cho toàn bộ "
+                f"{total_count} dòng."
+            )
+        else:
+            remaining_count = total_count - applied_count
+            message = (
+                f"Đã áp dụng “{selected_label}” cho {applied_count}/{total_count} "
+                f"dòng; {remaining_count} dòng không có lựa chọn này."
+            )
+        self.bulk_result_label.setText(message)
 
     def _add_conflict(self, row: int, conflict: Any) -> None:
         self.table.insertRow(row)
         conflict_id = self._conflict_id(conflict, row)
+        self._conflicts_by_id[conflict_id] = conflict
         target_cell = _value(conflict, "target_cell", "cell", "cell_address")
         target_column = _value(
             conflict, "target_column", "column", "column_name"
@@ -902,7 +1163,9 @@ class ConflictResolutionDialog(QDialog):
         default_action = _code(
             _value(conflict, "default_action", "default_resolution")
         ) or DEFAULT_RESOLUTION.get(conflict_type, _code(options[0]))
-        if conflict_type == "NEGATIVE_ADJUSTMENT":
+        if conflict_type in EXPLICIT_ACTION_CONFLICT_TYPES:
+            action_combo.addItem("", "")
+        elif conflict_type == "NEGATIVE_ADJUSTMENT":
             action_combo.addItem("— Chọn cách xử lý —", "")
         for option in options:
             code = _code(option)
@@ -925,7 +1188,10 @@ class ConflictResolutionDialog(QDialog):
             action_combo.addItem(label, code)
         default_index = action_combo.findData(default_action)
         action_combo.setCurrentIndex(
-            0 if conflict_type == "NEGATIVE_ADJUSTMENT" else max(0, default_index)
+            0
+            if conflict_type in EXPLICIT_ACTION_CONFLICT_TYPES
+            or conflict_type == "NEGATIVE_ADJUSTMENT"
+            else max(0, default_index)
         )
         self._action_combos[conflict_id] = action_combo
         self.table.setCellWidget(row, 12, action_combo)
@@ -1177,7 +1443,92 @@ class ConflictResolutionDialog(QDialog):
         )
         if conflict_type == "TARGET_CELL_OCCUPIED":
             actions = tuple(action for action in actions if _code(action) != "ADD")
+        if conflict_type in TARGET_VALUE_CONFLICT_TYPES:
+            actions = tuple(action for action in actions if _code(action) != "SKIP")
+        if conflict_type in ROW_SELECTION_CONFLICT_TYPES:
+            actions = tuple(
+                action for action in actions if _code(action) != "CANCEL_ALL"
+            )
+            order = {"SELECT_ROW": 0, "SKIP": 1}
+            actions = tuple(
+                sorted(actions, key=lambda action: order.get(_code(action), 99))
+            )
+        elif conflict_type in TARGET_VALUE_CONFLICT_TYPES:
+            order = {
+                "KEEP_EXISTING": 0,
+                "KEEP_FORMULA": 0,
+                "OVERWRITE": 1,
+            }
+            actions = tuple(
+                sorted(actions, key=lambda action: order.get(_code(action), 99))
+            )
         return actions
+
+    @staticmethod
+    def _dependency_key(conflict: Any) -> tuple[Any, ...]:
+        item_index = _value(conflict, "item_index", default=None)
+        if item_index is not None:
+            return ("item", int(item_index))
+        source_key = (
+            "source",
+            _value(conflict, "container", "container_number"),
+            _value(conflict, "bl", "bill_of_lading"),
+            _value(conflict, "selected_fee", "fee", "fee_code"),
+            _value(conflict, "amount", "incoming_amount"),
+        )
+        if all(value in (None, "") for value in source_key[1:]):
+            return ("object", id(conflict))
+        return source_key
+
+    def _wire_action_dependencies(self) -> None:
+        parents: dict[tuple[Any, ...], str] = {}
+        children: dict[tuple[Any, ...], list[str]] = {}
+        for conflict_id, conflict in self._conflicts_by_id.items():
+            conflict_type = _code(
+                _value(conflict, "conflict_type", "type", "kind")
+            )
+            key = self._dependency_key(conflict)
+            if conflict_type in ROW_SELECTION_CONFLICT_TYPES:
+                parents[key] = conflict_id
+            elif conflict_type in TARGET_VALUE_CONFLICT_TYPES:
+                children.setdefault(key, []).append(conflict_id)
+
+        for key, parent_id in parents.items():
+            child_ids = tuple(children.get(key, ()))
+            combo = self._action_combos[parent_id]
+            combo.currentIndexChanged.connect(
+                lambda _index, current=parent_id, linked=child_ids: (
+                    self._sync_action_dependency(current, linked)
+                )
+            )
+            self._sync_action_dependency(parent_id, child_ids)
+
+    def _sync_action_dependency(
+        self, parent_id: str, child_ids: Sequence[str]
+    ) -> None:
+        parent_action = str(
+            self._action_combos[parent_id].currentData() or ""
+        )
+        active = parent_action == "SELECT_ROW"
+        if not active:
+            self._selected_rows[parent_id] = None
+            self._selected_source_sheets.pop(parent_id, None)
+        button = self._selector_buttons.get(parent_id)
+        if button is not None:
+            button.setEnabled(active)
+            if not active:
+                button.setText("Chọn dòng…")
+
+        for child_id in child_ids:
+            combo = self._action_combos[child_id]
+            combo.setEnabled(active)
+            if active:
+                self._inactive_conflict_ids.discard(child_id)
+                continue
+            self._inactive_conflict_ids.add(child_id)
+            blank_index = combo.findData("")
+            if blank_index >= 0:
+                combo.setCurrentIndex(blank_index)
 
     @staticmethod
     def _conflict_id(conflict: Any, row: int) -> str:
@@ -1232,37 +1583,79 @@ class ConflictResolutionDialog(QDialog):
 
     def _validate_and_accept(self) -> None:
         missing: list[str] = []
+        missing_issues: list[dict[str, Any]] = []
+
+        def add_missing(conflict_id: str, text: str, message: str) -> None:
+            missing.append(text)
+            missing_issues.append(
+                {"conflict_ids": (conflict_id,), "message": message}
+            )
+
         for row, conflict in enumerate(self.conflicts):
             conflict_id = self._conflict_id(conflict, row)
+            if conflict_id in self._inactive_conflict_ids:
+                continue
             action = str(self._action_combos[conflict_id].currentData() or "")
             if not action:
-                missing.append(f"dòng {row + 1}: chưa chọn cách xử lý")
+                add_missing(
+                    conflict_id,
+                    f"dòng {row + 1}: chưa chọn cách xử lý",
+                    "Chưa chọn cách xử lý.",
+                )
             if action == "SELECT_ROW" and self._selected_rows.get(conflict_id) is None:
-                missing.append(f"dòng {row + 1}: chưa chọn dòng BK")
+                add_missing(
+                    conflict_id,
+                    f"dòng {row + 1}: chưa chọn dòng BK",
+                    "Chưa chọn dòng BK.",
+                )
             if action == "SELECT_FEE":
                 combo = self._selected_fees.get(conflict_id)
                 if combo is None or combo.currentData() in (None, ""):
-                    missing.append(f"dòng {row + 1}: chưa chọn mã phí")
+                    add_missing(
+                        conflict_id,
+                        f"dòng {row + 1}: chưa chọn mã phí",
+                        "Chưa chọn mã phí.",
+                    )
             if action == "SELECT_SHEET":
                 combo = self._selected_sheets.get(conflict_id)
                 if combo is None or combo.currentData() in (None, ""):
-                    missing.append(f"dòng {row + 1}: chưa chọn sheet")
+                    add_missing(
+                        conflict_id,
+                        f"dòng {row + 1}: chưa chọn sheet",
+                        "Chưa chọn sheet.",
+                    )
             if action == "SELECT_MONTH":
                 combo = self._selected_months.get(conflict_id)
                 if combo is None or combo.currentData() in (None, ""):
-                    missing.append(f"dòng {row + 1}: chưa chọn tháng")
+                    add_missing(
+                        conflict_id,
+                        f"dòng {row + 1}: chưa chọn tháng",
+                        "Chưa chọn tháng.",
+                    )
             if action == "SELECT_INVOICE":
                 combo = self._selected_invoices.get(conflict_id)
                 if combo is None or combo.currentData() in (None, ""):
-                    missing.append(f"dòng {row + 1}: chưa chọn Số HĐ")
+                    add_missing(
+                        conflict_id,
+                        f"dòng {row + 1}: chưa chọn Số HĐ",
+                        "Chưa chọn Số HĐ.",
+                    )
             if action == "SELECT_SOURCE_ITEM":
                 combo = self._selected_source_items.get(conflict_id)
                 if combo is None or combo.currentData() is None:
-                    missing.append(f"dòng {row + 1}: chưa chọn dòng JSON")
+                    add_missing(
+                        conflict_id,
+                        f"dòng {row + 1}: chưa chọn dòng JSON",
+                        "Chưa chọn dòng JSON.",
+                    )
             if action == "SELECT_CARRIER":
                 combo = self._selected_carriers.get(conflict_id)
                 if combo is None or combo.currentData() in (None, ""):
-                    missing.append(f"dòng {row + 1}: chưa chọn bên vận tải")
+                    add_missing(
+                        conflict_id,
+                        f"dòng {row + 1}: chưa chọn bên vận tải",
+                        "Chưa chọn bên vận tải.",
+                    )
             details = _value(conflict, "details", default={})
             if (
                 action == "KEEP_EXISTING"
@@ -1276,13 +1669,15 @@ class ConflictResolutionDialog(QDialog):
             ):
                 combo = self._selected_carriers.get(conflict_id)
                 if combo is None or combo.currentData() in (None, ""):
-                    missing.append(
-                        f"dòng {row + 1}: chọn mã vận tải hiệu lực đang có"
+                    add_missing(
+                        conflict_id,
+                        f"dòng {row + 1}: chọn mã vận tải hiệu lực đang có",
+                        "Chưa chọn mã vận tải hiệu lực đang có.",
                     )
         if missing:
+            self.show_issues(missing_issues)
             self.validation_label.setText(" • ".join(missing))
             return
-        self.validation_label.clear()
         self.accept()
 
 

@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialogButtonBox, QLabel, QMessageBox
+from PySide6.QtCore import QItemSelectionModel, Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QDialogButtonBox,
+    QLabel,
+    QMessageBox,
+)
 
 from app.ui.edit_row_dialog import EditRowDialog
 from app.ui.review_window import ReviewWindow, VesselVoyageNotFoundDialog
@@ -86,6 +91,55 @@ def test_delete_selected_row_requires_confirmation(qtbot, monkeypatch) -> None:
 
         assert asked
         assert window.model.rowCount() == 1
+        assert window.model.dirty
+    finally:
+        window.model.mark_clean()
+        window.close()
+
+
+def test_delete_multiple_selected_rows_respects_proxy_sort(qtbot, monkeypatch) -> None:
+    payload = _review_payload()
+    payload["document"]["d"].append(
+        ["ABCD1234567", "BL-3", "VSDL", "ST", "HD-3", "Vận tải C", 850_000]
+    )
+    window = ReviewWindow(payload)
+    qtbot.addWidget(window)
+    window.show()
+    window.proxy_model.sort(
+        ReviewTableModel.COLUMN_AMOUNT,
+        Qt.SortOrder.DescendingOrder,
+    )
+    expected_remaining_runtime_id = window.proxy_model.data(
+        window.proxy_model.index(1, ReviewTableModel.COLUMN_NO),
+        ReviewTableModel.RUNTIME_ID_ROLE,
+    )
+    selection = window.table.selectionModel()
+    flags = (
+        QItemSelectionModel.SelectionFlag.Select
+        | QItemSelectionModel.SelectionFlag.Rows
+    )
+    selection.select(window.proxy_model.index(0, 0), flags)
+    selection.select(window.proxy_model.index(2, 0), flags)
+    asked: list[str] = []
+
+    def confirm(*args: Any, **kwargs: Any) -> QMessageBox.StandardButton:
+        asked.append(str(args[2]))
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+
+    try:
+        assert window.table.selectionMode() is (
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        assert not window.edit_button.isEnabled()
+        assert window.delete_button.text() == "Xóa 2 dòng"
+
+        window.delete_selected_row()
+
+        assert "xóa 2 dòng" in asked[0]
+        assert window.model.rowCount() == 1
+        assert window.model.runtime_id_at(0) == expected_remaining_runtime_id
         assert window.model.dirty
     finally:
         window.model.mark_clean()

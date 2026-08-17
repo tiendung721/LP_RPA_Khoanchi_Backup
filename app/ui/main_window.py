@@ -26,6 +26,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.services.excel.review import CorrectionIssue, SourceDataChangedError
+from app.services.excel.workbook import (
+    WorkbookChangedError,
+    WorkbookLockedError,
+)
+
 from .history_page import HistoryPage
 from .log_page import LogPage
 from .review_window import ReviewWindow
@@ -48,6 +54,15 @@ class _AssistantSession:
     session_id: str
     context: str
     reconciliation_group_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ExcelRetryContext:
+    operation: str
+    batch_id: int | None = None
+    sheet_name: str | None = None
+    repost_source_indices: tuple[int, ...] | None = None
+    highlight_unresolved: bool = False
 
 
 def _attribute(source: Any, *names: str, default: Any = None) -> Any:
@@ -73,6 +88,96 @@ def _status_code(batch: Any) -> str:
 def _batch_id(batch: Any) -> Any:
     metadata = _attribute(batch, "metadata", default=batch)
     return _attribute(metadata, "id", "batch_id")
+
+
+def _enum_code(value: Any) -> str:
+    return str(getattr(value, "value", value) or "").split(".")[-1].upper()
+
+
+def _posting_item_count(item: Any) -> int:
+    source_indices = list(_attribute(item, "source_indices", default=()) or ())
+    return len(source_indices) or 1
+
+
+def _posting_confirmation_counts(plan: Any) -> dict[str, int]:
+    counts = {
+        "changed_cells": 0,
+        "write_new": 0,
+        "overwrite": 0,
+        "keep_existing": 0,
+        "skip": 0,
+        "already_existing": 0,
+    }
+    for item in list(_attribute(plan, "items", default=()) or ()):
+        item_count = _posting_item_count(item)
+        status = _enum_code(_attribute(item, "status", default=""))
+        action = _enum_code(_attribute(item, "action", default=""))
+        cell_state = _attribute(item, "cell_state", default=None)
+        cell_kind = _enum_code(_attribute(cell_state, "kind", default=""))
+
+        if status == "ALREADY_EXISTS":
+            counts["already_existing"] += item_count
+        elif action in {"KEEP_EXISTING", "KEEP_FORMULA"}:
+            counts["keep_existing"] += item_count
+        elif action == "SKIP" or status in {
+            "USER_SKIPPED",
+            "NOT_MATCHED",
+            "UNRESOLVED",
+        }:
+            counts["skip"] += item_count
+        elif status == "PLANNED":
+            counts["changed_cells"] += 1
+            if cell_kind in {"EMPTY", "ZERO"}:
+                counts["write_new"] += item_count
+            else:
+                counts["overwrite"] += item_count
+    return counts
+
+
+def _posting_confirmation_text(plan: Any) -> str:
+    counts = _posting_confirmation_counts(plan)
+    sheets = sorted(
+        {
+            str(value).strip()
+            for value in (
+                list(_attribute(plan, "target_sheets", default=()) or ())
+                + [
+                    _attribute(
+                        plan,
+                        "selected_sheet",
+                        "selected_sheet_name",
+                        default=None,
+                    )
+                ]
+            )
+            if str(value or "").strip()
+        }
+    )
+    lines: list[str] = []
+    if sheets:
+        lines.extend((f"Sheet BK: {', '.join(sheets)}", ""))
+    if counts["changed_cells"]:
+        lines.extend(
+            (
+                f"File BK sẽ thay đổi {counts['changed_cells']} ô:",
+                f"- Ghi vào ô trống: {counts['write_new']} khoản",
+                f"- Ghi đè dữ liệu hiện có: {counts['overwrite']} khoản",
+            )
+        )
+    else:
+        lines.append("Không có ô tiền nào cần thay đổi trong file BK.")
+    lines.extend(
+        (
+            "",
+            "Các khoản không làm thay đổi dữ liệu tiền:",
+            f"- Giữ nguyên: {counts['keep_existing']} khoản",
+            f"- Bỏ qua: {counts['skip']} khoản",
+            f"- Đã có đúng số tiền: {counts['already_existing']} khoản",
+            "",
+            "Tiếp tục ghi file BK?",
+        )
+    )
+    return "\n".join(lines)
 
 
 class MainWindow(QMainWindow):
@@ -152,6 +257,12 @@ class MainWindow(QMainWindow):
         )
         self._excel_operation: str | None = None
         self._excel_context: str | None = None
+        self._excel_review_dialog: ConflictResolutionDialog | None = None
+        self._excel_review_plan: Any | None = None
+        self._excel_review_resolutions: dict[str, Any] = {}
+        self._excel_review_operation: str | None = None
+        self._excel_review_confirmed = False
+        self._excel_reanalysis_from_source_change = False
         self._paths = paths or _attribute(controller, "paths", "app_paths")
         self._settings = settings or _attribute(controller, "settings")
         self._active_batch: Any | None = None
@@ -320,6 +431,11 @@ class MainWindow(QMainWindow):
             self._safe_connect(excel_tasks, "progress", self._excel_progress)
             self._safe_connect(
                 excel_tasks, "analysis_ready", self._excel_analysis_ready
+            )
+            self._safe_connect(
+                excel_tasks,
+                "correction_required",
+                self._excel_correction_required,
             )
             self._safe_connect(excel_tasks, "completed", self._excel_completed)
             self._safe_connect(excel_tasks, "failed", self._excel_failed)
@@ -769,6 +885,7 @@ class MainWindow(QMainWindow):
             resolutions = MainWindow._saved_excel_resolutions(
                 self, plan, operation
             )
+            source_reload_issues: list[CorrectionIssue] = []
             handled_conflicts: set[str] = set()
             conflicts = list(_attribute(plan, "conflicts", default=()) or ())
             selected_sync_sheet = _attribute(
@@ -944,61 +1061,70 @@ class MainWindow(QMainWindow):
             remaining = [
                 conflict for conflict in remaining if conflict not in blocking_sync
             ]
+            if bool(
+                getattr(self, "_excel_reanalysis_from_source_change", False)
+            ):
+                source_reload_issues = [
+                    CorrectionIssue.from_conflict(
+                        conflict,
+                        issue_id=(
+                            "source-reload:"
+                            + str(_attribute(conflict, "conflict_id", "id", default=""))
+                        ),
+                        message=(
+                            "Xung đột cần kiểm tra lại sau khi dữ liệu JSON thay đổi."
+                        ),
+                    )
+                    for conflict in remaining
+                    if str(_attribute(conflict, "conflict_id", "id", default=""))
+                    not in resolutions
+                ]
             if remaining:
-                dialog = ConflictResolutionDialog(
-                    remaining,
-                    self,
-                    initial_resolutions=resolutions,
-                    restore_info=getattr(self, "_excel_restore_info", {}),
-                )
+                if getattr(self, "_excel_review_dialog", None) is None:
+                    dialog = ConflictResolutionDialog(
+                        remaining,
+                        self,
+                        initial_resolutions=resolutions,
+                        restore_info=getattr(self, "_excel_restore_info", {}),
+                        issues=source_reload_issues,
+                    )
+                    setattr(self, "_excel_review_dialog", dialog)
+                    setattr(self, "_excel_review_plan", plan)
+                    setattr(self, "_excel_review_operation", operation)
+                else:
+                    dialog = getattr(self, "_excel_review_dialog")
+                    dialog.set_review(
+                        remaining,
+                        issues=source_reload_issues,
+                        initial_resolutions={
+                            **getattr(self, "_excel_review_resolutions", {}),
+                            **resolutions,
+                        },
+                    )
+                setattr(self, "_excel_reanalysis_from_source_change", False)
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     self._excel_tasks.cancel_waiting()
+                    MainWindow._clear_excel_review(self)
                     return
                 resolutions.update(dialog.resolution_map())
+                review_resolutions = getattr(
+                    self, "_excel_review_resolutions", {}
+                )
+                review_resolutions.update(resolutions)
+                setattr(self, "_excel_review_resolutions", review_resolutions)
                 MainWindow._save_excel_draft(
                     self, plan, resolutions, operation
                 )
             if (
                 operation == "posting"
+                and not remaining
                 and bool(_attribute(plan, "confirmation_required", default=False))
                 and not bool(_attribute(plan, "confirmation_done", default=False))
             ):
-                normal_count = int(
-                    _attribute(plan, "original_source_count", default=0) or 0
-                )
-                reconciliation_count = int(
-                    _attribute(plan, "reconciliation_source_count", default=0) or 0
-                )
-                previous_count = len(
-                    list(_attribute(plan, "previously_posted_items", default=()) or ())
-                )
-                target_sheet_detail = ""
-                if source_kind == "BANG_KE":
-                    target_sheets = sorted(
-                        {
-                            str(sheet).strip()
-                            for sheet in (
-                                _attribute(plan, "target_sheets", default=()) or ()
-                            )
-                            if str(sheet).strip()
-                        }
-                    )
-                    if target_sheets:
-                        target_sheet_detail = (
-                            f"Sheet đích: {', '.join(target_sheets)}\n"
-                        )
                 answer = QMessageBox.question(
                     self,
                     "Xác nhận nhập khoản chi",
-                    (
-                        target_sheet_detail
-                        + f"Khoản từ file gốc: {normal_count}\n"
-                        f"Dòng cont từ hồ sơ đối soát: {reconciliation_count}\n"
-                        f"Đã nhập trước đó: {previous_count}\n"
-                        f"Còn cần xử lý: {len(list(_attribute(plan, 'items', default=()) or ()))}\n\n"
-                        "Toàn bộ dữ liệu sẽ được ghi trong một lần và dùng chung một bản backup. "
-                        "Tiếp tục ghi file BK?"
-                    ),
+                    _posting_confirmation_text(plan),
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
@@ -1006,7 +1132,11 @@ class MainWindow(QMainWindow):
                     self._excel_tasks.cancel_waiting()
                     return
                 plan.confirmation_done = True
-            if operation == "sync":
+                if getattr(self, "_excel_review_plan", None) is not None:
+                    setattr(self, "_excel_review_confirmed", True)
+            if operation == "sync" and not bool(
+                getattr(self, "_excel_review_confirmed", False)
+            ):
                 candidate = next(
                     (
                         item
@@ -1082,6 +1212,8 @@ class MainWindow(QMainWindow):
                 if answer != QMessageBox.StandardButton.Yes:
                     self._excel_tasks.cancel_waiting()
                     return
+                if getattr(self, "_excel_review_plan", None) is not None:
+                    setattr(self, "_excel_review_confirmed", True)
             selector_actions = {
                 str(value.get("action", ""))
                 for value in resolutions.values()
@@ -1100,10 +1232,19 @@ class MainWindow(QMainWindow):
                 )
             )
             bang_ke_refine_required = source_kind == "BANG_KE" and bool(conflicts)
-            if operation == "posting" and (
-                selector_refine_required or bang_ke_refine_required
+            review_prepare_required = bool(remaining)
+            if operation == "posting" and not remaining:
+                setattr(self, "_excel_reanalysis_from_source_change", False)
+            if review_prepare_required or (
+                operation == "posting"
+                and (selector_refine_required or bang_ke_refine_required)
             ):
-                self._excel_tasks.refine_plan(
+                prepare = getattr(self._excel_tasks, "prepare_plan", None)
+                if not callable(prepare):
+                    prepare = getattr(self._excel_tasks, "refine_plan", None)
+                if not callable(prepare):
+                    prepare = self._excel_tasks.apply_plan
+                prepare(
                     plan,
                     resolutions,
                     operation=operation,
@@ -1129,20 +1270,44 @@ class MainWindow(QMainWindow):
         )
         conflicts = list(_attribute(plan, "conflicts", default=()) or ())
         if conflicts:
-            conflict_dialog = ConflictResolutionDialog(
-                conflicts,
-                self,
-                initial_resolutions=resolutions,
-                restore_info=getattr(self, "_excel_restore_info", {}),
-            )
+            if getattr(self, "_excel_review_dialog", None) is None:
+                conflict_dialog = ConflictResolutionDialog(
+                    conflicts,
+                    self,
+                    initial_resolutions=resolutions,
+                    restore_info=getattr(self, "_excel_restore_info", {}),
+                )
+                setattr(self, "_excel_review_dialog", conflict_dialog)
+                setattr(self, "_excel_review_plan", plan)
+                setattr(self, "_excel_review_operation", "payment_sync")
+            else:
+                conflict_dialog = getattr(self, "_excel_review_dialog")
+                conflict_dialog.set_review(
+                    conflicts,
+                    initial_resolutions={
+                        **getattr(self, "_excel_review_resolutions", {}),
+                        **resolutions,
+                    },
+                )
             if conflict_dialog.exec() != QDialog.DialogCode.Accepted:
                 self._excel_tasks.cancel_waiting()
+                MainWindow._clear_excel_review(self)
                 return
             resolutions.update(conflict_dialog.resolution_map())
+            review_resolutions = getattr(
+                self, "_excel_review_resolutions", {}
+            )
+            review_resolutions.update(resolutions)
+            setattr(self, "_excel_review_resolutions", review_resolutions)
             MainWindow._save_excel_draft(
                 self, plan, resolutions, "payment_sync"
             )
-            self._excel_tasks.refine_plan(
+            prepare = getattr(self._excel_tasks, "prepare_plan", None)
+            if not callable(prepare):
+                prepare = getattr(self._excel_tasks, "refine_plan", None)
+            if not callable(prepare):
+                prepare = self._excel_tasks.apply_plan
+            prepare(
                 plan,
                 resolutions,
                 operation="payment_sync",
@@ -1156,6 +1321,14 @@ class MainWindow(QMainWindow):
                 self._excel_tasks.cancel_waiting()
                 return
             resolutions["selected_new_rows"] = new_dialog.selected_item_ids
+            if getattr(self, "_excel_review_plan", None) is not None:
+                review_resolutions = getattr(
+                    self, "_excel_review_resolutions", {}
+                )
+                review_resolutions["selected_new_rows"] = list(
+                    resolutions["selected_new_rows"]
+                )
+                setattr(self, "_excel_review_resolutions", review_resolutions)
             MainWindow._save_excel_draft(
                 self, plan, resolutions, "payment_sync"
             )
@@ -1210,30 +1383,33 @@ class MainWindow(QMainWindow):
             if target_sheet_created
             else "Sheet Thanh toán mới: Không\n"
         )
-        answer = QMessageBox.question(
-            self,
-            "Xác nhận đồng bộ BK → Thanh toán",
-            (
-                f"Sheet BK: {source_sheet}\n"
-                f"Sheet Thanh toán: {target_sheet}\n\n"
-                f"{creation_detail}"
-                f"{target_detail}\n\n"
-                f"Cập nhật: {updates} dòng\n"
-                f"Ô Số HĐ sẽ cập nhật: {invoice_changes}\n"
-                f"Không đổi: {unchanged} dòng\n"
-                f"Dòng mới được chọn: {selected_new_count}/{new_count}\n"
-                f"Bỏ qua dòng mới: {skipped_new}\n"
-                f"Xung đột: {conflict_count}\n"
-                f"Sheet BK cần chuẩn hóa: {normalize_sheets}\n\n"
-                "Tiếp tục ghi hai workbook?"
-            ),
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            self._excel_tasks.cancel_waiting()
-            return
+        if not bool(getattr(self, "_excel_review_confirmed", False)):
+            answer = QMessageBox.question(
+                self,
+                "Xác nhận đồng bộ BK → Thanh toán",
+                (
+                    f"Sheet BK: {source_sheet}\n"
+                    f"Sheet Thanh toán: {target_sheet}\n\n"
+                    f"{creation_detail}"
+                    f"{target_detail}\n\n"
+                    f"Cập nhật: {updates} dòng\n"
+                    f"Ô Số HĐ sẽ cập nhật: {invoice_changes}\n"
+                    f"Không đổi: {unchanged} dòng\n"
+                    f"Dòng mới được chọn: {selected_new_count}/{new_count}\n"
+                    f"Bỏ qua dòng mới: {skipped_new}\n"
+                    f"Xung đột: {conflict_count}\n"
+                    f"Sheet BK cần chuẩn hóa: {normalize_sheets}\n\n"
+                    "Tiếp tục ghi hai workbook?"
+                ),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self._excel_tasks.cancel_waiting()
+                return
+            if getattr(self, "_excel_review_plan", None) is not None:
+                setattr(self, "_excel_review_confirmed", True)
         self._excel_tasks.apply_plan(
             plan,
             resolutions,
@@ -1242,6 +1418,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _excel_completed(self, result: Any) -> None:
+        MainWindow._clear_excel_review(self)
         if self._excel_context == "configuration":
             valid = bool(_attribute(result, "is_valid", default=False))
             checks = list(_attribute(result, "checks", default=()) or ())
@@ -1383,7 +1560,156 @@ class MainWindow(QMainWindow):
         if self._excel_context == "configuration":
             self.settings_page.show_check_result(False, str(error))
             return
-        self._show_excel_error(error, operation=self._excel_operation)
+        retry_context = MainWindow._excel_retry_context_for(self, error)
+        # A source reload owns this flag only until its new analysis either
+        # reaches the review screen or fails.  Do not leak the highlight mode
+        # into a later, unrelated posting run.
+        self._excel_reanalysis_from_source_change = False
+        MainWindow._clear_excel_review(self)
+        self._show_excel_error(
+            error,
+            operation=self._excel_operation,
+            retry_context=retry_context,
+        )
+
+    def _excel_retry_context_for(
+        self, error: Any
+    ) -> _ExcelRetryContext | None:
+        if not isinstance(error, SourceDataChangedError):
+            return None
+        plan = getattr(self, "_excel_review_plan", None)
+        if plan is None:
+            return None
+        repost_done = bool(
+            _attribute(plan, "repost_selection_done", default=False)
+        )
+        repost_indices = (
+            tuple(
+                sorted(
+                    int(value)
+                    for value in (
+                        _attribute(
+                            plan, "repost_source_indices", default=()
+                        )
+                        or ()
+                    )
+                )
+            )
+            if repost_done
+            else None
+        )
+        raw_batch_id = _attribute(plan, "batch_id", default=None)
+        return _ExcelRetryContext(
+            operation="posting",
+            batch_id=int(raw_batch_id) if raw_batch_id is not None else None,
+            sheet_name=_attribute(
+                plan, "selected_sheet", "selected_sheet_name", default=None
+            ),
+            repost_source_indices=repost_indices,
+            highlight_unresolved=True,
+        )
+
+    @Slot(object)
+    def _excel_correction_required(self, outcome: Any) -> None:
+        if self._excel_tasks is None:
+            return
+        dialog = self._excel_review_dialog
+        if dialog is None or self._excel_review_plan is None:
+            # Defensive fallback for callers that use the controller without the
+            # normal initial review screen.
+            dialog = ConflictResolutionDialog(
+                _attribute(outcome, "conflicts", default=()) or (),
+                self,
+                initial_resolutions=_attribute(
+                    outcome, "resolutions", default={}
+                )
+                or {},
+                issues=_attribute(outcome, "issues", default=()) or (),
+            )
+            self._excel_review_dialog = dialog
+            self._excel_review_plan = _attribute(
+                self._excel_tasks, "_base_plan", default=None
+            )
+            self._excel_review_operation = self._excel_operation
+
+        conflicts = list(_attribute(outcome, "conflicts", default=()) or ())
+        issues = list(_attribute(outcome, "issues", default=()) or ())
+        returned_resolutions = dict(
+            _attribute(outcome, "resolutions", default={}) or {}
+        )
+        self._excel_review_resolutions.update(returned_resolutions)
+        dialog.set_review(
+            conflicts,
+            issues=issues,
+            initial_resolutions=self._excel_review_resolutions,
+        )
+
+        affected = {
+            str(conflict_id)
+            for issue in issues
+            for conflict_id in (
+                _attribute(issue, "conflict_ids", default=()) or ()
+            )
+        }
+        count = len(affected) or len(issues)
+        message = QMessageBox(self)
+        message.setIcon(QMessageBox.Icon.Warning)
+        message.setWindowTitle("Chưa thể ghi dữ liệu vào file")
+        message.setText(
+            f"Có {count} dòng chưa hợp lệ.\n\n"
+            "File gốc chưa bị thay đổi."
+        )
+        review_button = message.addButton(
+            f"Quay lại sửa {count} dòng lỗi",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        message.addButton("Hủy", QMessageBox.ButtonRole.RejectRole)
+        show = getattr(dialog, "show", None)
+        if callable(show):
+            show()
+        raise_dialog = getattr(dialog, "raise_", None)
+        if callable(raise_dialog):
+            raise_dialog()
+        message.exec()
+        if message.clickedButton() is not review_button:
+            self._excel_tasks.cancel_waiting()
+            self._clear_excel_review()
+            return
+
+        hide = getattr(dialog, "hide", None)
+        if callable(hide):
+            hide()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._excel_tasks.cancel_waiting()
+            self._clear_excel_review()
+            return
+        self._excel_review_resolutions.update(dialog.resolution_map())
+        operation = self._excel_review_operation or self._excel_operation
+        prepare = getattr(self._excel_tasks, "prepare_plan", None)
+        if not callable(prepare):
+            prepare = getattr(self._excel_tasks, "refine_plan", None)
+        if not callable(prepare):
+            prepare = self._excel_tasks.apply_plan
+        prepare(
+            self._excel_review_plan,
+            self._excel_review_resolutions,
+            operation=operation,
+        )
+
+    def _clear_excel_review(self) -> None:
+        dialog = getattr(self, "_excel_review_dialog", None)
+        setattr(self, "_excel_review_dialog", None)
+        setattr(self, "_excel_review_plan", None)
+        setattr(self, "_excel_review_resolutions", {})
+        setattr(self, "_excel_review_operation", None)
+        setattr(self, "_excel_review_confirmed", False)
+        if dialog is not None:
+            close = getattr(dialog, "close", None)
+            if callable(close):
+                close()
+            delete_later = getattr(dialog, "deleteLater", None)
+            if callable(delete_later):
+                delete_later()
 
     @Slot(str)
     def _excel_finished(self, operation: str) -> None:
@@ -1396,11 +1722,25 @@ class MainWindow(QMainWindow):
         self._excel_context = None
 
     def _show_excel_error(
-        self, error: Any, *, operation: str | None = None
+        self,
+        error: Any,
+        *,
+        operation: str | None = None,
+        retry_context: _ExcelRetryContext | None = None,
     ) -> None:
         text = str(error)
         folded = text.casefold()
-        if "ready" in folded or "json" in folded and "không có" in folded:
+        if isinstance(error, SourceDataChangedError):
+            title = "Dữ liệu JSON đã thay đổi"
+            retry_label = "Đọc lại dữ liệu"
+        elif isinstance(error, WorkbookChangedError):
+            label = str(getattr(error, "label", "Workbook") or "Workbook")
+            title = f"{label} đã thay đổi"
+            retry_label = "Đọc lại"
+        elif isinstance(error, WorkbookLockedError):
+            title = "File Excel đang được sử dụng"
+            retry_label = "Thử lại"
+        elif "ready" in folded or "json" in folded and "không có" in folded:
             title = "Không có JSON đã xác nhận"
             retry_label = None
         elif "khóa" in folded or "đang được mở" in folded:
@@ -1452,7 +1792,15 @@ class MainWindow(QMainWindow):
             if retry_operation == "sync":
                 QTimer.singleShot(0, self.start_daily_sync)
             elif retry_operation == "posting":
-                QTimer.singleShot(0, self.start_expense_posting)
+                if retry_context is not None:
+                    QTimer.singleShot(
+                        0,
+                        lambda context=retry_context: self._restart_expense_posting(
+                            context
+                        ),
+                    )
+                else:
+                    QTimer.singleShot(0, self.start_expense_posting)
             elif retry_operation == "payment_sync":
                 QTimer.singleShot(0, self.start_payment_sync)
         elif (
@@ -1463,6 +1811,26 @@ class MainWindow(QMainWindow):
             self.navigation.setCurrentRow(0)
             if self._active_batch is not None:
                 self.open_review(self._active_batch)
+
+    def _restart_expense_posting(self, context: _ExcelRetryContext) -> None:
+        if self._excel_tasks is None:
+            return
+        self._excel_context = "workflow"
+        self._excel_reanalysis_from_source_change = bool(
+            context.highlight_unresolved
+        )
+        kwargs: dict[str, Any] = {}
+        if context.batch_id is not None:
+            kwargs["batch_id"] = context.batch_id
+        if context.sheet_name:
+            kwargs["sheet_name"] = context.sheet_name
+        if context.repost_source_indices is not None:
+            kwargs["repost_source_indices"] = context.repost_source_indices
+        try:
+            self._excel_tasks.start_posting(**kwargs)
+        except Exception as exc:
+            self._excel_reanalysis_from_source_change = False
+            self._show_excel_error(exc, operation="posting")
 
     def _load_excel_history(self) -> None:
         repository = self._excel_run_repository

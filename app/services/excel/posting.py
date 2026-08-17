@@ -57,6 +57,11 @@ from .models import (
     resolution_map,
 )
 from .resolvers import MonthSheetService, YearResolver
+from .review import (
+    CorrectionRequiredError,
+    SourceDataChangedError,
+    validate_conflict_resolutions,
+)
 from .workbook import (
     ExcelBackupService,
     ExcelLockService,
@@ -390,6 +395,19 @@ class ExpensePostingService:
         progress_callback: ProgressCallback = None,
     ) -> PostingResult:
         resolved = resolution_map(resolutions)
+        target_value_conflicts = [
+            conflict
+            for conflict in plan.conflicts
+            if conflict.conflict_type
+            in {
+                ConflictType.TARGET_CELL_OCCUPIED,
+                ConflictType.TARGET_CELL_FORMULA,
+                ConflictType.TARGET_CELL_TEXT,
+            }
+        ]
+        issues = validate_conflict_resolutions(target_value_conflicts, resolved)
+        if issues:
+            raise CorrectionRequiredError(issues)
         if self._has_selector_resolution(plan, resolved):
             # SELECT_SHEET/SELECT_ROW/SELECT_FEE changes the target cell itself. Calling
             # apply directly would bypass the mandatory second analysis of
@@ -726,10 +744,7 @@ class ExpensePostingService:
         self.gateway.assert_unchanged(
             plan.target_path, plan.target_fingerprint, label="File BK"
         )
-        if hashlib.sha256(plan.batch_path.read_bytes()).hexdigest() != plan.batch_hash:
-            raise ExpensePostingError(
-                "JSON đã xác nhận đã thay đổi sau khi phân tích."
-            )
+        self._assert_source_members_unchanged(plan)
 
         items = copy.deepcopy(plan.items)
         for conflict in plan.conflicts:
@@ -1569,15 +1584,17 @@ class ExpensePostingService:
         members = plan.source_members
         if not members:
             if hashlib.sha256(plan.batch_path.read_bytes()).hexdigest() != plan.batch_hash:
-                raise ExpensePostingError(
-                    "JSON đã xác nhận đã thay đổi sau khi phân tích."
+                raise SourceDataChangedError(
+                    "JSON đã xác nhận",
+                    "JSON đã xác nhận đã thay đổi sau khi phân tích.",
                 )
             return
         for member in members:
             path = Path(member["path"])
             if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != member["sha256"]:
-                raise ExpensePostingError(
-                    "Một JSON nguồn của gói nhập BK đã thay đổi sau khi phân tích."
+                raise SourceDataChangedError(
+                    "JSON nguồn của gói nhập BK",
+                    "Một JSON nguồn của gói nhập BK đã thay đổi sau khi phân tích.",
                 )
 
     def cancel(self, plan: PostingPlan) -> None:
@@ -1763,7 +1780,7 @@ class ExpensePostingService:
                             item,
                             ConflictType.PARTIAL_KEY_MATCH,
                             "Container chỉ có một dòng nhưng tàu/chuyến trống hoặc khác; hãy xác nhận dòng BK.",
-                            (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP, ResolutionAction.CANCEL_ALL),
+                            (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
                             row_candidates=candidates,
                             details={"source_vessel_voyage": source_key},
                         )
@@ -1779,7 +1796,7 @@ class ExpensePostingService:
                             item,
                             ConflictType.MULTIPLE_CONTAINER_MATCH,
                             f"Container {item.container} có nhiều dòng trong BK; hãy chọn đúng tàu/chuyến.",
-                            (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP, ResolutionAction.CANCEL_ALL),
+                            (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
                             row_candidates=choices,
                             details={"source_vessel_voyage": source_key},
                         )
@@ -1794,7 +1811,7 @@ class ExpensePostingService:
                         item,
                         ConflictType.CONTAINER_NOT_FOUND,
                         f"Không tìm thấy container {item.container or 'trống'} trên toàn bộ BK.",
-                        (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP, ResolutionAction.CANCEL_ALL),
+                        (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
                         row_candidates=all_candidates,
                     )
                 )
@@ -2829,9 +2846,7 @@ class ExpensePostingService:
                 (
                     ResolutionAction.KEEP_EXISTING,
                     ResolutionAction.OVERWRITE,
-                    ResolutionAction.SKIP,
                 ),
-                default=ResolutionAction.KEEP_EXISTING,
             )
         if item.cell_state.kind is TargetCellKind.FORMULA:
             return self._item_conflict(
@@ -2843,9 +2858,7 @@ class ExpensePostingService:
                 (
                     ResolutionAction.KEEP_FORMULA,
                     ResolutionAction.OVERWRITE,
-                    ResolutionAction.SKIP,
                 ),
-                default=ResolutionAction.KEEP_FORMULA,
             )
         if item.cell_state.kind is TargetCellKind.TEXT:
             return self._item_conflict(
@@ -2857,9 +2870,7 @@ class ExpensePostingService:
                 (
                     ResolutionAction.KEEP_EXISTING,
                     ResolutionAction.OVERWRITE,
-                    ResolutionAction.SKIP,
                 ),
-                default=ResolutionAction.KEEP_EXISTING,
             )
         return None
 

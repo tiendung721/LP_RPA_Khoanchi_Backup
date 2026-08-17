@@ -72,6 +72,25 @@ def test_edit_updates_validation_and_dirty_state(qtbot) -> None:
     assert model.first_error_row() == 0
 
 
+def test_remove_rows_handles_non_contiguous_source_positions_once(qtbot) -> None:
+    model = ReviewTableModel(_rows())
+    rows_changed_count = 0
+
+    def count_change() -> None:
+        nonlocal rows_changed_count
+        rows_changed_count += 1
+
+    model.rowsChanged.connect(count_change)
+
+    removed = model.remove_rows([2, 0, 2])
+
+    assert [row.cont for row in removed] == ["DRYU3026167", "ABCD1234567"]
+    assert model.rowCount() == 1
+    assert model.row_at(0).bl == "BL123456789"
+    assert model.dirty
+    assert rows_changed_count == 1
+
+
 def test_duplicate_rows_are_only_a_warning(qtbot) -> None:
     row = ["DRYU3026167", None, "VTN", "CV", None, None, 13_554_000]
     model = ReviewTableModel([row, row])
