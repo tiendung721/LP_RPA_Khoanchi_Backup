@@ -376,6 +376,8 @@ class SeaFreightReconciliationDialog(QDialog):
                     cell.setData(Qt.ItemDataRole.UserRole + 2, item.source_batch_id)
                     cell.setData(Qt.ItemDataRole.UserRole + 3, item.source_item_index)
                     cell.setData(Qt.ItemDataRole.UserRole + 4, item.source_sha256)
+                    cell.setData(Qt.ItemDataRole.UserRole + 5, item.source_document_id)
+                    cell.setData(Qt.ItemDataRole.UserRole + 6, item.source_document_name)
                 if column == 6:
                     cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if item.source_kind == "SUPPLEMENT":
@@ -492,6 +494,8 @@ class SeaFreightReconciliationDialog(QDialog):
             cell = QTableWidgetItem("Nhập tay" if column == 6 else "")
             if column == 0:
                 cell.setData(Qt.ItemDataRole.UserRole + 1, "MANUAL")
+                cell.setData(Qt.ItemDataRole.UserRole + 5, "MANUAL")
+                cell.setData(Qt.ItemDataRole.UserRole + 6, "Dòng thêm thủ công")
             if column == 6:
                 cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.invoice_table.setItem(row, column, cell)
@@ -519,6 +523,8 @@ class SeaFreightReconciliationDialog(QDialog):
                     "source_batch_id": first.data(Qt.ItemDataRole.UserRole + 2),
                     "source_item_index": first.data(Qt.ItemDataRole.UserRole + 3) or 0,
                     "source_sha256": first.data(Qt.ItemDataRole.UserRole + 4),
+                    "source_document_id": first.data(Qt.ItemDataRole.UserRole + 5) or "MANUAL",
+                    "source_document_name": first.data(Qt.ItemDataRole.UserRole + 6) or "Dòng thêm thủ công",
                     "invoice_no": first.text().strip(),
                     "invoice_date": self.invoice_table.item(row, 1).text().strip(),
                     "bl": self.invoice_table.item(row, 2).text().strip(),

@@ -287,17 +287,20 @@ class SeaFreightRepository:
                 """
                 INSERT INTO sea_freight_invoice_contributions(
                     group_id, source_batch_id, source_item_index, source_sha256,
+                    source_document_id, source_document_name,
                     invoice_no, invoice_date, bl, vessel_voyage_raw,
                     vessel_name, voyage_no, invoice_container_count,
                     container_count_basis, carrier, amount, fingerprint,
                     source_kind, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
                 """,
                 (
                     group_id,
                     payload.get("source_batch_id"),
                     payload["source_item_index"],
                     payload["source_sha256"],
+                    payload["source_document_id"],
+                    payload["source_document_name"],
                     payload.get("invoice_no"),
                     payload.get("invoice_date"),
                     payload.get("bl"),
@@ -341,6 +344,98 @@ class SeaFreightRepository:
         contribution = self.get_contribution(contribution_id)
         assert contribution is not None
         return contribution
+
+    def add_contributions(
+        self, group_id: int, payloads: list[dict[str, Any]]
+    ) -> list[InvoiceContribution]:
+        """Thêm nhiều hóa đơn nguyên tử; một dòng lỗi thì không dòng nào được lưu."""
+
+        if not payloads:
+            return []
+        timestamp = _now()
+        fingerprints = [str(payload["fingerprint"]) for payload in payloads]
+        if len(fingerprints) != len(set(fingerprints)):
+            raise DuplicateContributionError("Danh sách có hóa đơn bị trùng.")
+        contribution_ids: list[int] = []
+        with self.database.transaction(immediate=True) as connection:
+            placeholders = ",".join("?" for _ in fingerprints)
+            duplicate = connection.execute(
+                f"SELECT id FROM sea_freight_invoice_contributions "
+                f"WHERE fingerprint IN ({placeholders}) AND status != 'REMOVED' LIMIT 1",
+                tuple(fingerprints),
+            ).fetchone()
+            if duplicate is not None:
+                raise DuplicateContributionError(
+                    "Có hóa đơn đã được thêm vào đối soát."
+                )
+            for payload in payloads:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO sea_freight_invoice_contributions(
+                        group_id, source_batch_id, source_item_index, source_sha256,
+                        source_document_id, source_document_name,
+                        invoice_no, invoice_date, bl, vessel_voyage_raw,
+                        vessel_name, voyage_no, invoice_container_count,
+                        container_count_basis, carrier, amount, fingerprint,
+                        source_kind, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+                    """,
+                    (
+                        group_id,
+                        payload.get("source_batch_id"),
+                        payload["source_item_index"],
+                        payload["source_sha256"],
+                        payload["source_document_id"],
+                        payload["source_document_name"],
+                        payload.get("invoice_no"),
+                        payload.get("invoice_date"),
+                        payload.get("bl"),
+                        payload["vessel_voyage_raw"],
+                        payload["vessel_name"],
+                        payload["voyage_no"],
+                        payload["invoice_container_count"],
+                        payload["container_count_basis"],
+                        payload.get("carrier"),
+                        payload["amount"],
+                        payload["fingerprint"],
+                        payload.get("source_kind", "INITIAL"),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                contribution_ids.append(int(cursor.lastrowid))
+                if payload.get("source_batch_id") is not None:
+                    connection.execute(
+                        """
+                        UPDATE sea_freight_reconciliation_groups
+                        SET primary_source_batch_id = COALESCE(primary_source_batch_id, ?),
+                            primary_source_item_index = COALESCE(primary_source_item_index, ?)
+                        WHERE id = ?
+                        """,
+                        (
+                            int(payload["source_batch_id"]),
+                            int(payload["source_item_index"]),
+                            group_id,
+                        ),
+                    )
+            connection.execute(
+                "UPDATE sea_freight_reconciliation_groups "
+                "SET invoice_conflict_accepted = 0 WHERE id = ?",
+                (group_id,),
+            )
+            self._recalculate(connection, group_id, timestamp)
+            self._event(
+                connection,
+                group_id,
+                "CONTRIBUTIONS_ADDED",
+                {
+                    "contribution_ids": contribution_ids,
+                    "invoice_nos": [payload.get("invoice_no") for payload in payloads],
+                },
+                timestamp,
+            )
+        result = [self.get_contribution(item_id) for item_id in contribution_ids]
+        return [item for item in result if item is not None]
 
     def save_contributions(
         self,
@@ -432,14 +527,18 @@ class SeaFreightRepository:
                         UPDATE sea_freight_invoice_contributions
                         SET invoice_no = ?, invoice_date = ?, bl = ?,
                             invoice_container_count = ?, container_count_basis = ?,
-                            carrier = ?, amount = ?, updated_at = ?
+                            carrier = ?, amount = ?, source_document_id = ?,
+                            source_document_name = ?, updated_at = ?
                         WHERE id = ? AND group_id = ? AND status = 'ACTIVE'
                         """,
                         (
                             payload.get("invoice_no"), payload.get("invoice_date"),
                             payload.get("bl"), payload["invoice_container_count"],
                             payload.get("container_count_basis", "EXPLICIT"),
-                            payload.get("carrier"), payload["amount"], timestamp,
+                            payload.get("carrier"), payload["amount"],
+                            payload.get("source_document_id", "MANUAL"),
+                            payload.get("source_document_name", "Dòng thêm thủ công"),
+                            timestamp,
                             contribution_id, group_id,
                         ),
                     )
@@ -448,16 +547,19 @@ class SeaFreightRepository:
                     """
                     INSERT INTO sea_freight_invoice_contributions(
                         group_id, source_batch_id, source_item_index, source_sha256,
+                        source_document_id, source_document_name,
                         invoice_no, invoice_date, bl, vessel_voyage_raw,
                         vessel_name, voyage_no, invoice_container_count,
                         container_count_basis, carrier, amount, fingerprint,
                         source_kind, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
                     """,
                     (
                         group_id, payload.get("source_batch_id"),
                         int(payload.get("source_item_index", 0)),
                         str(payload.get("source_sha256") or f"MANUAL:{group_id}:{timestamp}"),
+                        str(payload.get("source_document_id") or "MANUAL"),
+                        str(payload.get("source_document_name") or "Dòng thêm thủ công"),
                         payload.get("invoice_no"), payload.get("invoice_date"),
                         payload.get("bl"), payload["vessel_voyage_raw"],
                         payload["vessel_name"], payload["voyage_no"],

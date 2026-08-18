@@ -7,11 +7,24 @@ sửa dữ liệu. Các kiểu trường và quy tắc nghiệp vụ được b�
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from app.constants import LEGACY_SCHEMA_VERSION, SCHEMA_VERSION
+from app.constants import LEGACY_SCHEMA_VERSION, OBJECT_SCHEMA_VERSION, SCHEMA_VERSION
 from app.models import BatchDocument, DataRow
+
+
+def _legacy_source_id(raw: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        raw,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return f"LEGACY_BATCH_{hashlib.sha256(payload).hexdigest()[:16]}"
 
 
 class SchemaError(ValueError):
@@ -58,10 +71,11 @@ def parse_document(raw: object) -> BatchDocument:
     version = raw["v"]
     if type(version) is not int or version not in {
         LEGACY_SCHEMA_VERSION,
+        OBJECT_SCHEMA_VERSION,
         SCHEMA_VERSION,
     }:
         raise SchemaError(
-            "Khóa v phải là số nguyên 1 hoặc 2.",
+            "Khóa v phải là số nguyên 1, 2 hoặc 3.",
             code="invalid_version",
             field="v",
         )
@@ -75,7 +89,23 @@ def parse_document(raw: object) -> BatchDocument:
         )
 
     rows: list[DataRow] = []
-    v2_keys = set(DataRow(None, None, "CXD", None, None).to_object())
+    legacy_source_id = _legacy_source_id(raw)
+    v2_keys = {
+        "container",
+        "bl",
+        "vessel_voyage_raw",
+        "vessel_name",
+        "voyage_no",
+        "invoice_container_count",
+        "container_count_basis",
+        "fee",
+        "rule",
+        "invoice_no",
+        "invoice_date",
+        "carrier",
+        "amount",
+    }
+    v3_keys = set(DataRow(None, None, "CXD", None, None).to_object())
     for index, item in enumerate(data):
         if version == LEGACY_SCHEMA_VERSION:
             if not isinstance(item, list):
@@ -90,42 +120,69 @@ def parse_document(raw: object) -> BatchDocument:
                     code="row_length",
                     row_index=index,
                 )
-            rows.append(DataRow.from_sequence(item))
+            rows.append(
+                DataRow.from_sequence(item).copy_with(
+                    source_document_id=legacy_source_id,
+                    source_document_name="Dữ liệu bóc tách cũ",
+                )
+            )
             continue
         if not isinstance(item, Mapping):
             raise SchemaError(
-                f"Dòng {index + 1} của schema v2 phải là object.",
+                f"Dòng {index + 1} của schema v{version} phải là object.",
                 code="row_not_object",
                 row_index=index,
             )
         keys = set(item)
-        if keys != v2_keys:
-            missing = sorted(v2_keys - keys)
-            extra = sorted(str(key) for key in keys - v2_keys)
+        expected_row_keys = v2_keys if version == OBJECT_SCHEMA_VERSION else v3_keys
+        if keys != expected_row_keys:
+            missing = sorted(expected_row_keys - keys)
+            extra = sorted(str(key) for key in keys - expected_row_keys)
             details = []
             if missing:
                 details.append("thiếu " + ", ".join(missing))
             if extra:
                 details.append("thừa " + ", ".join(extra))
             raise SchemaError(
-                f"Dòng {index + 1} của schema v2 không đúng trường"
+                f"Dòng {index + 1} của schema v{version} không đúng trường"
                 + (f" ({'; '.join(details)})" if details else "."),
                 code="row_keys",
                 row_index=index,
             )
-        rows.append(DataRow.from_mapping(item))
+        row = DataRow.from_mapping(item)
+        if version == OBJECT_SCHEMA_VERSION:
+            row = row.copy_with(
+                source_document_id=legacy_source_id,
+                source_document_name="Dữ liệu bóc tách cũ",
+            )
+        elif not isinstance(row.source_document_id, str) or not row.source_document_id.strip():
+            raise SchemaError(
+                f"Dòng {index + 1} có source_document_id rỗng.",
+                code="empty_source_document_id",
+                row_index=index,
+                field="source_document_id",
+            )
+        elif not isinstance(row.source_document_name, str) or not row.source_document_name.strip():
+            raise SchemaError(
+                f"Dòng {index + 1} có source_document_name rỗng.",
+                code="empty_source_document_name",
+                row_index=index,
+                field="source_document_name",
+            )
+        rows.append(row)
     return BatchDocument(v=SCHEMA_VERSION, rows=rows)
 
 
 def document_to_dict(document: BatchDocument) -> dict[str, Any]:
-    """Luôn serialize thành schema v2 dạng object."""
+    """Luôn serialize thành schema v3 dạng object."""
 
     if type(document.v) is not int or document.v not in {
         LEGACY_SCHEMA_VERSION,
+        OBJECT_SCHEMA_VERSION,
         SCHEMA_VERSION,
     }:
         raise SchemaError(
-            "Phiên bản tài liệu phải là số nguyên 1 hoặc 2.",
+            "Phiên bản tài liệu phải là số nguyên 1, 2 hoặc 3.",
             code="invalid_version",
             field="v",
         )

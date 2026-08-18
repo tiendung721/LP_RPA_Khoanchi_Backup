@@ -32,6 +32,44 @@ def test_sort_filter_does_not_change_source_order(qtbot) -> None:
     assert model.rows_as_arrays() == original
 
 
+def test_document_filter_combines_with_search_and_keeps_duplicate_names_separate(
+    qtbot,
+) -> None:
+    model = ReviewTableModel(
+        [
+            ReviewRow(
+                cont="DRYU3026167",
+                bl="BL-A",
+                fee="VTN",
+                rule="ST",
+                amount=100,
+                source_document_id="DOC_001",
+                source_document_name="Hoa_don.pdf",
+            ),
+            ReviewRow(
+                cont="MSCU1234567",
+                bl="BL-B",
+                fee="HH",
+                rule="ST",
+                amount=200,
+                source_document_id="DOC_002",
+                source_document_name="Hoa_don.pdf",
+            ),
+        ]
+    )
+    proxy = ReviewFilterProxyModel()
+    proxy.setSourceModel(model)
+
+    proxy.set_document_filter("DOC_002")
+    assert proxy.rowCount() == 1
+    assert proxy.data(proxy.index(0, ReviewTableModel.COLUMN_CONT)) == "MSCU1234567"
+
+    proxy.set_search_text("BL-A")
+    assert proxy.rowCount() == 0
+    proxy.set_search_text("BL-B")
+    assert proxy.rowCount() == 1
+
+
 def test_v1_fields_are_serialized_and_searchable(qtbot) -> None:
     model = ReviewTableModel(
         [
@@ -50,7 +88,7 @@ def test_v1_fields_are_serialized_and_searchable(qtbot) -> None:
     proxy.setSourceModel(model)
 
     serialized = model.to_document()
-    assert serialized["v"] == 2
+    assert serialized["v"] == 3
     assert serialized["d"][0]["container"] == "DRYU3026167"
     assert serialized["d"][0]["invoice_no"] == "HD-000130"
     assert serialized["d"][0]["container_count_basis"] == "UNKNOWN"

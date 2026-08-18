@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from app.config import AppPaths, AppSettings
-from app.constants import DEFAULT_MAX_FILE_SIZE_BYTES
+from app.constants import DEFAULT_MAX_FILE_SIZE_BYTES, SCHEMA_VERSION
 from app.database import Database
 from app.models import (
     BatchDocument,
@@ -312,6 +312,7 @@ class BatchService:
                 message="File JSON không đọc được hoặc sai cấu trúc gốc.",
             )
 
+        document = self._assign_legacy_source(document, batch.id)
         document = self._prepare_received_gpt_document(output_path, document)
 
         validation = self._validate_document(document, source_kind=source_kind)
@@ -359,6 +360,7 @@ class BatchService:
                 "Bản làm việc không còn là JSON có cấu trúc hợp lệ."
             ) from exc
         if metadata.last_saved_at is None:
+            document = self._assign_legacy_source(document, metadata.id)
             document = self._prepare_received_gpt_document(
                 metadata.working_path, document
             )
@@ -386,6 +388,23 @@ class BatchService:
         return BatchReview(metadata, document, validation)
 
     open_batch = load_batch
+
+    @staticmethod
+    def _assign_legacy_source(document: BatchDocument, batch_id: int) -> BatchDocument:
+        """Gắn định danh ổn định theo batch cho dữ liệu v1/v2 khi đọc vào."""
+
+        legacy_id = f"LEGACY_BATCH_{batch_id}"
+        rows = [
+            row.copy_with(source_document_id=legacy_id)
+            if row.source_document_name == "Dữ liệu bóc tách cũ"
+            and (
+                row.source_document_id == "LEGACY_DOCUMENT"
+                or row.source_document_id.startswith("LEGACY_BATCH_")
+            )
+            else row
+            for row in document.rows
+        ]
+        return BatchDocument(v=SCHEMA_VERSION, rows=rows)
 
     def save_working(
         self,
@@ -484,7 +503,7 @@ class BatchService:
     ) -> BatchReview:
         """Tạo một batch READY bất biến từ kết quả phân bổ cước biển."""
 
-        document = BatchDocument(v=2, rows=list(rows))
+        document = BatchDocument(v=SCHEMA_VERSION, rows=list(rows))
         validation = self.validation_service.validate_document(document)
         if validation.has_errors:
             raise BatchValidationError(

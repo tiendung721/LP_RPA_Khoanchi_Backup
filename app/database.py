@@ -126,7 +126,11 @@ class Database:
                 self._migration_15(connection)
                 connection.execute("PRAGMA user_version = 15")
                 current_version = 15
-            self._ensure_schema_15(connection)
+            if current_version < 16:
+                self._migration_16(connection)
+                connection.execute("PRAGMA user_version = 16")
+                current_version = 16
+            self._ensure_schema_16(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -949,6 +953,63 @@ class Database:
             )
             """
         )
+
+    @staticmethod
+    def _migration_16(connection: sqlite3.Connection) -> None:
+        """Lưu nguồn chứng từ gốc cho từng hóa đơn đối soát cước biển."""
+
+        Database._ensure_schema_15(connection)
+        Database._ensure_schema_16(connection)
+        batch_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(batches)").fetchall()
+        }
+        source_name_expression = (
+            "COALESCE(NULLIF((SELECT b.source_filename FROM batches AS b "
+            "WHERE b.id = sea_freight_invoice_contributions.source_batch_id), ''), "
+            "'Dữ liệu bóc tách cũ')"
+            if "source_filename" in batch_columns
+            else "'Dữ liệu bóc tách cũ'"
+        )
+        connection.execute(
+            f"""
+            UPDATE sea_freight_invoice_contributions
+            SET source_document_id = CASE
+                    WHEN source_document_id != 'LEGACY_DOCUMENT'
+                        THEN source_document_id
+                    WHEN source_batch_id IS NOT NULL
+                        THEN 'LEGACY_BATCH_' || CAST(source_batch_id AS TEXT)
+                    ELSE 'LEGACY_DOCUMENT'
+                END,
+                source_document_name = CASE
+                    WHEN source_document_name != 'Dữ liệu bóc tách cũ'
+                        THEN source_document_name
+                    ELSE {source_name_expression}
+                END
+            WHERE source_document_id = 'LEGACY_DOCUMENT'
+               OR source_document_name = 'Dữ liệu bóc tách cũ'
+            """
+        )
+
+    @staticmethod
+    def _ensure_schema_16(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_15(connection)
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(sea_freight_invoice_contributions)"
+            ).fetchall()
+        }
+        if columns and "source_document_id" not in columns:
+            connection.execute(
+                "ALTER TABLE sea_freight_invoice_contributions "
+                "ADD COLUMN source_document_id TEXT NOT NULL DEFAULT 'LEGACY_DOCUMENT'"
+            )
+        if columns and "source_document_name" not in columns:
+            connection.execute(
+                "ALTER TABLE sea_freight_invoice_contributions "
+                "ADD COLUMN source_document_name TEXT NOT NULL DEFAULT 'Dữ liệu bóc tách cũ'"
+            )
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_excel_resolution_latest_operation

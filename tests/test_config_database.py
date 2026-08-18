@@ -150,7 +150,9 @@ def test_database_migration_and_active_batch_restore(tmp_path: Path) -> None:
         "revision_no", "supersedes_group_id", "is_current",
         "primary_source_batch_id", "primary_source_item_index",
     }.issubset(group_columns)
-    assert "source_kind" in contribution_columns
+    assert {
+        "source_kind", "source_document_id", "source_document_name"
+    }.issubset(contribution_columns)
     database.close()
 
 

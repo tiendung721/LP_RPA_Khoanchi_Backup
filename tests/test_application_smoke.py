@@ -290,7 +290,7 @@ def test_new_download_is_added_to_open_reconciliation_without_closing_dialog(
     )
     first_path = runtime.paths.output_dir / "ket_qua_boc_tach.json"
     first_path.write_text(
-        json.dumps({"v": 2, "d": [initial_row.to_object()]}, ensure_ascii=False),
+        json.dumps({"v": 3, "d": [initial_row.to_object()]}, ensure_ascii=False),
         encoding="utf-8",
     )
     try:
@@ -313,7 +313,7 @@ def test_new_download_is_added_to_open_reconciliation_without_closing_dialog(
         )
         unrelated_path = runtime.paths.output_dir / "ket_qua_boc_tach (1).json"
         unrelated_path.write_text(
-            json.dumps({"v": 2, "d": [unrelated.to_object()]}, ensure_ascii=False),
+            json.dumps({"v": 3, "d": [unrelated.to_object()]}, ensure_ascii=False),
             encoding="utf-8",
         )
         unrelated_result = runtime.batch_service.receive_file(unrelated_path)
@@ -326,7 +326,7 @@ def test_new_download_is_added_to_open_reconciliation_without_closing_dialog(
         )
         incoming = runtime.paths.output_dir / "ket_qua_boc_tach (2).json"
         incoming.write_text(
-            json.dumps({"v": 2, "d": [supplement.to_object()]}, ensure_ascii=False),
+            json.dumps({"v": 3, "d": [supplement.to_object()]}, ensure_ascii=False),
             encoding="utf-8",
         )
         received = runtime.batch_service.receive_file(incoming)

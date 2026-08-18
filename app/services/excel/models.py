@@ -257,6 +257,8 @@ class SyncPlan:
     selected_month: int | None = None
     selected_target_sheet: str | None = None
     run_id: int | None = None
+    source_target_sheets: dict[str, str | None] = field(default_factory=dict)
+    selected_target_sheets: set[str] = field(default_factory=set)
 
     @property
     def operation(self) -> ExcelOperation:
@@ -290,13 +292,23 @@ class SyncPlan:
     @property
     def requires_user_input(self) -> bool:
         return (
-            self.selected_sheet is None
+            (
+                any(target is None for target in self.source_target_sheets.values())
+                if self.source_target_sheets
+                else self.selected_sheet is None
+            )
             or self.has_changes
             or any(conflict.default_action is None for conflict in self.conflicts)
         )
 
     @property
     def actions(self) -> list[SyncAction]:
+        if self.selected_target_sheets:
+            return [
+                action
+                for sheet in self.selected_target_sheets
+                for action in self.actions_by_target.get(sheet, ())
+            ]
         sheet = self.selected_sheet
         return list(self.actions_by_target.get(sheet, ())) if sheet else []
 
@@ -348,6 +360,7 @@ class SyncResult:
     fingerprint_after: WorkbookFingerprint | None = None
     run_id: int | None = None
     message: str = ""
+    target_sheets: tuple[str, ...] = ()
 
     @property
     def operation(self) -> ExcelOperation:
@@ -436,6 +449,20 @@ class PostingItem:
 
 
 @dataclass(slots=True)
+class PostingSourceGroup:
+    group_id: str
+    source_document_id: str
+    source_document_name: str
+    invoice_no: str | None
+    source_item_indices: list[int]
+    invoice_dates: list[str]
+    suggested_sheet: str | None = None
+    target_sheet: str | None = None
+    reconciliation_group_id: int | None = None
+    target_locked: bool = False
+    can_split_by_invoice: bool = False
+
+@dataclass(slots=True)
 class PostingConflict:
     conflict_id: str
     conflict_type: ConflictType
@@ -512,6 +539,8 @@ class PostingPlan:
     confirmation_done: bool = False
     source_kind: str = "ASSISTANT"
     target_sheets: set[str] = field(default_factory=set)
+    source_groups: list[PostingSourceGroup] = field(default_factory=list)
+    split_document_ids: set[str] = field(default_factory=set)
 
     @property
     def operation(self) -> ExcelOperation:
@@ -522,7 +551,14 @@ class PostingPlan:
         return (
             (self.confirmation_required and not self.confirmation_done)
             or
-            (self.source_kind != "BANG_KE" and self.selected_sheet is None)
+            (
+                self.source_kind != "BANG_KE"
+                and (
+                    any(group.target_sheet is None for group in self.source_groups)
+                    if self.source_groups
+                    else self.selected_sheet is None
+                )
+            )
             or (
                 bool(self.previously_posted_items)
                 and not self.repost_selection_done
@@ -786,6 +822,106 @@ class PaymentSyncPlan:
 
 
 @dataclass(slots=True)
+class PaymentSyncBatchPlan:
+    source_path: Path
+    target_path: Path
+    source_fingerprint: WorkbookFingerprint
+    target_fingerprint: WorkbookFingerprint
+    month_plans: dict[str, PaymentSyncPlan]
+    normalization_required: bool = False
+    normalization_sheet_count: int = 0
+    source_vba_present: bool = False
+    target_vba_present: bool = False
+    run_id: int | None = None
+
+    @property
+    def operation(self) -> ExcelOperation:
+        return ExcelOperation.PAYMENT_SYNC
+
+    @property
+    def source_sheet(self) -> str:
+        return ", ".join(self.month_plans)
+
+    @property
+    def selected_sheet(self) -> str:
+        return ", ".join(
+            target.sheet_name
+            for plan in self.month_plans.values()
+            for target in plan.targets.values()
+        )
+
+    target_sheet = selected_sheet
+
+    @property
+    def items(self) -> list[PaymentSyncItem]:
+        return [item for plan in self.month_plans.values() for item in plan.items]
+
+    @property
+    def conflicts(self) -> list[PaymentSyncConflict]:
+        return [
+            conflict
+            for plan in self.month_plans.values()
+            for conflict in plan.conflicts
+        ]
+
+    @property
+    def new_rows(self) -> list[PaymentSyncItem]:
+        return [item for plan in self.month_plans.values() for item in plan.new_rows]
+
+    @property
+    def update_rows(self) -> list[PaymentSyncItem]:
+        return [item for plan in self.month_plans.values() for item in plan.update_rows]
+
+    @property
+    def unchanged_rows(self) -> list[PaymentSyncItem]:
+        return [item for plan in self.month_plans.values() for item in plan.unchanged_rows]
+
+    @property
+    def new_count(self) -> int:
+        return len(self.new_rows)
+
+    @property
+    def update_count(self) -> int:
+        return len(self.update_rows)
+
+    @property
+    def unchanged_count(self) -> int:
+        return len(self.unchanged_rows)
+
+    @property
+    def conflict_count(self) -> int:
+        return len(self.conflicts)
+
+    @property
+    def target_sheet_created(self) -> bool:
+        return any(plan.target_sheet_created for plan in self.month_plans.values())
+
+    @property
+    def invoice_change_count(self) -> int:
+        return sum(plan.invoice_change_count for plan in self.month_plans.values())
+
+    @property
+    def template_sheet(self) -> str | None:
+        names = [
+            target.template_sheet
+            for plan in self.month_plans.values()
+            for target in plan.targets.values()
+            if target.template_sheet
+        ]
+        return ", ".join(names) if names else None
+
+    @property
+    def has_changes(self) -> bool:
+        return self.normalization_required or any(
+            plan.has_changes for plan in self.month_plans.values()
+        )
+
+    @property
+    def requires_user_input(self) -> bool:
+        return any(plan.requires_user_input for plan in self.month_plans.values())
+
+
+@dataclass(slots=True)
 class PaymentTargetResult:
     target_type: str
     sheet_name: str
@@ -836,6 +972,7 @@ class PaymentSyncResult:
     carrier_summary: CarrierSummaryResult | None = None
     run_id: int | None = None
     message: str = ""
+    target_sheets: tuple[str, ...] = ()
 
     @property
     def operation(self) -> ExcelOperation:
@@ -910,7 +1047,7 @@ class PaymentSyncResult:
         )
 
 
-Plan = SyncPlan | PostingPlan | PaymentSyncPlan
+Plan = SyncPlan | PostingPlan | PaymentSyncPlan | PaymentSyncBatchPlan
 Result = SyncResult | PostingResult | PaymentSyncResult
 Resolution = SyncResolution | PostingResolution
 

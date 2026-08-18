@@ -112,6 +112,8 @@ class InvoiceContribution:
     updated_at: str
     removed_at: str | None
     source_kind: str = "INITIAL"
+    source_document_id: str = "LEGACY_DOCUMENT"
+    source_document_name: str = "Dữ liệu bóc tách cũ"
 
 
 @dataclass(frozen=True, slots=True)

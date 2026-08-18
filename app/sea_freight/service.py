@@ -226,6 +226,65 @@ class SeaFreightReconciliationService:
         assert result is not None
         return result
 
+    def open_or_create_many(
+        self,
+        rows: Iterable[tuple[int, DataRow]],
+        *,
+        bk_path: str | Path,
+        month: int,
+        year: int,
+        source_batch_id: int | None,
+        source_sha256: str,
+    ) -> ReconciliationGroup:
+        """Gom các HĐ cùng tàu/chuyến vào một hồ sơ bằng một lần ghi nguyên tử."""
+
+        selected = list(rows)
+        if not selected:
+            raise SeaFreightReconciliationError("Chưa chọn hóa đơn cước biển.")
+        first_index, first_row = selected[0]
+        snapshot, issue = self._snapshot_for_period(
+            first_row, bk_path=bk_path, month=month, year=year
+        )
+        self._require_snapshot_match(first_row, snapshot, issue=issue)
+        for _, row in selected:
+            self._require_candidate(row)
+            if (
+                normalize_match_key(row.vessel_name) != snapshot.vessel_key
+                or normalize_match_key(row.voyage_no) != snapshot.voyage_key
+            ):
+                raise SeaFreightReconciliationError(
+                    "Các hóa đơn được chọn không cùng tàu/chuyến."
+                )
+        group = self.repository.upsert_snapshot(
+            snapshot, month=month, year=year, bk_issue=issue
+        )
+        existing_invoices = {
+            self._invoice_key(item.invoice_no)
+            for item in self.repository.list_contributions(group.id)
+            if self._invoice_key(item.invoice_no)
+        }
+        payloads: list[dict[str, object]] = []
+        for source_item_index, row in selected:
+            invoice_key = self._invoice_key(row.invoice_no)
+            if invoice_key and invoice_key in existing_invoices:
+                continue
+            payloads.append(
+                self._row_payload(
+                    row,
+                    source_batch_id=source_batch_id,
+                    source_item_index=source_item_index,
+                    source_sha256=source_sha256,
+                    source_kind="INITIAL",
+                )
+            )
+            if invoice_key:
+                existing_invoices.add(invoice_key)
+        if payloads:
+            self.repository.add_contributions(group.id, payloads)
+        result = self.repository.get_group(group.id)
+        assert result is not None
+        return result
+
     def _add_row(
         self,
         group_id: int,
@@ -238,10 +297,30 @@ class SeaFreightReconciliationService:
     ) -> None:
         self.repository.add_contribution(
             group_id,
-            {
+            self._row_payload(
+                row,
+                source_batch_id=source_batch_id,
+                source_item_index=source_item_index,
+                source_sha256=source_sha256,
+                source_kind=source_kind,
+            ),
+        )
+
+    def _row_payload(
+        self,
+        row: DataRow,
+        *,
+        source_batch_id: int | None,
+        source_item_index: int,
+        source_sha256: str,
+        source_kind: str,
+    ) -> dict[str, object]:
+        return {
                 "source_batch_id": source_batch_id,
                 "source_item_index": source_item_index,
                 "source_sha256": source_sha256,
+                "source_document_id": row.source_document_id,
+                "source_document_name": row.source_document_name,
                 "invoice_no": row.invoice_no,
                 "invoice_date": row.invoice_date,
                 "bl": row.bl,
@@ -254,8 +333,7 @@ class SeaFreightReconciliationService:
                 "amount": row.amount,
                 "fingerprint": self.contribution_fingerprint(row, source_sha256=source_sha256),
                 "source_kind": source_kind,
-            },
-        )
+            }
 
     def refresh_group(self, group_id: int) -> ReconciliationGroup:
         group = self._require_group(group_id)
@@ -340,6 +418,10 @@ class SeaFreightReconciliationService:
                 invoice_container_count=count,
                 container_count_basis="EXPLICIT",
                 invoice_date=invoice_date,
+                source_document_id=str(item.get("source_document_id") or "MANUAL"),
+                source_document_name=str(
+                    item.get("source_document_name") or "Dòng thêm thủ công"
+                ),
             )
             normalized.append(
                 {
@@ -518,6 +600,11 @@ class SeaFreightReconciliationService:
         )
         amounts = allocate_integer_amount(group.total_amount, len(containers))
         first = contributions[0]
+        source_document_id = f"SEA_RECON_{group.id}_R{group.revision_no}"
+        source_document_name = (
+            f"Cước biển {group.vessel_voyage_raw}"
+            + (f" – HĐ {invoice_no}" if invoice_no else "")
+        )
         return [
             DataRow(
                 cont=str(container["container"]), bl=bl, fee="CB", rule="HD",
@@ -526,6 +613,8 @@ class SeaFreightReconciliationService:
                 vessel_name=first.vessel_name, voyage_no=first.voyage_no,
                 invoice_container_count=None, container_count_basis="UNKNOWN",
                 invoice_date=invoice_date,
+                source_document_id=source_document_id,
+                source_document_name=source_document_name,
             )
             for index, container in enumerate(containers)
         ]
@@ -612,6 +701,10 @@ class SeaFreightReconciliationService:
             invoice_container_count=getattr(item, "invoice_container_count"),
             container_count_basis=getattr(item, "container_count_basis"),
             invoice_date=getattr(item, "invoice_date"),
+            source_document_id=getattr(item, "source_document_id", "LEGACY_DOCUMENT"),
+            source_document_name=getattr(
+                item, "source_document_name", "Dữ liệu bóc tách cũ"
+            ),
         )
 
     @staticmethod

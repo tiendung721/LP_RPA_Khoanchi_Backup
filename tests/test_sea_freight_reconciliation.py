@@ -201,6 +201,40 @@ def test_accumulates_pending_then_ready_and_allocates_exact_total(tmp_path: Path
     database.close()
 
 
+def test_open_many_invoices_is_atomic_ready_and_preserves_document_sources(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "state.db")
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=10))
+    )
+    first = _row(4, 32_000_000, "INV-004")
+    first.source_document_id = "DOC_001"
+    first.source_document_name = "Hoa_don_A.pdf"
+    second = _row(6, 48_000_000, "INV-006")
+    second.source_document_id = "DOC_002"
+    second.source_document_name = "Hoa_don_B.pdf"
+
+    group = service.open_or_create_many(
+        [(0, first), (1, second)],
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=None,
+        source_sha256="batch-sha",
+    )
+
+    assert group.status is GroupStatus.READY
+    contributions = repository.list_contributions(group.id)
+    assert [(item.invoice_no, item.source_document_id) for item in contributions] == [
+        ("INV-004", "DOC_001"),
+        ("INV-006", "DOC_002"),
+    ]
+    assert sum(int(item.invoice_container_count) for item in contributions) == 10
+    database.close()
+
+
 def test_multiple_carriers_are_merged_and_snapshot_change_blocks_confirmation(tmp_path: Path) -> None:
     database = Database(tmp_path / "state.db")
     repository = SeaFreightRepository(database)

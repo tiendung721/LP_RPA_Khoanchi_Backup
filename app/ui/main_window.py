@@ -41,8 +41,10 @@ from .sea_freight_center import SeaFreightReconciliationDialog
 from .rpa_expense_dialog import RpaSqtSelectionDialog
 from .excel_dialogs import (
     ConflictResolutionDialog,
+    DailySyncAllocationDialog,
     MonthSelectionDialog,
     PaymentNewRowsDialog,
+    PostingAllocationDialog,
     RepostSelectionDialog,
 )
 
@@ -62,6 +64,8 @@ class _ExcelRetryContext:
     batch_id: int | None = None
     sheet_name: str | None = None
     repost_source_indices: tuple[int, ...] | None = None
+    group_target_sheets: tuple[tuple[str, str], ...] | None = None
+    split_document_ids: tuple[str, ...] | None = None
     highlight_unresolved: bool = False
 
 
@@ -154,6 +158,21 @@ def _posting_confirmation_text(plan: Any) -> str:
         }
     )
     lines: list[str] = []
+    source_groups = list(_attribute(plan, "source_groups", default=()) or ())
+    if source_groups:
+        lines.append("Phân bổ chứng từ:")
+        for group in source_groups:
+            document = str(
+                _attribute(group, "source_document_name", default="Chứng từ")
+            )
+            invoice = _attribute(group, "invoice_no", default=None)
+            target = _attribute(group, "target_sheet", default="—")
+            item_count = len(
+                list(_attribute(group, "source_item_indices", default=()) or ())
+            )
+            label = document + (f" — HĐ {invoice}" if invoice else "")
+            lines.append(f"- {label} → {target}: {item_count} khoản")
+        lines.append("")
     if sheets:
         lines.extend((f"Sheet BK: {', '.join(sheets)}", ""))
     if counts["changed_cells"]:
@@ -626,16 +645,17 @@ class MainWindow(QMainWindow):
                 title="Chọn sheet tháng cần đồng bộ",
                 preselect_first=False,
                 show_recommendations=False,
+                multi_select=True,
             )
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 self._excel_context = None
                 return
-            source_sheet_name = dialog.selected_sheet_name
-            if not source_sheet_name:
+            source_sheet_names = dialog.selected_sheet_names
+            if not source_sheet_names:
                 self._excel_context = None
                 return
             self._excel_tasks.start_sync(
-                source_sheet_name=source_sheet_name
+                source_sheet_names=source_sheet_names
             )
         except Exception as exc:
             self._show_excel_error(exc, operation="sync")
@@ -691,16 +711,17 @@ class MainWindow(QMainWindow):
                 title="Chọn sheet BK đồng bộ sang Thanh toán",
                 preselect_first=False,
                 show_recommendations=False,
+                multi_select=True,
             )
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 self._excel_context = None
                 return
-            source_sheet_name = dialog.selected_sheet_name
-            if not source_sheet_name:
+            source_sheet_names = dialog.selected_sheet_names
+            if not source_sheet_names:
                 self._excel_context = None
                 return
             self._excel_tasks.start_payment_sync(
-                source_sheet_name=source_sheet_name
+                source_sheet_names=source_sheet_names
             )
         except Exception as exc:
             self._show_excel_error(exc, operation="payment_sync")
@@ -896,7 +917,31 @@ class MainWindow(QMainWindow):
             month_candidates = list(
                 _attribute(plan, "month_candidates", default=()) or ()
             )
-            if operation == "sync" and selected_month is None and month_candidates:
+            source_target_sheets = dict(
+                _attribute(plan, "source_target_sheets", default={}) or {}
+            )
+            if (
+                operation == "sync"
+                and source_target_sheets
+                and any(target in (None, "") for target in source_target_sheets.values())
+            ):
+                dialog = DailySyncAllocationDialog(plan, self)
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    self._excel_tasks.cancel_waiting()
+                    return
+                self._excel_tasks.cancel_waiting()
+                self._excel_context = "workflow"
+                self._excel_tasks.start_sync(
+                    source_sheet_names=list(source_target_sheets),
+                    source_target_sheets=dialog.source_target_sheets,
+                )
+                return
+            if (
+                operation == "sync"
+                and not source_target_sheets
+                and selected_month is None
+                and month_candidates
+            ):
                 dialog = MonthSelectionDialog(
                     month_candidates,
                     self,
@@ -943,9 +988,102 @@ class MainWindow(QMainWindow):
                 )
                 or ()
             )
+            source_groups = list(
+                _attribute(plan, "source_groups", default=()) or ()
+            )
+            restored_splits = {
+                str(value)
+                for value in (
+                    resolutions.pop("split_document_ids", ()) or ()
+                )
+                if str(value).strip()
+            }
+            current_splits = {
+                str(value)
+                for value in (
+                    _attribute(plan, "split_document_ids", default=()) or ()
+                )
+            }
             if (
                 operation == "posting"
                 and source_kind != "BANG_KE"
+                and restored_splits.difference(current_splits)
+            ):
+                self._excel_tasks.cancel_waiting()
+                self._excel_context = "workflow"
+                self._excel_tasks.start_posting(
+                    batch_id=_attribute(plan, "batch_id", default=None),
+                    split_document_ids=sorted(current_splits | restored_splits),
+                )
+                return
+            restored_group_targets = resolutions.pop("group_target_sheets", {})
+            if source_groups and isinstance(restored_group_targets, Mapping):
+                for group in source_groups:
+                    group_id = str(_attribute(group, "group_id", default=""))
+                    restored_target = restored_group_targets.get(group_id)
+                    if (
+                        restored_target not in (None, "")
+                        and not bool(_attribute(group, "target_locked", default=False))
+                    ):
+                        setattr(group, "target_sheet", str(restored_target))
+            if (
+                operation == "posting"
+                and source_kind != "BANG_KE"
+                and source_groups
+                and any(
+                    _attribute(group, "target_sheet", default=None) in (None, "")
+                    for group in source_groups
+                )
+            ):
+                dialog = PostingAllocationDialog(plan, self)
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    self._excel_tasks.cancel_waiting()
+                    return
+                if dialog.split_document_ids:
+                    self._excel_tasks.cancel_waiting()
+                    self._excel_context = "workflow"
+                    self._excel_tasks.start_posting(
+                        batch_id=_attribute(plan, "batch_id", default=None),
+                        split_document_ids=sorted(
+                            current_splits | dialog.split_document_ids
+                        ),
+                    )
+                    return
+                self._excel_tasks.cancel_waiting()
+                self._excel_context = "workflow"
+                self._excel_tasks.start_posting(
+                    batch_id=_attribute(plan, "batch_id", default=None),
+                    group_target_sheets=dialog.group_target_sheets,
+                    split_document_ids=sorted(current_splits),
+                )
+                return
+            if (
+                operation == "posting"
+                and source_kind != "BANG_KE"
+                and source_groups
+                and restored_group_targets
+                and all(
+                    _attribute(group, "target_sheet", default=None) not in (None, "")
+                    for group in source_groups
+                )
+                and not list(_attribute(plan, "items", default=()) or ())
+            ):
+                self._excel_tasks.cancel_waiting()
+                self._excel_context = "workflow"
+                self._excel_tasks.start_posting(
+                    batch_id=_attribute(plan, "batch_id", default=None),
+                    group_target_sheets={
+                        str(_attribute(group, "group_id")): str(
+                            _attribute(group, "target_sheet")
+                        )
+                        for group in source_groups
+                    },
+                )
+                return
+            if (
+                operation == "posting"
+                and source_kind != "BANG_KE"
+                and not source_groups
                 and selected_sheet in (None, "")
                 and sheet_candidates
             ):
@@ -981,6 +1119,14 @@ class MainWindow(QMainWindow):
                 operation == "posting"
                 and (
                     selected_sheet not in (None, "")
+                    or (
+                        source_groups
+                        and all(
+                            _attribute(group, "target_sheet", default=None)
+                            not in (None, "")
+                            for group in source_groups
+                        )
+                    )
                     or source_kind == "BANG_KE"
                 )
                 and previously_posted
@@ -998,7 +1144,19 @@ class MainWindow(QMainWindow):
                     "repost_source_indices": repost_indices,
                 }
                 if source_kind != "BANG_KE":
-                    analyze_kwargs["sheet_name"] = str(selected_sheet)
+                    if source_groups:
+                        analyze_kwargs["group_target_sheets"] = {
+                            str(_attribute(group, "group_id")): str(
+                                _attribute(group, "target_sheet")
+                            )
+                            for group in source_groups
+                            if _attribute(group, "target_sheet") not in (None, "")
+                        }
+                        analyze_kwargs["split_document_ids"] = sorted(
+                            _attribute(plan, "split_document_ids", default=()) or ()
+                        )
+                    else:
+                        analyze_kwargs["sheet_name"] = str(selected_sheet)
                 self._excel_tasks.start_posting(
                     **analyze_kwargs,
                 )
@@ -1137,6 +1295,18 @@ class MainWindow(QMainWindow):
             if operation == "sync" and not bool(
                 getattr(self, "_excel_review_confirmed", False)
             ):
+                selected_sync_targets = {
+                    str(target)
+                    for target in source_target_sheets.values()
+                    if target not in (None, "")
+                }
+                selected_candidates = [
+                    item
+                    for item in month_candidates
+                    if str(
+                        _attribute(item, "target_sheet", "sheet_name", default="")
+                    ) in selected_sync_targets
+                ]
                 candidate = next(
                     (
                         item
@@ -1153,7 +1323,15 @@ class MainWindow(QMainWindow):
                     ),
                     None,
                 )
-                updates = int(
+                if selected_candidates:
+                    selected_sync_sheet = ", ".join(
+                        str(_attribute(item, "target_sheet", "sheet_name"))
+                        for item in selected_candidates
+                    )
+                updates = sum(
+                    int(_attribute(item, "update_count", default=0) or 0)
+                    for item in selected_candidates
+                ) if selected_candidates else int(
                     _attribute(
                         candidate,
                         "update_count",
@@ -1161,7 +1339,10 @@ class MainWindow(QMainWindow):
                     )
                     or 0
                 )
-                inserts = int(
+                inserts = sum(
+                    int(_attribute(item, "new_row_count", default=0) or 0)
+                    for item in selected_candidates
+                ) if selected_candidates else int(
                     _attribute(
                         candidate,
                         "new_row_count",
@@ -1169,7 +1350,10 @@ class MainWindow(QMainWindow):
                     )
                     or 0
                 )
-                unchanged = int(
+                unchanged = sum(
+                    int(_attribute(item, "unchanged_count", default=0) or 0)
+                    for item in selected_candidates
+                ) if selected_candidates else int(
                     _attribute(
                         candidate,
                         "unchanged_count",
@@ -1177,7 +1361,10 @@ class MainWindow(QMainWindow):
                     )
                     or 0
                 )
-                target_only = int(
+                target_only = sum(
+                    int(_attribute(item, "target_only_count", default=0) or 0)
+                    for item in selected_candidates
+                ) if selected_candidates else int(
                     _attribute(
                         candidate,
                         "target_only_count",
@@ -1185,7 +1372,10 @@ class MainWindow(QMainWindow):
                     )
                     or 0
                 )
-                invalid = int(
+                invalid = sum(
+                    int(_attribute(item, "invalid_count", default=0) or 0)
+                    for item in selected_candidates
+                ) if selected_candidates else int(
                     _attribute(
                         candidate,
                         "invalid_count",
@@ -1193,11 +1383,24 @@ class MainWindow(QMainWindow):
                     )
                     or 0
                 )
+                sync_detail = "\n".join(
+                    (
+                        f"- {_attribute(item, 'source_sheet', default='—')} → "
+                        f"{_attribute(item, 'target_sheet', 'sheet_name', default='—')}: "
+                        f"cập nhật {_attribute(item, 'update_count', default=0)}, "
+                        f"thêm {_attribute(item, 'new_row_count', default=0)}, "
+                        f"không đổi {_attribute(item, 'unchanged_count', default=0)}"
+                    )
+                    for item in selected_candidates
+                )
+                if sync_detail:
+                    sync_detail += "\n\n"
                 answer = QMessageBox.question(
                     self,
                     "Xác nhận đồng bộ toàn sheet",
                     (
                         f"Sheet BK: {selected_sync_sheet or '—'}\n\n"
+                        f"{sync_detail}"
                         f"Cập nhật: {updates} dòng\n"
                         f"Thêm mới: {inserts} dòng\n"
                         f"Không đổi: {unchanged} dòng\n"
@@ -1335,28 +1538,33 @@ class MainWindow(QMainWindow):
 
         source_sheet = _attribute(plan, "source_sheet", default="—")
         target_sheet = _attribute(plan, "target_sheet", default="—")
-        target_plans = _attribute(plan, "targets", default={}) or {}
         target_sections: list[str] = []
-        for target_type in ("HP", "NAM"):
-            target = _attribute(target_plans, target_type, default=None)
-            if target is None:
-                continue
-            created = bool(_attribute(target, "sheet_to_create", default=False))
-            template = _attribute(target, "template_sheet", default="—")
-            section = (
-                f"{_attribute(target, 'sheet_name', default=target_type)}\n"
-                f"- Sheet mới: {'Có' if created else 'Không'}\n"
-            )
-            if created:
-                section += f"- Sheet mẫu: {template}\n"
-            section += (
-                f"- Dòng mới: {_attribute(target, 'new_count', default=0)}\n"
-                f"- Cập nhật: {_attribute(target, 'update_count', default=0)}\n"
-                f"- Ô Số HĐ sẽ cập nhật: {_attribute(target, 'invoice_change_count', default=0)}\n"
-                f"- Không đổi: {_attribute(target, 'unchanged_count', default=0)}\n"
-                f"- Xung đột: {_attribute(target, 'conflict_count', default=0)}"
-            )
-            target_sections.append(section)
+        month_plans = _attribute(plan, "month_plans", default={}) or {}
+        plans_for_display = (
+            list(month_plans.items()) if month_plans else [(source_sheet, plan)]
+        )
+        for month_source, display_plan in plans_for_display:
+            target_plans = _attribute(display_plan, "targets", default={}) or {}
+            for target_type in ("HP", "NAM"):
+                target = _attribute(target_plans, target_type, default=None)
+                if target is None:
+                    continue
+                created = bool(_attribute(target, "sheet_to_create", default=False))
+                template = _attribute(target, "template_sheet", default="—")
+                section = (
+                    f"{month_source} → {_attribute(target, 'sheet_name', default=target_type)}\n"
+                    f"- Sheet mới: {'Có' if created else 'Không'}\n"
+                )
+                if created:
+                    section += f"- Sheet mẫu: {template}\n"
+                section += (
+                    f"- Dòng mới: {_attribute(target, 'new_count', default=0)}\n"
+                    f"- Cập nhật: {_attribute(target, 'update_count', default=0)}\n"
+                    f"- Ô Số HĐ sẽ cập nhật: {_attribute(target, 'invoice_change_count', default=0)}\n"
+                    f"- Không đổi: {_attribute(target, 'unchanged_count', default=0)}\n"
+                    f"- Xung đột: {_attribute(target, 'conflict_count', default=0)}"
+                )
+                target_sections.append(section)
         target_detail = "\n\n".join(target_sections)
         updates = int(_attribute(plan, "update_count", default=0) or 0)
         unchanged = int(_attribute(plan, "unchanged_count", default=0) or 0)
@@ -1450,13 +1658,10 @@ class MainWindow(QMainWindow):
         if operation == "payment_sync":
             result_targets = _attribute(result, "target_results", default={}) or {}
             result_sections: list[str] = []
-            for target_type in ("HP", "NAM"):
-                target_result = _attribute(result_targets, target_type, default=None)
-                if target_result is None:
-                    continue
+            for target_key, target_result in result_targets.items():
                 result_sections.append(
                     (
-                        f"{_attribute(target_result, 'sheet_name', default=target_type)}\n"
+                        f"{_attribute(target_result, 'sheet_name', default=target_key)}\n"
                         f"- Đã tạo mới: {'Có' if bool(_attribute(target_result, 'sheet_created', default=False)) else 'Không'}\n"
                         f"- Đã cập nhật: {_attribute(target_result, 'updated_rows', default=0)}\n"
                         f"- Đã thêm: {_attribute(target_result, 'inserted_rows', default=0)}\n"
@@ -1606,6 +1811,30 @@ class MainWindow(QMainWindow):
                 plan, "selected_sheet", "selected_sheet_name", default=None
             ),
             repost_source_indices=repost_indices,
+            group_target_sheets=tuple(
+                sorted(
+                    (
+                        str(_attribute(group, "group_id")),
+                        str(_attribute(group, "target_sheet")),
+                    )
+                    for group in (
+                        _attribute(plan, "source_groups", default=()) or ()
+                    )
+                    if _attribute(group, "group_id", default=None) not in (None, "")
+                    and _attribute(group, "target_sheet", default=None) not in (None, "")
+                )
+            )
+            or None,
+            split_document_ids=tuple(
+                sorted(
+                    str(value)
+                    for value in (
+                        _attribute(plan, "split_document_ids", default=()) or ()
+                    )
+                    if str(value).strip()
+                )
+            )
+            or None,
             highlight_unresolved=True,
         )
 
@@ -1824,6 +2053,10 @@ class MainWindow(QMainWindow):
             kwargs["batch_id"] = context.batch_id
         if context.sheet_name:
             kwargs["sheet_name"] = context.sheet_name
+        if context.group_target_sheets:
+            kwargs["group_target_sheets"] = dict(context.group_target_sheets)
+        if context.split_document_ids:
+            kwargs["split_document_ids"] = context.split_document_ids
         if context.repost_source_indices is not None:
             kwargs["repost_source_indices"] = context.repost_source_indices
         try:

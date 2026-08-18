@@ -141,6 +141,7 @@ class MonthSelectionDialog(QDialog):
         title: str = "Chọn tháng xử lý",
         preselect_first: bool = True,
         show_recommendations: bool = True,
+        multi_select: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("monthSelectionDialog")
@@ -156,6 +157,7 @@ class MonthSelectionDialog(QDialog):
         self.candidates = list(_sequence(candidates))
         self.preselect_first = preselect_first
         self.show_recommendations = show_recommendations
+        self.multi_select = multi_select
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -176,7 +178,9 @@ class MonthSelectionDialog(QDialog):
             QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.table.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection
+            QAbstractItemView.SelectionMode.ExtendedSelection
+            if self.multi_select
+            else QAbstractItemView.SelectionMode.SingleSelection
         )
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
@@ -256,7 +260,7 @@ class MonthSelectionDialog(QDialog):
 
     def _update_action(self) -> None:
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
-            self.table.currentRow() >= 0
+            bool(self.table.selectionModel().selectedRows())
         )
 
     @property
@@ -269,6 +273,19 @@ class MonthSelectionDialog(QDialog):
     def selected_sheet_name(self) -> str | None:
         candidate = self.selected_candidate
         return _sheet_name(candidate) or None
+
+    @property
+    def selected_candidates(self) -> list[Any]:
+        result: list[Any] = []
+        for index in sorted(self.table.selectionModel().selectedRows(), key=lambda item: item.row()):
+            item = self.table.item(index.row(), 0)
+            if item is not None:
+                result.append(item.data(Qt.ItemDataRole.UserRole))
+        return result
+
+    @property
+    def selected_sheet_names(self) -> list[str]:
+        return [name for candidate in self.selected_candidates if (name := _sheet_name(candidate))]
 
     def selection(self) -> dict[str, Any]:
         candidate = self.selected_candidate
@@ -284,6 +301,220 @@ class MonthSelectionDialog(QDialog):
         }
 
     resolution = selection
+
+
+class PostingAllocationDialog(QDialog):
+    """Phân bổ từng chứng từ/nhóm hóa đơn vào các sheet BK đã tồn tại."""
+
+    def __init__(self, plan: Any, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("postingAllocationDialog")
+        self.setWindowTitle("Phân bổ chứng từ vào sheet BK")
+        self.resize(980, 520)
+        self.groups = list(_sequence(_value(plan, "source_groups", default=())))
+        candidates = list(_sequence(_value(plan, "sheet_candidates", default=())))
+        self.sheet_names = [name for item in candidates if (name := _sheet_name(item))]
+        self._combos: dict[str, QComboBox] = {}
+        self._split_document_ids: set[str] = set()
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "Ngày hóa đơn chỉ dùng để gợi ý. Hãy chọn sheet đích cho mọi chứng từ; "
+            "hồ sơ cước biển đã đối soát sẽ bị khóa sheet."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ["Chứng từ / nhóm HĐ", "Số khoản", "Ngày HĐ", "Gợi ý", "Sheet đích"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        for group in self.groups:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            group_id = str(_value(group, "group_id"))
+            document = str(_value(group, "source_document_name", default=""))
+            invoice = _value(group, "invoice_no")
+            label = document + (f" — HĐ {invoice}" if invoice else "")
+            self.table.setItem(row, 0, QTableWidgetItem(label))
+            source_indices = list(_sequence(_value(group, "source_item_indices", default=())))
+            self.table.setItem(row, 1, QTableWidgetItem(str(len(source_indices))))
+            dates = list(_sequence(_value(group, "invoice_dates", default=())))
+            self.table.setItem(row, 2, QTableWidgetItem(", ".join(map(str, dates)) or "—"))
+            suggested = _value(group, "suggested_sheet")
+            self.table.setItem(row, 3, QTableWidgetItem(_display(suggested)))
+            combo = QComboBox()
+            combo.addItem("— Chọn sheet —", "")
+            for sheet_name in self.sheet_names:
+                combo.addItem(sheet_name, sheet_name)
+            target = _value(group, "target_sheet")
+            if target:
+                combo.setCurrentIndex(max(0, combo.findData(str(target))))
+            elif suggested:
+                combo.setCurrentIndex(max(0, combo.findData(str(suggested))))
+            locked = bool(_value(group, "target_locked", default=False))
+            combo.setEnabled(not locked)
+            if locked:
+                combo.setToolTip("Sheet đã khóa theo hồ sơ đối soát cước biển.")
+            combo.currentIndexChanged.connect(self._update_summary)
+            self.table.setCellWidget(row, 4, combo)
+            self._combos[group_id] = combo
+        layout.addWidget(self.table, 1)
+        self.split_button = QPushButton("Tách tài liệu đã chọn theo hóa đơn")
+        self.split_button.setToolTip(
+            "Tạo nhóm riêng cho từng số hóa đơn trong cùng tài liệu trước khi phân bổ."
+        )
+        self.split_button.clicked.connect(self._request_invoice_split)
+        self.table.itemSelectionChanged.connect(self._update_split_action)
+        layout.addWidget(self.split_button)
+        self.summary_label = QLabel()
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Phân tích")
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Hủy")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self._update_summary()
+        if self.table.rowCount():
+            self.table.selectRow(0)
+        self._update_split_action()
+
+    def _selected_group(self) -> Any | None:
+        indexes = self.table.selectionModel().selectedRows()
+        if not indexes:
+            return None
+        row = indexes[0].row()
+        return self.groups[row] if 0 <= row < len(self.groups) else None
+
+    def _update_split_action(self) -> None:
+        group = self._selected_group()
+        self.split_button.setEnabled(
+            group is not None
+            and bool(_value(group, "can_split_by_invoice", default=False))
+        )
+
+    def _request_invoice_split(self) -> None:
+        group = self._selected_group()
+        if group is None or not bool(
+            _value(group, "can_split_by_invoice", default=False)
+        ):
+            return
+        document_id = str(_value(group, "source_document_id", default=""))
+        if document_id:
+            self._split_document_ids.add(document_id)
+            self.accept()
+
+    def _update_summary(self, *_args: Any) -> None:
+        totals: dict[str, tuple[int, int]] = {}
+        for group in self.groups:
+            group_id = str(_value(group, "group_id"))
+            sheet = str(self._combos[group_id].currentData() or "")
+            if not sheet:
+                continue
+            documents, items = totals.get(sheet, (0, 0))
+            totals[sheet] = (
+                documents + 1,
+                items + len(_sequence(_value(group, "source_item_indices", default=()))),
+            )
+        self.summary_label.setText(
+            " | ".join(
+                f"{sheet}: {documents} nhóm / {items} khoản"
+                for sheet, (documents, items) in totals.items()
+            )
+            or "Chưa phân bổ chứng từ."
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+            bool(self.groups)
+            and all(str(combo.currentData() or "") for combo in self._combos.values())
+        )
+
+    @property
+    def group_target_sheets(self) -> dict[str, str]:
+        return {
+            group_id: str(combo.currentData())
+            for group_id, combo in self._combos.items()
+            if combo.currentData()
+        }
+
+    @property
+    def split_document_ids(self) -> set[str]:
+        return set(self._split_document_ids)
+
+
+class DailySyncAllocationDialog(QDialog):
+    """Ánh xạ riêng từng sheet Hàng ngày sang sheet BK đúng năm."""
+
+    def __init__(self, plan: Any, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Ánh xạ các tháng Hàng ngày vào BK")
+        self.resize(700, 430)
+        self.plan = plan
+        self._combos: dict[str, QComboBox] = {}
+        layout = QVBoxLayout(self)
+        note = QLabel("Chọn sheet BK đích cho từng sheet nguồn. Mỗi nguồn chỉ được xử lý một lần.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["Sheet Hàng ngày", "Sheet BK đích"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        mappings = dict(_value(plan, "source_target_sheets", default={}) or {})
+        candidates = list(_sequence(_value(plan, "month_candidates", default=())))
+        for source_sheet, target in mappings.items():
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(str(source_sheet)))
+            combo = QComboBox()
+            combo.addItem("— Chọn sheet —", "")
+            for candidate in candidates:
+                if str(_value(candidate, "source_sheet")) == str(source_sheet):
+                    name = _sheet_name(candidate)
+                    combo.addItem(name, name)
+            if target:
+                combo.setCurrentIndex(max(0, combo.findData(str(target))))
+            combo.currentIndexChanged.connect(self._update_action)
+            self.table.setCellWidget(row, 1, combo)
+            self._combos[str(source_sheet)] = combo
+        layout.addWidget(self.table, 1)
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Phân tích")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self._update_action()
+
+    def _update_action(self, *_args: Any) -> None:
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+            bool(self._combos)
+            and all(combo.currentData() for combo in self._combos.values())
+        )
+
+    @property
+    def source_target_sheets(self) -> dict[str, str]:
+        return {
+            source: str(combo.currentData())
+            for source, combo in self._combos.items()
+            if combo.currentData()
+        }
 
 
 class ManualRowPickerDialog(QDialog):
@@ -1834,9 +2065,11 @@ TargetMonthDialog = MonthSelectionDialog
 __all__ = [
     "AggregateConflictDialog",
     "ConflictResolutionDialog",
+    "DailySyncAllocationDialog",
     "ExcelConflictDialog",
     "ManualRowPickerDialog",
     "MonthSelectionDialog",
+    "PostingAllocationDialog",
     "PaymentNewRowsDialog",
     "RepostSelectionDialog",
     "TargetMonthDialog",

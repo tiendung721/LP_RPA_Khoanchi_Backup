@@ -90,13 +90,29 @@ class WorkbookGateway:
         data_only: bool = False,
     ) -> Any:
         candidate = ensure_supported_workbook(path)
-        return load_workbook(
+        workbook = load_workbook(
             candidate,
             read_only=read_only,
             data_only=data_only,
             keep_vba=candidate.suffix.casefold() == ".xlsm",
             keep_links=True,
         )
+        # ``openpyxl.Workbook.close`` chỉ đóng archive của chế độ read-only;
+        # archive VBA tạo bởi ``keep_vba`` nếu không đóng rõ sẽ sống tới GC và
+        # có thể chạm vào BytesIO đã đóng. Bọc close tại gateway để mọi caller
+        # hiện hữu giải phóng cả hai tài nguyên theo cùng một cách.
+        original_close = workbook.close
+
+        def close_with_vba() -> None:
+            try:
+                original_close()
+            finally:
+                vba_archive = getattr(workbook, "vba_archive", None)
+                if vba_archive is not None:
+                    vba_archive.close()
+
+        workbook.close = close_with_vba
+        return workbook
 
     def fingerprint(self, path: str | Path) -> WorkbookFingerprint:
         return workbook_fingerprint(path)

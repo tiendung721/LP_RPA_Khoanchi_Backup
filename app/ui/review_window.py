@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -28,6 +29,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QTableView,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -46,6 +49,7 @@ from app.constants import SCHEMA_VERSION
 from app.models import DataRow
 from app.sea_freight.contracts import GroupStatus, group_status_text
 from app.sea_freight.service import VesselVoyageNotFoundError
+from app.sea_freight.matching import normalize_match_key
 from app.ui.sea_freight_center import ReconciliationPeriodDialog
 from app.ui.feedback import LinearLoadingBar, set_button_loading
 
@@ -58,6 +62,72 @@ STATUS_VI = {
     "INVALID": "Không hợp lệ",
     "ARCHIVED": "Đã lưu trữ",
 }
+
+
+class SeaFreightContributionSelectionDialog(QDialog):
+    """Chọn nhiều HĐ cùng tàu/chuyến để đưa vào một hồ sơ đối soát."""
+
+    def __init__(
+        self,
+        candidates: Sequence[tuple[int, ReviewRow]],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Chọn hóa đơn cho hồ sơ cước biển")
+        self.resize(850, 430)
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "Các hóa đơn dưới đây cùng tàu/chuyến và chưa thuộc hồ sơ khác. "
+            "Chọn các hóa đơn cần cộng số container trong lần này."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ["Chứng từ", "Số HĐ", "Ngày HĐ", "SL cont", "Số tiền"]
+        )
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self._items: list[QTableWidgetItem] = []
+        for source_index, row_data in candidates:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            item = QTableWidgetItem(str(row_data.source_document_name))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            item.setData(Qt.ItemDataRole.UserRole, source_index)
+            self.table.setItem(row, 0, item)
+            self.table.setItem(row, 1, QTableWidgetItem(str(row_data.invoice_no or "—")))
+            self.table.setItem(row, 2, QTableWidgetItem(str(row_data.invoice_date or "—")))
+            self.table.setItem(
+                row, 3, QTableWidgetItem(str(row_data.invoice_container_count or "—"))
+            )
+            self.table.setItem(
+                row,
+                4,
+                QTableWidgetItem(
+                    f"{row_data.amount:,}".replace(",", ".")
+                    if type(row_data.amount) is int
+                    else "—"
+                ),
+            )
+            self._items.append(item)
+        layout.addWidget(self.table, 1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Tạo / bổ sung hồ sơ")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def selected_source_indices(self) -> list[int]:
+        return [
+            int(item.data(Qt.ItemDataRole.UserRole))
+            for item in self._items
+            if item.checkState() == Qt.CheckState.Checked
+        ]
 
 
 def _value(source: Any, *names: str, default: Any = None) -> Any:
@@ -242,6 +312,7 @@ class ReviewWindow(QMainWindow):
         self.proxy_model = ReviewFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
         self._build_ui()
+        self._refresh_document_filter()
         self._connect_signals()
         self._install_shortcuts()
         self._update_metadata_labels()
@@ -339,6 +410,11 @@ class ReviewWindow(QMainWindow):
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setMinimumWidth(220)
         filter_toolbar.addWidget(self.search_edit, 2)
+
+        self.document_filter = QComboBox()
+        self.document_filter.setObjectName("documentFilter")
+        self.document_filter.setMinimumWidth(210)
+        filter_toolbar.addWidget(self.document_filter, 2)
 
         self.fee_filter = QComboBox()
         self.fee_filter.setObjectName("feeFilter")
@@ -445,6 +521,12 @@ class ReviewWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.search_edit.textChanged.connect(self.proxy_model.set_search_text)
         self.search_edit.textChanged.connect(self._update_visible_count)
+        self.document_filter.currentIndexChanged.connect(
+            lambda: self.proxy_model.set_document_filter(
+                self.document_filter.currentData()
+            )
+        )
+        self.document_filter.currentIndexChanged.connect(self._update_visible_count)
         self.fee_filter.currentIndexChanged.connect(
             lambda: self.proxy_model.set_fee_filter(self.fee_filter.currentData())
         )
@@ -465,6 +547,7 @@ class ReviewWindow(QMainWindow):
         self.model.dirtyChanged.connect(self._dirty_state_changed)
         self.model.validationChanged.connect(self._update_stats)
         self.model.rowsChanged.connect(self._update_visible_count)
+        self.model.rowsChanged.connect(self._refresh_document_filter)
         self.lookup_action_delegate.clicked.connect(
             self._lookup_action_clicked
         )
@@ -506,6 +589,12 @@ class ReviewWindow(QMainWindow):
         self.status_value.setText(STATUS_VI.get(self._status, self._status or "—"))
 
     def _update_stats(self, stats: ReviewStats) -> None:
+        self._global_stats = stats
+        self._update_filtered_stats()
+        self.confirm_button.setEnabled(stats.error == 0 and not self._saving)
+        self._update_visible_count()
+
+    def _set_stat_labels(self, stats: ReviewStats) -> None:
         self.stat_labels["total"].setText(f"{stats.total:,}".replace(",", "."))
         self.stat_labels["valid"].setText(f"{stats.valid:,}".replace(",", "."))
         self.stat_labels["warning"].setText(f"{stats.warning:,}".replace(",", "."))
@@ -514,10 +603,29 @@ class ReviewWindow(QMainWindow):
         self.stat_labels["valid"].setStyleSheet("font-size: 12pt; font-weight: 700; color: #15803D;")
         self.stat_labels["warning"].setStyleSheet("font-size: 12pt; font-weight: 700; color: #A16207;")
         self.stat_labels["error"].setStyleSheet("font-size: 12pt; font-weight: 700; color: #B42318;")
-        self.confirm_button.setEnabled(stats.error == 0 and not self._saving)
-        self._update_visible_count()
+
+    def _update_filtered_stats(self) -> None:
+        source_rows = [
+            self.proxy_model.mapToSource(self.proxy_model.index(index, 0)).row()
+            for index in range(self.proxy_model.rowCount())
+        ]
+        validations = [self.model.validation_at(index) for index in source_rows]
+        rows = [self.model.row_at(index) for index in source_rows]
+        stats = ReviewStats(
+            total=len(rows),
+            valid=sum(item.status is RowStatus.VALID for item in validations),
+            warning=sum(item.status is RowStatus.WARNING for item in validations),
+            error=sum(item.status is RowStatus.ERROR for item in validations),
+            with_container=sum(bool(item.cont) for item in rows),
+            with_bl=sum(bool(item.bl) for item in rows),
+            with_amount=sum(type(item.amount) is int for item in rows),
+            total_amount=sum(item.amount for item in rows if type(item.amount) is int),
+            fee_counts={},
+        )
+        self._set_stat_labels(stats)
 
     def _update_visible_count(self, *_args: Any) -> None:
+        self._update_filtered_stats()
         self.visible_label.setText(
             f"Đang hiển thị {self.proxy_model.rowCount():,}/{self.model.rowCount():,} dòng".replace(
                 ",", "."
@@ -574,10 +682,31 @@ class ReviewWindow(QMainWindow):
 
     def clear_filters(self) -> None:
         self.search_edit.clear()
+        self.document_filter.setCurrentIndex(0)
         self.fee_filter.setCurrentIndex(0)
         self.status_filter.setCurrentIndex(0)
         self.proxy_model.clear_filters()
         self._update_visible_count()
+
+    def _refresh_document_filter(self, *_args: Any) -> None:
+        selected = self.document_filter.currentData() if self.document_filter.count() else ""
+        documents: dict[str, tuple[str, int]] = {}
+        for row in self.model.rows():
+            name, count = documents.get(
+                row.source_document_id, (row.source_document_name, 0)
+            )
+            documents[row.source_document_id] = (name, count + 1)
+        self.document_filter.blockSignals(True)
+        self.document_filter.clear()
+        self.document_filter.addItem(
+            f"Tất cả chứng từ – {self.model.rowCount()} dòng", ""
+        )
+        for document_id, (name, count) in documents.items():
+            self.document_filter.addItem(f"{name} – {count} dòng", document_id)
+        index = self.document_filter.findData(selected)
+        self.document_filter.setCurrentIndex(max(0, index))
+        self.document_filter.blockSignals(False)
+        self.proxy_model.set_document_filter(self.document_filter.currentData())
 
     def _selected_source_row(self) -> int | None:
         selected = self._selected_source_rows()
@@ -603,10 +732,50 @@ class ReviewWindow(QMainWindow):
             self.table.scrollTo(proxy_index, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def add_row(self) -> None:
+        source_document_id = str(self.document_filter.currentData() or "")
+        source_document_name = ""
+        if source_document_id:
+            source_document_name = next(
+                (
+                    row.source_document_name
+                    for row in self.model.rows()
+                    if row.source_document_id == source_document_id
+                ),
+                "",
+            )
+        else:
+            choices = [
+                f"{self.document_filter.itemText(index)} [{self.document_filter.itemData(index)}]"
+                for index in range(1, self.document_filter.count())
+            ]
+            choices.append("Dòng thêm thủ công [MANUAL]")
+            choice, accepted = QInputDialog.getItem(
+                self,
+                "Chọn chứng từ nguồn",
+                "Dòng mới thuộc chứng từ nào?",
+                choices,
+                len(choices) - 1,
+                False,
+            )
+            if not accepted:
+                return
+            if choice == "Dòng thêm thủ công [MANUAL]":
+                source_document_id = "MANUAL"
+                source_document_name = "Dòng thêm thủ công"
+            else:
+                selected_index = choices.index(choice) + 1
+                source_document_id = str(self.document_filter.itemData(selected_index))
+                source_document_name = next(
+                    row.source_document_name
+                    for row in self.model.rows()
+                    if row.source_document_id == source_document_id
+                )
         dialog = EditRowDialog(
             parent=self,
             validator=self._validator,
             allow_negative=self._allow_negative,
+            source_document_id=source_document_id,
+            source_document_name=source_document_name,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1087,14 +1256,62 @@ class ReviewWindow(QMainWindow):
         if period_dialog.exec() != QDialog.DialogCode.Accepted:
             return False
         month, year = period_dialog.period()
+        managed_indices: set[int] = set()
+        if self._batch_id is not None:
+            try:
+                managed_indices = set(
+                    service.repository.managed_source_indices(int(self._batch_id))
+                )
+            except Exception:
+                managed_indices = set()
+        vessel_key = normalize_match_key(data_row.vessel_name)
+        voyage_key = normalize_match_key(data_row.voyage_no)
+        compatible = [
+            (index, candidate)
+            for index in range(self.model.rowCount())
+            if index not in managed_indices
+            and (candidate := self.model.row_at(index)).fee == "CB"
+            and candidate.cont in (None, "")
+            and not self._missing_reconciliation_fields(candidate)
+            and normalize_match_key(candidate.vessel_name) == vessel_key
+            and normalize_match_key(candidate.voyage_no) == voyage_key
+        ]
+        selection_dialog = SeaFreightContributionSelectionDialog(
+            compatible, self
+        )
+        if selection_dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+        selected_indices = selection_dialog.selected_source_indices
+        if not selected_indices:
+            QMessageBox.warning(self, "Chưa chọn hóa đơn", "Hãy chọn ít nhất một hóa đơn.")
+            return False
         try:
-            group = service.open_or_create(
-                data_row,
-                bk_path=bk_path, month=month, year=year,
-                source_batch_id=int(self._batch_id) if self._batch_id is not None else None,
-                source_item_index=self._source_index_by_runtime.get(row.runtime_id, source_row),
-                source_sha256=str(_value(self._metadata, "sha256", default="") or ""),
-            )
+            open_many = getattr(service, "open_or_create_many", None)
+            if callable(open_many):
+                group = open_many(
+                    [
+                        (index, DataRow.from_mapping(self.model.row_at(index).to_object()))
+                        for index in selected_indices
+                    ],
+                    bk_path=bk_path,
+                    month=month,
+                    year=year,
+                    source_batch_id=(
+                        int(self._batch_id) if self._batch_id is not None else None
+                    ),
+                    source_sha256=str(
+                        _value(self._metadata, "sha256", default="") or ""
+                    ),
+                )
+            else:
+                group = service.open_or_create(
+                    data_row,
+                    bk_path=bk_path, month=month, year=year,
+                    source_batch_id=int(self._batch_id) if self._batch_id is not None else None,
+                    source_item_index=self._source_index_by_runtime.get(row.runtime_id, source_row),
+                    source_sha256=str(_value(self._metadata, "sha256", default="") or ""),
+                )
+                selected_indices = [source_row]
         except VesselVoyageNotFoundError as exc:
             if exc.sheet_missing:
                 QMessageBox.warning(self, "Không tìm thấy sheet BK", str(exc))
@@ -1107,14 +1324,14 @@ class ReviewWindow(QMainWindow):
             QMessageBox.warning(self, "Chưa thể đối soát số cont", str(exc))
             return False
 
-        self.model.set_lookup_presentation(
-            row.runtime_id,
-            status=group.status.value,
-            message=(
-                group_status_text(group)
-            ),
-            session_id=str(group.id),
-        )
+        for index in selected_indices:
+            selected_row = self.model.row_at(index)
+            self.model.set_lookup_presentation(
+                selected_row.runtime_id,
+                status=group.status.value,
+                message=group_status_text(group),
+                session_id=str(group.id),
+            )
         self.reconciliationChanged.emit()
         self.reconciliationOpenRequested.emit(group.id)
         return True

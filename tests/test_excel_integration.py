@@ -342,14 +342,19 @@ def test_posting_reader_accepts_v1_review_fields_without_using_them_for_amount(
         ensure_ascii=False,
     ).encode("utf-8")
 
-    assert service._validate_json(raw) == [
+    parsed = service._validate_json(raw)
+    assert parsed[0]["source_document_id"].startswith("LEGACY_BATCH_")
+    assert parsed == [
         {
             "source_item_index": 0,
+            "source_document_id": parsed[0]["source_document_id"],
+            "source_document_name": "Dữ liệu bóc tách cũ",
             "container": "GAOU2619968",
             "bl": None,
             "fee": "CBDH",
             "rule": "CV",
             "invoice_no": "000130/HD",
+            "invoice_date": None,
             "carrier": "Vận tải ABC",
             "amount": 2_484_000,
         }
@@ -1014,6 +1019,155 @@ def test_posting_carries_previous_month_plan_once_and_reuses_target_row(
     finally:
         workbook.close()
         database.close()
+
+
+def test_posting_allocates_two_documents_to_two_months_in_one_atomic_apply(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready-v3.json"
+    target = tmp_path / "BK 2026.xlsx"
+    runtime = tmp_path / "Excel"
+    rows: list[dict[str, Any]] = []
+    july_containers = [f"JULY{i:07d}" for i in range(1, 6)]
+    june_containers = [f"JUNE{i:07d}" for i in range(1, 11)]
+    for index, container in enumerate(july_containers, start=1):
+        rows.append(
+            {
+                "source_document_id": "DOC_001",
+                "source_document_name": "Hoa_don_A.pdf",
+                "container": container,
+                "bl": None,
+                "vessel_voyage_raw": None,
+                "vessel_name": None,
+                "voyage_no": None,
+                "invoice_container_count": None,
+                "container_count_basis": "UNKNOWN",
+                "fee": "VTN",
+                "rule": "ST",
+                "invoice_no": "INV-JULY",
+                "invoice_date": "2026-07-15",
+                "carrier": None,
+                "amount": 1000 + index,
+            }
+        )
+    for index, container in enumerate(june_containers, start=1):
+        rows.append(
+            {
+                "source_document_id": "DOC_002",
+                "source_document_name": "Hoa_don_B.pdf",
+                "container": container,
+                "bl": None,
+                "vessel_voyage_raw": None,
+                "vessel_name": None,
+                "voyage_no": None,
+                "invoice_container_count": None,
+                "container_count_basis": "UNKNOWN",
+                "fee": "HH",
+                "rule": "ST",
+                "invoice_no": "INV-JUNE",
+                "invoice_date": "2026-06-15",
+                "carrier": None,
+                "amount": 2000 + index,
+            }
+        )
+    ready.write_text(
+        json.dumps({"v": 3, "d": rows}, ensure_ascii=False), encoding="utf-8"
+    )
+    workbook = Workbook()
+    july = _new_full_posting_sheet(workbook, "T07 26")
+    for row_number, container in enumerate(july_containers, start=2):
+        _add_full_plan_row(
+            july, row_number, sqt=700 + row_number, container=container,
+            closing_date="2026-07-10",
+        )
+    june = _new_full_posting_sheet(workbook, "T06 26")
+    for row_number, container in enumerate(june_containers, start=2):
+        _add_full_plan_row(
+            june, row_number, sqt=600 + row_number, container=container,
+            closing_date="2026-06-10",
+        )
+    workbook.save(target)
+    workbook.close()
+    service = _posting_service(ready, target, runtime)
+
+    unassigned = service.analyze()
+    assert len(unassigned.source_groups) == 2
+    assert {group.suggested_sheet for group in unassigned.source_groups} == {
+        "T06 26", "T07 26"
+    }
+    assert all(group.target_sheet is None for group in unassigned.source_groups)
+    assignments = {
+        group.group_id: group.suggested_sheet
+        for group in unassigned.source_groups
+        if group.suggested_sheet is not None
+    }
+    plan = service.analyze(group_target_sheets=assignments)
+
+    assert not plan.conflicts
+    assert plan.target_sheets == {"T06 26", "T07 26"}
+    result = service.apply(plan, {})
+    assert result.target_sheets == ("T06 26", "T07 26")
+    assert result.posted_source_items == 15
+    assert len(list((runtime / "Backup").glob("*.xlsx"))) == 1
+    workbook = load_workbook(target, data_only=False)
+    try:
+        assert [
+            workbook["T07 26"].cell(row, FULL_POSTING_LAYOUT["VTN"][0]).value
+            for row in range(2, 7)
+        ] == [1001, 1002, 1003, 1004, 1005]
+        assert [
+            workbook["T06 26"].cell(row, FULL_POSTING_LAYOUT["HH"][0]).value
+            for row in range(2, 12)
+        ] == list(range(2001, 2011))
+    finally:
+        workbook.close()
+
+def test_posting_can_split_one_same_month_document_by_invoice(tmp_path: Path) -> None:
+    ready = tmp_path / "same-month.json"
+    target = tmp_path / "BK.xlsx"
+    base = {
+        "source_document_id": "DOC_001",
+        "source_document_name": "Hai_hoa_don.pdf",
+        "bl": None,
+        "vessel_voyage_raw": None,
+        "vessel_name": None,
+        "voyage_no": None,
+        "invoice_container_count": None,
+        "container_count_basis": "UNKNOWN",
+        "fee": "VTN",
+        "rule": "ST",
+        "invoice_date": "2026-07-15",
+        "carrier": None,
+    }
+    ready.write_text(
+        json.dumps(
+            {
+                "v": 3,
+                "d": [
+                    base | {"container": "SPLT0000001", "invoice_no": "A", "amount": 1},
+                    base | {"container": "SPLT0000002", "invoice_no": "B", "amount": 2},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(sheet, 2, sqt=701, container="SPLT0000001", closing_date="2026-07-01")
+    _add_full_plan_row(sheet, 3, sqt=702, container="SPLT0000002", closing_date="2026-07-02")
+    workbook.save(target)
+    workbook.close()
+    service = _posting_service(ready, target, tmp_path / "Runtime")
+
+    grouped = service.analyze()
+    assert len(grouped.source_groups) == 1
+    assert grouped.source_groups[0].can_split_by_invoice
+    split = service.analyze(split_document_ids=["DOC_001"])
+    assert len(split.source_groups) == 2
+    assert {group.invoice_no for group in split.source_groups} == {"A", "B"}
+    assert all(not group.can_split_by_invoice for group in split.source_groups)
+    service.cancel(split)
 
 
 def test_posting_three_month_window_handles_year_boundary(
@@ -2450,16 +2604,52 @@ def test_daily_month_cancel_is_audited_as_cancelled(
         run_repository=runs,
     )
     plan = service.analyze()
-    conflict = next(
-        item
-        for item in plan.conflicts
-        if item.conflict_type is ConflictType.TARGET_MONTH_AMBIGUOUS
-    )
-
-    with pytest.raises(DailySyncError, match="Người dùng đã hủy"):
-        service.apply(
-            plan,
-            {conflict.conflict_id: {"action": "CANCEL_ALL"}},
-        )
+    assert plan.source_target_sheets == {
+        "Tháng 7": "T07 26",
+        "Tháng 8": "T08 26",
+    }
+    service.cancel(plan)
 
     assert runs.finished[-1]["status"] is ExcelRunStatus.CANCELLED
+
+
+def test_daily_sync_applies_two_selected_months_with_one_backup(tmp_path: Path) -> None:
+    daily = tmp_path / "Hàng ngày.xlsx"
+    target = tmp_path / "BK.xlsx"
+    runtime = tmp_path / "Excel"
+    workbook = Workbook()
+    june = workbook.active
+    june.title = "Tháng 6"
+    june.append(SYNC_HEADERS)
+    june.append(_sync_row(601, "JUNE0000001", closing_date="2026-06-10"))
+    july = workbook.create_sheet("Tháng 7")
+    july.append(SYNC_HEADERS)
+    july.append(_sync_row(701, "JULY0000001", closing_date="2026-07-10"))
+    workbook.save(daily)
+    workbook.close()
+    workbook = Workbook()
+    june_target = workbook.active
+    june_target.title = "T06 26"
+    _populate_target_sheet(june_target, [_sync_row(600, "OLDJUNE0001")])
+    july_target = workbook.create_sheet("T07 26")
+    _populate_target_sheet(july_target, [_sync_row(700, "OLDJULY0001")])
+    workbook.save(target)
+    workbook.close()
+    service = _sync_service(daily, target, runtime)
+
+    plan = service.analyze(source_sheet_names=["Tháng 6", "Tháng 7"])
+
+    assert plan.source_target_sheets == {
+        "Tháng 6": "T06 26",
+        "Tháng 7": "T07 26",
+    }
+    result = service.apply(plan, {})
+    assert result.target_sheets == ("T06 26", "T07 26")
+    assert result.inserted_rows == 2
+    assert len(list((runtime / "Backup").glob("*.xlsx"))) == 1
+    workbook = load_workbook(target, data_only=False)
+    try:
+        assert workbook["T06 26"]["A3"].value == 601
+        assert workbook["T07 26"]["A3"].value == 701
+    finally:
+        workbook.close()

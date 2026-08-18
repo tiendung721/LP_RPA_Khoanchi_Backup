@@ -159,6 +159,8 @@ class ValidationService:
         invoice_container_count: int | None = None,
         container_count_basis: str = "UNKNOWN",
         invoice_date: str | None = None,
+        source_document_id: str = "MANUAL",
+        source_document_name: str = "Dòng thêm thủ công",
         amount: int | str | None = None,
     ) -> DataRow:
         if row is not None:
@@ -174,6 +176,8 @@ class ValidationService:
             invoice_container_count = row.invoice_container_count
             container_count_basis = row.container_count_basis
             invoice_date = row.invoice_date
+            source_document_id = row.source_document_id
+            source_document_name = row.source_document_name
             amount = row.amount
         if fee is None:
             raise ValueError("Vui lòng chọn mã loại cước.")
@@ -193,6 +197,12 @@ class ValidationService:
             invoice_container_count=invoice_container_count,
             container_count_basis=(container_count_basis or "UNKNOWN").strip().upper(),
             invoice_date=normalize_optional_text(invoice_date, field_name="Ngày HĐ"),
+            source_document_id=normalize_optional_text(
+                source_document_id, field_name="Mã chứng từ nguồn"
+            ) or "",
+            source_document_name=normalize_optional_text(
+                source_document_name, field_name="Tên chứng từ nguồn"
+            ) or "",
         )
 
     def validate_row(
@@ -243,6 +253,27 @@ class ValidationService:
         invoice_date_valid_type = row.invoice_date is None or isinstance(
             row.invoice_date, str
         )
+        source_id_valid = (
+            isinstance(row.source_document_id, str)
+            and bool(row.source_document_id.strip())
+        )
+        source_name_valid = (
+            isinstance(row.source_document_name, str)
+            and bool(row.source_document_name.strip())
+        )
+
+        if not source_id_valid:
+            error(
+                "source_document_id_required",
+                "Mã chứng từ nguồn phải là chuỗi không rỗng.",
+                "source_document_id",
+            )
+        if not source_name_valid:
+            error(
+                "source_document_name_required",
+                "Tên chứng từ nguồn phải là chuỗi không rỗng.",
+                "source_document_name",
+            )
 
         if not cont_valid_type:
             error(
@@ -436,7 +467,7 @@ class ValidationService:
                 issue = ValidationIssue(
                     Severity.ERROR,
                     "invalid_version",
-                    "Khóa v nội bộ phải là số nguyên 2.",
+                    f"Khóa v nội bộ phải là số nguyên {SCHEMA_VERSION}.",
                     field="v",
                 )
                 return ValidationResult(

@@ -4,7 +4,7 @@
   "bang_ke_assistant_bat_path": "C:/Users/Admin/Desktop/test/khoanchi_agent_project/RPA_ChatGPT_Launcher/Mo_Tool_Bang_Ke.bat",
   "output_dir": "C:\\Users\\Admin\\Desktop\\test\\khoanchi_pm_project\\Output",
   "daily_workbook_path": "C:/Users/Admin/Desktop/test/khoanchi_pm_project/Output/Hàng ngày 2026.xlsx",
-  "bk_workbook_path": "C:/Users/Admin/Desktop/test/khoanchi_pm_project/Output/BK_TONG_HOP_TT_NOI_DIA_2026.xlsx",
+  "bk_workbook_path": "C:/Users/Admin/Desktop/test/khoanchi_pm_project/Output/BK_TONG_HOP_TT_NOI_DIA_2026_CHUAN_HIEN_TAI.xlsx",
   "payment_workbook_path": "C:/Users/Admin/Desktop/test/khoanchi_pm_project/Output/THANH_TOAN_NANG_HA_VS_DO.xlsm",
   "rpa_expense_bat_path": "C:/Users/Admin/Desktop/test/khoanchi_pm_project/Launcher/Chay_Flow4_Nhap_Khoan_Chi.bat"
 }

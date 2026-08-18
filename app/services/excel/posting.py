@@ -8,7 +8,7 @@ import json
 import re
 import unicodedata
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -50,6 +50,7 @@ from .models import (
     PostingPlan,
     PostingResolution,
     PostingResult,
+    PostingSourceGroup,
     ResolutionAction,
     RowCandidate,
     TargetCellKind,
@@ -253,11 +254,25 @@ class ExpensePostingService:
         # Working copy nằm cạnh BK để atomic replace không bao giờ cross-volume.
         self.backups = ExcelBackupService(self.backup_dir)
 
+    def _ordered_sheet_names(self, names: Iterable[str]) -> list[str]:
+        """Sắp sheet tháng theo năm/tháng để history và apply có thứ tự ổn định."""
+
+        def key(name: str) -> tuple[int, int, str]:
+            parsed = self.months.parse_target_sheet(name)
+            if parsed is None:
+                return (9999, 99, name)
+            month, year = parsed
+            return (year, month, name)
+
+        return sorted({str(name) for name in names}, key=key)
+
     def analyze(
         self,
         batch_id: int | None = None,
         sheet_name: str | None = None,
         repost_source_indices: Sequence[int] | None = None,
+        group_target_sheets: Mapping[str, str] | None = None,
+        split_document_ids: Sequence[str] | None = None,
         progress_callback: ProgressCallback = None,
     ) -> PostingPlan:
         target = ensure_supported_workbook(self.bk_path)
@@ -316,6 +331,7 @@ class ExpensePostingService:
                 selected = self._choose_sheet(sheet_name, candidates, groups, None)
                 items = self._items_from_groups(groups, repost_indices)
                 conflicts: list[PostingConflict] = []
+                source_groups: list[PostingSourceGroup] = []
                 if source_kind == "BANG_KE":
                     self._ensure_bang_ke_columns(workbook)
                     items, item_conflicts = self._analyze_bang_ke_items(
@@ -325,15 +341,38 @@ class ExpensePostingService:
                     )
                     conflicts.extend(item_conflicts)
                     selected = None
-                elif selected is not None:
-                    sheet_items, item_conflicts = self._analyze_items(
-                        workbook,
-                        selected,
-                        items,
-                        batch_hash=batch_hash,
+                else:
+                    source_groups = self._build_posting_source_groups(
+                        document_rows,
+                        sheet_names,
+                        group_target_sheets=group_target_sheets,
+                        legacy_sheet=selected,
+                        split_document_ids=set(split_document_ids or ()),
                     )
-                    items = sheet_items
-                    conflicts.extend(item_conflicts)
+                    target_by_source_index = {
+                        source_index: group.target_sheet
+                        for group in source_groups
+                        for source_index in group.source_item_indices
+                    }
+                    for item in items:
+                        targets = {
+                            target_by_source_index.get(source_index)
+                            for source_index in item.source_indices
+                        }
+                        if len(targets) != 1:
+                            raise ExpensePostingError(
+                                "Một khoản chi đang thuộc nhiều nhóm phân bổ sheet."
+                            )
+                        item.sheet_name = next(iter(targets))
+                    items, conflicts = self._analyze_assigned_items(
+                        workbook, items, batch_hash=batch_hash
+                    )
+                    assigned = {
+                        group.target_sheet
+                        for group in source_groups
+                        if group.target_sheet is not None
+                    }
+                    selected = next(iter(assigned)) if len(assigned) == 1 else None
             finally:
                 workbook.close()
 
@@ -359,6 +398,8 @@ class ExpensePostingService:
                 reconciliation_source_count=int(bundle["reconciliation_source_count"]),
                 confirmation_required=True,
                 source_kind=source_kind,
+                source_groups=source_groups,
+                split_document_ids=set(split_document_ids or ()),
                 target_sheets={
                     item.sheet_name for item in items if item.sheet_name is not None
                 },
@@ -381,7 +422,7 @@ class ExpensePostingService:
                 target_fingerprint_before=fingerprint,
                 total_items=len(document_rows),
                 conflict_count=len(conflicts),
-                sheet_name=selected,
+                sheet_name=", ".join(self._ordered_sheet_names(plan.target_sheets)) or selected,
             )
             return plan
         except Exception as exc:
@@ -418,6 +459,12 @@ class ExpensePostingService:
             )
         if plan.source_kind == "BANG_KE":
             return self._apply_bang_ke(
+                plan,
+                resolved,
+                progress_callback=progress_callback,
+            )
+        if plan.source_groups:
+            return self._apply_multi_sheet(
                 plan,
                 resolved,
                 progress_callback=progress_callback,
@@ -708,6 +755,12 @@ class ExpensePostingService:
         progress_callback: ProgressCallback = None,
     ) -> PostingPlan:
         try:
+            if plan.source_groups and plan.source_kind != "BANG_KE":
+                return self._refine_multi_sheet(
+                    plan,
+                    resolutions,
+                    progress_callback=progress_callback,
+                )
             return self._refine_plan(
                 plan,
                 resolutions,
@@ -956,6 +1009,77 @@ class ExpensePostingService:
             conflict_count=len(conflicts),
         )
         return refined
+
+    def _refine_multi_sheet(
+        self,
+        plan: PostingPlan,
+        resolutions: Mapping[str, Any] | Sequence[PostingResolution] | None,
+        *,
+        progress_callback: ProgressCallback = None,
+    ) -> PostingPlan:
+        resolved = resolution_map(resolutions)
+        self._check_batch_resolution(plan, resolved)
+        self.gateway.assert_unchanged(
+            plan.target_path, plan.target_fingerprint, label="File BK"
+        )
+        self._assert_source_members_unchanged(plan)
+        combined_items: list[PostingItem] = []
+        combined_conflicts: list[PostingConflict] = []
+        ordered_sheets = self._ordered_sheet_names(plan.target_sheets)
+        for position, sheet_name in enumerate(ordered_sheets, start=1):
+            _progress(
+                progress_callback,
+                f"Đang phân tích lại {sheet_name} ({position}/{len(ordered_sheets)})…",
+            )
+            indexes = [
+                index
+                for index, item in enumerate(plan.items)
+                if item.sheet_name == sheet_name
+            ]
+            local = copy.copy(plan)
+            local.items = [copy.deepcopy(plan.items[index]) for index in indexes]
+            local.conflicts = self._localized_conflicts(plan.conflicts, indexes)
+            local.selected_sheet = sheet_name
+            local.target_sheets = {sheet_name}
+            local.source_groups = []
+            local.confirmation_required = False
+            local.confirmation_done = True
+            refined = self._refine_plan(
+                local,
+                resolved,
+                progress_callback=progress_callback,
+            )
+            offset = len(combined_items)
+            for conflict in refined.conflicts:
+                if conflict.item_index is not None:
+                    conflict.item_index += offset
+                if "item_indexes" in conflict.details:
+                    conflict.details["item_indexes"] = [
+                        int(index) + offset
+                        for index in conflict.details["item_indexes"]
+                    ]
+            combined_items.extend(refined.items)
+            combined_conflicts.extend(refined.conflicts)
+        refined_plan = copy.copy(plan)
+        refined_plan.items = combined_items
+        refined_plan.conflicts = combined_conflicts
+        refined_plan.selected_sheet = (
+            next(iter(plan.target_sheets)) if len(plan.target_sheets) == 1 else None
+        )
+        refined_plan.target_sheets = {
+            item.sheet_name for item in combined_items if item.sheet_name is not None
+        }
+        self._update_run(
+            plan.run_id,
+            status=(
+                ExcelRunStatus.WAITING_USER
+                if combined_conflicts
+                else ExcelRunStatus.ANALYZING
+            ),
+            sheet_name=", ".join(sorted(refined_plan.target_sheets)) or None,
+            conflict_count=len(combined_conflicts),
+        )
+        return refined_plan
 
     @staticmethod
     def _bang_ke_item_key(item: PostingItem) -> tuple[str, str]:
@@ -1309,6 +1433,274 @@ class ExpensePostingService:
             if working_path is not None and working_path.exists():
                 working_path.unlink()
 
+    @staticmethod
+    def _localized_conflicts(
+        conflicts: Sequence[PostingConflict], indexes: Sequence[int]
+    ) -> list[PostingConflict]:
+        index_map = {global_index: local_index for local_index, global_index in enumerate(indexes)}
+        result: list[PostingConflict] = []
+        for conflict in conflicts:
+            if conflict.item_index is None or conflict.item_index not in index_map:
+                continue
+            item = copy.deepcopy(conflict)
+            item.item_index = index_map[int(conflict.item_index)]
+            if "item_indexes" in item.details:
+                item.details["item_indexes"] = [
+                    index_map[int(index)]
+                    for index in item.details["item_indexes"]
+                    if int(index) in index_map
+                ]
+            result.append(item)
+        return result
+
+    def _apply_multi_sheet(
+        self,
+        plan: PostingPlan,
+        resolved: Mapping[str, Any],
+        *,
+        progress_callback: ProgressCallback = None,
+    ) -> PostingResult:
+        self._check_batch_resolution(plan, resolved)
+        if any(item.sheet_name is None for item in plan.items):
+            raise ExpensePostingError("Chưa phân bổ đủ sheet cho mọi khoản chi.")
+        self.gateway.assert_unchanged(
+            plan.target_path, plan.target_fingerprint, label="File BK"
+        )
+        self._assert_source_members_unchanged(plan)
+        actions: list[dict[str, Any]] = []
+        history: list[dict[str, Any]] = []
+        workbook = self.gateway.load(plan.target_path, read_only=False)
+        try:
+            for sheet_name in self._ordered_sheet_names(plan.target_sheets):
+                if sheet_name not in workbook.sheetnames:
+                    raise ExpensePostingError(f"Không tìm thấy sheet {sheet_name}.")
+                indexes = [
+                    index
+                    for index, item in enumerate(plan.items)
+                    if item.sheet_name == sheet_name
+                ]
+                local_items = [copy.deepcopy(plan.items[index]) for index in indexes]
+                local_conflicts = self._localized_conflicts(plan.conflicts, indexes)
+                sheet_actions, sheet_history = self._resolve_apply_actions(
+                    workbook[sheet_name],
+                    local_items,
+                    local_conflicts,
+                    resolved,
+                    batch_hash=plan.batch_hash,
+                )
+                actions.extend(sheet_actions)
+                history.extend(sheet_history)
+        finally:
+            workbook.close()
+
+        write_actions = [
+            action
+            for action in actions
+            if action.get("amount_write")
+            or action.get("invoice_write")
+            or action.get("carrier_write")
+        ]
+        detail_actions = [
+            action
+            for action in actions
+            if action.get("carrier_group") in {"HP", "NAM"}
+            and action.get("status")
+            in {PostingItemStatus.POSTED, PostingItemStatus.ALREADY_EXISTS}
+        ]
+        already_actions = [
+            action
+            for action in actions
+            if action["status"] is PostingItemStatus.ALREADY_EXISTS
+        ]
+        skipped_actions = [
+            action
+            for action in actions
+            if action["status"]
+            in {
+                PostingItemStatus.USER_SKIPPED,
+                PostingItemStatus.NOT_MATCHED,
+                PostingItemStatus.UNRESOLVED,
+            }
+        ]
+        working_path: Path | None = None
+        backup_path: Path | None = None
+        after = plan.target_fingerprint
+        replaced = False
+        self._update_run(plan.run_id, status=ExcelRunStatus.APPLYING)
+        try:
+            detail_rows: list[dict[str, Any]] = []
+            update_meta: dict[str, tuple[int, datetime]] = {}
+            grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for action in write_actions:
+                grouped[str(action["sheet_name"])].append(action)
+            grouped_details: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for action in detail_actions:
+                grouped_details[str(action["sheet_name"])].append(action)
+            if write_actions or detail_actions:
+                with self.lock_service.acquire(plan.target_path):
+                    pass
+                self.gateway.assert_unchanged(
+                    plan.target_path, plan.target_fingerprint, label="File BK"
+                )
+                working_path = self.backups.create_working_copy(
+                    plan.target_path, run_id=plan.run_id
+                )
+                write_book = self.gateway.load(working_path, read_only=False)
+                try:
+                    for sheet_name, sheet_actions in grouped.items():
+                        _progress(
+                            progress_callback,
+                            f"Đang ghi {sheet_name} ({len(update_meta) + 1}/{len(grouped)})…",
+                        )
+                        worksheet = write_book[sheet_name]
+                        carried = self._write_carried_plan_rows(worksheet, sheet_actions)
+                        base = self._resolve_base_headers(worksheet)
+                        fee_columns = self._resolve_fee_columns(worksheet, base)
+                        invoice_columns = self._resolve_invoice_columns(base, fee_columns)
+                        carrier_columns = self._resolve_carrier_columns(base)
+                        update_column = self._ensure_update_column(worksheet)
+                        timestamp = self.clock().replace(tzinfo=None, microsecond=0)
+                        update_meta[sheet_name] = (update_column, timestamp)
+                        updated_rows: set[int] = set()
+                        for action in sheet_actions:
+                            fee = str(action["fee_selected"])
+                            row = int(action["target_row"])
+                            column = int(action["target_column"])
+                            if fee_columns.get(fee) != column:
+                                raise ExpensePostingError(
+                                    f"Cột phí {fee} trên {sheet_name} không còn khớp header."
+                                )
+                            if action.get("amount_write"):
+                                worksheet.cell(row, column).value = action["value_after"]
+                            if action.get("invoice_write"):
+                                invoice_column = int(action["invoice_target_column"])
+                                if invoice_columns.get(fee) != invoice_column:
+                                    raise ExpensePostingError(
+                                        f"Cột Số HĐ của phí {fee} trên {sheet_name} không còn khớp header."
+                                    )
+                                worksheet.cell(row, invoice_column).value = action[
+                                    "invoice_value_after"
+                                ]
+                            if action.get("carrier_write"):
+                                carrier_group = str(action["carrier_group"])
+                                carrier_column = int(action["carrier_target_column"])
+                                if carrier_columns.get(carrier_group) != carrier_column:
+                                    raise ExpensePostingError(
+                                        f"Cột bên vận tải {carrier_group} trên {sheet_name} không còn khớp header."
+                                    )
+                                worksheet.cell(row, carrier_column).value = action[
+                                    "carrier_value_after"
+                                ]
+                            updated_rows.add(row)
+                        for row in updated_rows:
+                            cell = worksheet.cell(row, update_column)
+                            cell.value = timestamp
+                            cell.number_format = UPDATE_NUMBER_FORMAT
+                        if carried:
+                            from .payment_sync import find_summary_start, refresh_bk_summary_formulas
+
+                            if find_summary_start(worksheet) is not None:
+                                refresh_bk_summary_formulas(worksheet)
+                    for sheet_name, sheet_detail_actions in grouped_details.items():
+                        timestamp = update_meta.get(
+                            sheet_name,
+                            (0, self.clock().replace(tzinfo=None, microsecond=0)),
+                        )[1]
+                        detail_rows.extend(
+                            detail_rows_from_actions(
+                                sheet_detail_actions,
+                                batch_id=plan.batch_id,
+                                batch_hash=plan.batch_hash,
+                                sheet_name=sheet_name,
+                                updated_at=timestamp,
+                            )
+                        )
+                    upsert_bk_detail_rows(write_book, detail_rows)
+                    self.gateway.save(write_book, working_path)
+                finally:
+                    write_book.close()
+                for sheet_name in set(grouped) | set(grouped_details):
+                    sheet_actions = grouped.get(sheet_name, [])
+                    update_column, timestamp = update_meta.get(
+                        sheet_name,
+                        (1, self.clock().replace(tzinfo=None, microsecond=0)),
+                    )
+                    self._verify_posting(
+                        working_path,
+                        sheet_name,
+                        sheet_actions,
+                        detail_rows=[
+                            row
+                            for row in detail_rows
+                            if str(row.get("sheet_name") or "") == sheet_name
+                        ],
+                        update_column=update_column,
+                        update_timestamp=timestamp,
+                    )
+                backup_path = self.backups.create_backup(plan.target_path)
+                after = self.gateway.atomic_replace(
+                    working_path,
+                    plan.target_path,
+                    expected=plan.target_fingerprint,
+                )
+                working_path = None
+                replaced = True
+                self._record_carry_forwards(plan, write_actions)
+
+            self._record_history(plan, history)
+            self._mark_completed_reconciliations(plan)
+            posted_count = sum(len(action["source_indices"]) for action in write_actions)
+            skipped_count = sum(len(action["source_indices"]) for action in skipped_actions)
+            already_count = sum(len(action["source_indices"]) for action in already_actions)
+            target_sheets = tuple(self._ordered_sheet_names(plan.target_sheets))
+            result = PostingResult(
+                status=(
+                    ExcelRunStatus.SUCCEEDED
+                    if write_actions or detail_actions
+                    else ExcelRunStatus.NO_CHANGES
+                ),
+                target_path=plan.target_path,
+                sheet_name=", ".join(target_sheets) or None,
+                target_sheets=target_sheets,
+                posted_source_items=posted_count,
+                written_cells=sum(bool(action.get("amount_write")) for action in write_actions),
+                invoice_written_cells=sum(bool(action.get("invoice_write")) for action in write_actions),
+                carrier_written_cells=sum(bool(action.get("carrier_write")) for action in write_actions),
+                skipped_source_items=skipped_count,
+                already_existing_items=already_count,
+                conflict_count=len(plan.conflicts),
+                backup_path=backup_path,
+                fingerprint_before=plan.target_fingerprint,
+                fingerprint_after=after,
+                run_id=plan.run_id,
+                message=(
+                    f"Đã nhập {posted_count} khoản vào {len(target_sheets)} sheet BK."
+                    if write_actions or detail_actions
+                    else "Không có ô cần ghi."
+                ),
+            )
+            self._finish_result(result)
+            return result
+        except Exception as exc:
+            if replaced and backup_path is not None:
+                try:
+                    rollback = self.backups.create_working_copy(
+                        backup_path, run_id=f"{plan.run_id}-rollback"
+                    )
+                    try:
+                        self.gateway.atomic_replace(
+                            rollback, plan.target_path, expected=after
+                        )
+                    finally:
+                        rollback.unlink(missing_ok=True)
+                except Exception as rollback_error:
+                    exc.add_note(f"Khôi phục BK thất bại: {rollback_error}")
+            self._finish_failed(plan.run_id, exc)
+            raise
+        finally:
+            if working_path is not None and working_path.exists():
+                working_path.unlink()
+
     def _validate_json(
         self, raw: bytes, *, allow_negative: bool = False
     ) -> list[dict[str, Any]]:
@@ -1351,11 +1743,14 @@ class ExpensePostingService:
                 raise ExpensePostingError(f"Số tiền dòng {index + 1} không hợp lệ.")
             payload = {
                     "source_item_index": index,
+                    "source_document_id": row.source_document_id,
+                    "source_document_name": row.source_document_name,
                     "container": normalize_container(container),
                     "bl": normalize_bl(bl),
                     "fee": fee.strip().upper(),
                     "rule": rule.strip().upper() if isinstance(rule, str) else None,
                     "invoice_no": invoice_no,
+                    "invoice_date": row.invoice_date,
                     "carrier": carrier,
                     "amount": amount,
             }
@@ -1604,7 +1999,10 @@ class ExpensePostingService:
             self.run_repository.finish_run(
                 plan.run_id,
                 status=ExcelRunStatus.CANCELLED,
-                sheet_name=plan.selected_sheet,
+                sheet_name=(
+                    ", ".join(self._ordered_sheet_names(plan.target_sheets))
+                    or plan.selected_sheet
+                ),
                 total_items=plan.source_item_count,
                 changed_items=0,
                 skipped_items=0,
@@ -1642,6 +2040,214 @@ class ExpensePostingService:
         if row is None or row["reconciliation_group_id"] is None:
             return None
         return int(row["reconciliation_group_id"])
+
+    def _build_posting_source_groups(
+        self,
+        rows: Sequence[dict[str, Any]],
+        sheet_names: Sequence[str],
+        *,
+        group_target_sheets: Mapping[str, str] | None,
+        legacy_sheet: str | None,
+        split_document_ids: set[str],
+    ) -> list[PostingSourceGroup]:
+        """Tạo các đơn vị phân bổ theo chứng từ, tách theo HĐ khi khác tháng."""
+
+        available = set(sheet_names)
+        grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        document_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        reconciliation_rows: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            reconciliation_group_id = row.get("reconciliation_group_id")
+            if reconciliation_group_id is not None:
+                reconciliation_rows[int(reconciliation_group_id)].append(row)
+            else:
+                document_rows[str(row["source_document_id"])].append(row)
+
+        unknown_split_documents = split_document_ids.difference(document_rows)
+        if unknown_split_documents:
+            raise ExpensePostingError(
+                "Danh sách tài liệu cần tách theo hóa đơn không còn tương thích."
+            )
+
+        for document_id, members in document_rows.items():
+            periods = {
+                str(value)[:7]
+                for value in (row.get("invoice_date") for row in members)
+                if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)
+            }
+            invoice_keys = {
+                _invoice_key(row.get("invoice_no"))
+                for row in members
+                if _invoice_key(row.get("invoice_no"))
+            }
+            split_by_invoice = len(periods) > 1 or (
+                document_id in split_document_ids and len(invoice_keys) > 1
+            )
+            if split_by_invoice:
+                for row in members:
+                    invoice_key = _invoice_key(row.get("invoice_no")) or "__NO_INVOICE__"
+                    grouped[(document_id, invoice_key)].append(row)
+            else:
+                grouped[(document_id, "")].extend(members)
+
+        result: list[PostingSourceGroup] = []
+        for (document_id, invoice_key), members in grouped.items():
+            invoice_values = _unique_invoice_values(
+                [row.get("invoice_no") for row in members]
+            )
+            invoice_no = (
+                invoice_values[0]
+                if len(invoice_values) == 1
+                else ", ".join(invoice_values) or None
+            )
+            group_id = _stable_id("posting-source", document_id, invoice_key)
+            result.append(
+                self._posting_source_group(
+                    group_id,
+                    members,
+                    available,
+                    invoice_no=invoice_no,
+                    target_locked=False,
+                    locked_target=None,
+                    group_target_sheets=group_target_sheets,
+                    legacy_sheet=legacy_sheet,
+                    can_split_by_invoice=(not invoice_key and len(invoice_values) > 1),
+                )
+            )
+
+        for reconciliation_group_id, members in reconciliation_rows.items():
+            reconciliation = (
+                self.sea_freight_repository.get_group(reconciliation_group_id)
+                if self.sea_freight_repository is not None
+                else None
+            )
+            if reconciliation is None:
+                raise ExpensePostingError(
+                    f"Không tìm thấy hồ sơ đối soát #{reconciliation_group_id}."
+                )
+            group_id = f"SEA_RECON_{reconciliation_group_id}_R{reconciliation.revision_no}"
+            result.append(
+                self._posting_source_group(
+                    group_id,
+                    members,
+                    available,
+                    invoice_no=", ".join(
+                        _unique_invoice_values(
+                            [row.get("invoice_no") for row in members]
+                        )
+                    ) or None,
+                    target_locked=True,
+                    locked_target=reconciliation.bk_sheet,
+                    group_target_sheets=group_target_sheets,
+                    legacy_sheet=None,
+                    reconciliation_group_id=reconciliation_group_id,
+                    can_split_by_invoice=False,
+                )
+            )
+
+        assigned_indices = sorted(
+            source_index
+            for group in result
+            for source_index in group.source_item_indices
+        )
+        expected_indices = sorted(int(row["source_item_index"]) for row in rows)
+        if assigned_indices != expected_indices:
+            raise ExpensePostingError(
+                "Không thể phân bổ duy nhất mọi khoản chi vào nhóm chứng từ."
+            )
+        known_group_ids = {group.group_id for group in result}
+        unknown = set(group_target_sheets or {}).difference(known_group_ids)
+        if unknown:
+            raise ExpensePostingError("Ánh xạ nhóm chứng từ không còn tương thích.")
+        return result
+
+    def _posting_source_group(
+        self,
+        group_id: str,
+        members: Sequence[dict[str, Any]],
+        available: set[str],
+        *,
+        invoice_no: str | None,
+        target_locked: bool,
+        locked_target: str | None,
+        group_target_sheets: Mapping[str, str] | None,
+        legacy_sheet: str | None,
+        reconciliation_group_id: int | None = None,
+        can_split_by_invoice: bool = False,
+    ) -> PostingSourceGroup:
+        dates = sorted(
+            {
+                str(row["invoice_date"])
+                for row in members
+                if row.get("invoice_date") not in (None, "")
+            }
+        )
+        periods = {
+            (int(value[5:7]), int(value[:4]))
+            for value in dates
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)
+        }
+        suggested = None
+        if len(periods) == 1:
+            month, year = next(iter(periods))
+            candidate = f"T{month:02d} {year % 100:02d}"
+            if candidate in available:
+                suggested = candidate
+        requested = (group_target_sheets or {}).get(group_id)
+        target = locked_target if target_locked else requested or legacy_sheet
+        if target_locked and requested not in (None, locked_target):
+            raise ExpensePostingError(
+                f"Hồ sơ cước biển {group_id} bị khóa tại sheet {locked_target}."
+            )
+        if target is not None and target not in available:
+            raise ExpensePostingError(f"Sheet {target!r} không tồn tại trong BK.")
+        return PostingSourceGroup(
+            group_id=group_id,
+            source_document_id=str(members[0]["source_document_id"]),
+            source_document_name=str(members[0]["source_document_name"]),
+            invoice_no=invoice_no,
+            source_item_indices=[int(row["source_item_index"]) for row in members],
+            invoice_dates=dates,
+            suggested_sheet=suggested,
+            target_sheet=target,
+            reconciliation_group_id=reconciliation_group_id,
+            target_locked=target_locked,
+            can_split_by_invoice=can_split_by_invoice,
+        )
+
+    def _analyze_assigned_items(
+        self,
+        workbook: Any,
+        items: list[PostingItem],
+        *,
+        batch_hash: str,
+    ) -> tuple[list[PostingItem], list[PostingConflict]]:
+        assigned: dict[str, list[PostingItem]] = defaultdict(list)
+        unassigned: list[PostingItem] = []
+        for item in items:
+            if item.sheet_name is None:
+                unassigned.append(item)
+            else:
+                assigned[item.sheet_name].append(item)
+        analyzed: list[PostingItem] = []
+        conflicts: list[PostingConflict] = []
+        for sheet_name, sheet_items in assigned.items():
+            offset = len(analyzed)
+            sheet_items, sheet_conflicts = self._analyze_items(
+                workbook, sheet_name, sheet_items, batch_hash=batch_hash
+            )
+            for conflict in sheet_conflicts:
+                if conflict.item_index is not None:
+                    conflict.item_index += offset
+                if "item_indexes" in conflict.details:
+                    conflict.details["item_indexes"] = [
+                        int(index) + offset
+                        for index in conflict.details["item_indexes"]
+                    ]
+            analyzed.extend(sheet_items)
+            conflicts.extend(sheet_conflicts)
+        analyzed.extend(unassigned)
+        return analyzed, conflicts
 
     @staticmethod
     def _items_from_groups(
@@ -2888,6 +3494,16 @@ class ExpensePostingService:
         details: Mapping[str, Any] | None = None,
     ) -> PostingConflict:
         conflict_details = dict(details or {})
+        if item.source_items:
+            source = item.source_items[0]
+            conflict_details.setdefault(
+                "source_document_id", source.get("source_document_id")
+            )
+            conflict_details.setdefault(
+                "source_document_name", source.get("source_document_name")
+            )
+            conflict_details.setdefault("invoice_no", source.get("invoice_no"))
+            conflict_details.setdefault("target_sheet", item.sheet_name)
         invoice_scope = conflict_details.get("scope") == "invoice"
         carrier_scope = conflict_details.get("scope") == "carrier"
         target_column = (
@@ -2918,6 +3534,7 @@ class ExpensePostingService:
                 item.source_indices,
                 item.container,
                 item.selected_fee,
+                item.sheet_name,
                 target_cell,
             ),
             conflict_type=conflict_type,

@@ -30,11 +30,11 @@ class Severity(str, Enum):
 
 @dataclass(slots=True)
 class DataRow:
-    """Một dòng khoản chi dùng chung cho schema v1 và v2.
+    """Một dòng khoản chi dùng chung cho schema v1, v2 và v3.
 
-    JSON chính thức là object schema v2. Mảng
-    ``[cont, bl, fee, rule, invoice_no, carrier, amount]`` chỉ còn là adapter
-    tương thích v1. Thuộc tính ``amount`` vẫn giữ vị trí cũ trong dataclass để
+    JSON ghi mới là object schema v3. Mảng
+    ``[cont, bl, fee, rule, invoice_no, carrier, amount]`` và object 13 khóa
+    chỉ còn là adapter tương thích v1/v2. Thuộc tính ``amount`` vẫn giữ vị trí cũ trong dataclass để
     mã Python dùng năm đối số vị trí không bị hiểu sai.
     """
 
@@ -52,6 +52,8 @@ class DataRow:
         "invoice_container_count",
         "container_count_basis",
         "invoice_date",
+        "source_document_id",
+        "source_document_name",
     )
 
     cont: str | None
@@ -67,6 +69,8 @@ class DataRow:
     invoice_container_count: int | None = None
     container_count_basis: str = "UNKNOWN"
     invoice_date: str | None = None
+    source_document_id: str = "MANUAL"
+    source_document_name: str = "Dòng thêm thủ công"
 
     @classmethod
     def from_sequence(cls, value: Sequence[Any]) -> "DataRow":
@@ -111,10 +115,14 @@ class DataRow:
             invoice_container_count=value.get("invoice_container_count"),
             container_count_basis=value.get("container_count_basis", "UNKNOWN"),
             invoice_date=value.get("invoice_date"),
+            source_document_id=value.get("source_document_id", "MANUAL"),
+            source_document_name=value.get("source_document_name", "Dòng thêm thủ công"),
         )
 
     def to_object(self) -> dict[str, Any]:
         return {
+            "source_document_id": self.source_document_id,
+            "source_document_name": self.source_document_name,
             "container": self.cont,
             "bl": self.bl,
             "vessel_voyage_raw": self.vessel_voyage_raw,

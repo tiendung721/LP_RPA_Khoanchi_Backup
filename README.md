@@ -21,15 +21,20 @@ Bước 1 hoặc chọn JSON thủ công.
   xem JSON thô, lưu và xác nhận.
 - Bước 2 hiển thị trạng thái file và thời điểm lưu gần nhất theo định dạng
   `HH:mm ngày dd/MM/yyyy`.
-- Bước 3 đồng bộ các SQT mới từ workbook Hàng ngày và nhập khoản chi của
-  file JSON hiện hành đã xác nhận vào workbook BK.
-- Khi nhập khoản chi vào một sheet tháng, ứng dụng đối chiếu sheet đó và hai
+- Bước 3 cho phép chọn nhiều sheet tháng trong cùng một tác vụ khi đồng bộ
+  Hàng ngày → BK, nhập khoản chi → BK và BK → Thanh toán. Một tháng lỗi sẽ
+  chặn toàn bộ tác vụ; các workbook gốc chỉ được thay sau khi mọi tháng đã
+  ghi và kiểm tra thành công.
+- Khi nhập khoản chi, ứng dụng phân nhóm theo chứng từ nguồn/hóa đơn, đề xuất
+  sheet từ ngày hóa đơn và để người dùng quyết định sheet đích cuối cùng.
+  Chỉ các sheet BK đã tồn tại được chọn cho luồng này.
+- Với từng sheet tháng đích, ứng dụng đối chiếu sheet đó và hai
   tháng liền trước. Dòng kế hoạch tháng cũ được mang sang đúng một lần, chỉ giữ
   12 trường thông tin lô hàng; phí và hóa đơn mới tiếp tục ghi trên cùng dòng.
 - Container xuất hiện ở nhiều tháng/SQT phải được chọn đúng sheet và dòng nguồn.
   Nhiều dòng JSON cùng nhắm một ô phí không được cộng; người dùng chọn đúng một
   dòng để ghi, còn ô đã có giá trị chỉ cho giữ nguyên, ghi đè hoặc bỏ qua.
-- Bước 4 cho chọn sheet BK, tổng hợp các dòng theo SQT, chọn nhiều SQT và gọi
+- Bước 4 (RPA) vẫn chỉ cho chọn một sheet BK, tổng hợp các dòng theo SQT, chọn nhiều SQT và gọi
   BAT riêng để chạy PAD nhập khoản chi lên phần mềm quyết toán. Dòng `Đã nhập`
   vẫn được phép chạy lại.
 - Mọi lần ghi BK đều dùng backup, working copy, kiểm tra lại và thay file
@@ -42,6 +47,9 @@ Bước 1 hoặc chọn JSON thủ công.
 - Nếu không tìm thấy tàu/chuyến trong BK, ứng dụng không tạo hồ sơ rỗng mà hiển
   thị tối đa năm gợi ý gần đúng kèm số cont. Người dùng tự sửa thông tin rồi chủ
   động đối soát lại; gợi ý không bao giờ được tự áp dụng.
+- Khi bắt đầu đối soát, người dùng có thể chọn nhiều hóa đơn cước biển cùng
+  tàu/chuyến từ nhiều PDF để đóng góp vào một hồ sơ. Mỗi hóa đơn vẫn giữ tên
+  chứng từ, số HĐ, ngày, số cont và số tiền riêng để truy vết.
 - Cửa sổ đối soát hiển thị đồng thời danh sách HĐ, cont tìm được trong BK và
   bảng kết quả dự kiến. HĐ có thể thêm, sửa, xóa và lưu trực tiếp; hồ sơ chưa
   hoàn tất được giữ qua các lần khởi động mà không cần trung tâm chờ riêng.
@@ -160,13 +168,15 @@ Các khóa khác trong `Preferences` được giữ nguyên.
 
 ## Hợp đồng JSON
 
-Schema ghi công khai hiện tại là v2:
+Schema ghi công khai hiện tại là v3:
 
 ```json
 {
-  "v": 2,
+  "v": 3,
   "d": [
     {
+      "source_document_id": "DOC_001",
+      "source_document_name": "Hoa_don_A.pdf",
       "container": null,
       "bl": "OOLU1234567890",
       "vessel_voyage_raw": "PROSPER 2625S",
@@ -185,12 +195,14 @@ Schema ghi công khai hiện tại là v2:
 }
 ```
 
-Root chỉ có `v` và `d`; mỗi object v2 phải có đủ các khóa trên, dữ liệu thiếu
-dùng `null`. `voyage_no` luôn là chuỗi; `invoice_container_count` là số nguyên
-dương hoặc `null`; căn cứ nhận `EXPLICIT`, `CALCULATED`, `UNKNOWN`.
+Root chỉ có `v` và `d`; mỗi object v3 phải có đủ đúng 15 khóa theo thứ tự trên.
+Hai trường nguồn phải là chuỗi không rỗng; dữ liệu nghiệp vụ thiếu dùng `null`.
+`voyage_no` luôn là chuỗi; `invoice_container_count` là số nguyên dương hoặc
+`null`; căn cứ nhận `EXPLICIT`, `CALCULATED`, `UNKNOWN`.
 
-Schema v1 mảng 7 vị trí vẫn được đọc để tương thích. Sau khi user lưu/chỉnh sửa,
-phần mềm luôn serialize thành v2.
+Schema v1 mảng 7 vị trí và schema v2 object 13 khóa vẫn được đọc để tương thích.
+Dữ liệu cũ được gắn nguồn legacy theo batch. Sau khi user lưu/chỉnh sửa, phần
+mềm luôn serialize thành v3; các file JSON lịch sử không bị sửa hàng loạt.
 
 Không dùng các root `metadata`, `du_lieu_boc_tach`, `canh_bao` hoặc
 `raw_data`.
@@ -199,6 +211,11 @@ Khi đối soát, phần mềm tự đọc sheet BK theo tháng đã chọn, ki�
 bỏ trùng container và lưu snapshot. Số cont sai/trùng được báo bằng tiếng Việt.
 Trước khi xác nhận và trước khi ghi dữ liệu, BK được đọc lại; nếu workbook hoặc
 danh sách container đổi, hồ sơ bị khóa và yêu cầu người dùng kiểm tra lại.
+
+Hai bản instructions Custom GPT tương ứng nằm tại
+`gpt_custom_instructions_chi_tiet.txt` và `gpt_custom_instructions_ngan.txt`;
+bản ngắn được giữ dưới 8.000 ký tự. Chỉ cài instructions v3 sau khi ứng dụng đã
+được nâng cấp hỗ trợ v3, hoặc phát hành đồng thời cả hai.
 
 ## Vòng đời file Output
 
@@ -280,9 +297,10 @@ trong Cài đặt đúng với thư mục đang được theo dõi. Các hậu t
 
 ### JSON sai schema
 
-File phải có đúng root `{v, d}` và tuân theo schema v2 object hoặc schema v1
-mảng 7 vị trí tương thích. Bước 2 hiển thị lỗi cấu trúc và khóa xem/sửa cho đến
-khi có file mới đọc được.
+File phải có đúng root `{v, d}` và tuân theo schema v3 object 15 khóa; schema
+v2 object 13 khóa và schema v1 mảng 7 vị trí chỉ được đọc theo chế độ tương
+thích. Bước 2 hiển thị lỗi cấu trúc và khóa xem/sửa cho đến khi có file mới đọc
+được.
 
 ### Không có quyền ghi
 

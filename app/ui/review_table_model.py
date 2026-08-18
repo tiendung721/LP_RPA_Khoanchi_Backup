@@ -61,7 +61,7 @@ except ImportError:
             ("GV", "Gộp các dòng phù hợp rồi lấy tiền cuối cùng"),
         ]
     )
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 3
 
 
 class RowStatus(str, Enum):
@@ -81,7 +81,7 @@ STATUS_LABELS: Final[dict[RowStatus, str]] = {
 
 @dataclass(slots=True)
 class ReviewRow:
-    """Biểu diễn nội bộ của một dòng hóa đơn schema v2."""
+    """Biểu diễn nội bộ của một dòng hóa đơn schema v3."""
 
     cont: Any = None
     bl: Any = None
@@ -96,6 +96,8 @@ class ReviewRow:
     invoice_container_count: Any = None
     container_count_basis: Any = "UNKNOWN"
     invoice_date: Any = None
+    source_document_id: Any = "MANUAL"
+    source_document_name: Any = "Dòng thêm thủ công"
     runtime_id: str = field(default_factory=lambda: uuid4().hex)
 
     def as_array(self) -> list[Any]:
@@ -111,6 +113,8 @@ class ReviewRow:
 
     def to_object(self) -> dict[str, Any]:
         return {
+            "source_document_id": self.source_document_id,
+            "source_document_name": self.source_document_name,
             "container": self.cont,
             "bl": self.bl,
             "vessel_voyage_raw": self.vessel_voyage_raw,
@@ -146,6 +150,12 @@ class ReviewRow:
                 value, "container_count_basis", default="UNKNOWN"
             ),
             invoice_date=_mapping_value(value, "invoice_date"),
+            source_document_id=_mapping_value(
+                value, "source_document_id", default="MANUAL"
+            ),
+            source_document_name=_mapping_value(
+                value, "source_document_name", default="Dòng thêm thủ công"
+            ),
             runtime_id=runtime_id or uuid4().hex,
         )
 
@@ -248,6 +258,10 @@ def coerce_review_row(value: Any) -> ReviewRow:
                 "invoice_container_count": getattr(value, "invoice_container_count", None),
                 "container_count_basis": getattr(value, "container_count_basis", "UNKNOWN"),
                 "invoice_date": getattr(value, "invoice_date", None),
+                "source_document_id": getattr(value, "source_document_id", "MANUAL"),
+                "source_document_name": getattr(
+                    value, "source_document_name", "Dòng thêm thủ công"
+                ),
             }
         )
     raise TypeError(f"Không thể chuyển kiểu {type(value).__name__} thành dòng dữ liệu.")
@@ -258,6 +272,11 @@ def validate_row(row: ReviewRow, *, allow_negative: bool = False) -> RowValidati
 
     errors: list[str] = []
     warnings: list[str] = []
+
+    if not isinstance(row.source_document_id, str) or not row.source_document_id.strip():
+        errors.append("Mã chứng từ nguồn phải là chuỗi không rỗng.")
+    if not isinstance(row.source_document_name, str) or not row.source_document_name.strip():
+        errors.append("Tên chứng từ nguồn phải là chuỗi không rỗng.")
 
     if row.cont is not None and not isinstance(row.cont, str):
         errors.append("Container phải là chuỗi hoặc null.")
@@ -883,6 +902,7 @@ class ReviewFilterProxyModel(QSortFilterProxyModel):
         self._search_text = ""
         self._fee = ""
         self._status = ""
+        self._source_document_id = ""
         self.setDynamicSortFilter(True)
         self.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
@@ -910,11 +930,17 @@ class ReviewFilterProxyModel(QSortFilterProxyModel):
             self._status = labels.get(normalized, normalized)
         self._end_filter_update(modern)
 
+    def set_document_filter(self, source_document_id: str | None) -> None:
+        modern = self._begin_filter_update()
+        self._source_document_id = (source_document_id or "").strip()
+        self._end_filter_update(modern)
+
     def clear_filters(self) -> None:
         modern = self._begin_filter_update()
         self._search_text = ""
         self._fee = ""
         self._status = ""
+        self._source_document_id = ""
         self._end_filter_update(modern)
 
     def _begin_filter_update(self) -> bool:
@@ -969,6 +995,10 @@ class ReviewFilterProxyModel(QSortFilterProxyModel):
                 Qt.ItemDataRole.UserRole + 1
             )
             if str(status).casefold() != self._status:
+                return False
+        if self._source_document_id:
+            row = getattr(model, "row_at", lambda _index: None)(source_row)
+            if row is None or row.source_document_id != self._source_document_id:
                 return False
         return True
 

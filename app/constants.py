@@ -8,8 +8,9 @@ from typing import Final
 APP_NAME: Final = "Trợ lý Dữ liệu Quyết toán"
 APP_VENDOR: Final = "Kikai"
 APP_SLUG: Final = "TroLyDuLieuQuyetToan"
-SCHEMA_VERSION: Final = 2
 LEGACY_SCHEMA_VERSION: Final = 1
+OBJECT_SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 
 FEE_CATALOG = MappingProxyType(
     {
@@ -91,4 +92,4 @@ APP_STATE_MAIN_WINDOW_GEOMETRY: Final = "main_window_geometry"
 APP_STATE_MAIN_WINDOW_STATE: Final = "main_window_state"
 APP_STATE_LAST_PAGE: Final = "last_page"
 
-SQLITE_SCHEMA_VERSION: Final = 15
+SQLITE_SCHEMA_VERSION: Final = 16

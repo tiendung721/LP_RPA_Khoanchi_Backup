@@ -41,6 +41,7 @@ from .models import (
     ExcelRunStatus,
     PaymentSyncConflict,
     PaymentSyncItem,
+    PaymentSyncBatchPlan,
     PaymentSyncPlan,
     PaymentSyncResult,
     PaymentTargetPlan,
@@ -3154,9 +3155,21 @@ class PaymentSyncService:
     def analyze(
         self,
         *,
-        source_sheet_name: str,
+        source_sheet_name: str | None = None,
+        source_sheet_names: Sequence[str] | None = None,
         progress_callback: ProgressCallback = None,
-    ) -> PaymentSyncPlan:
+    ) -> PaymentSyncPlan | PaymentSyncBatchPlan:
+        requested = list(dict.fromkeys(source_sheet_names or ()))
+        if source_sheet_name is not None and source_sheet_name not in requested:
+            requested.append(source_sheet_name)
+        if len(requested) > 1:
+            return self._analyze_batch(
+                requested, progress_callback=progress_callback
+            )
+        if requested:
+            source_sheet_name = requested[0]
+        if source_sheet_name is None:
+            raise PaymentSyncError("Chưa chọn sheet BK nguồn.")
         source = ensure_supported_workbook(self.bk_path)
         target = ensure_supported_workbook(self.payment_path)
         if not source.is_file():
@@ -3279,14 +3292,185 @@ class PaymentSyncService:
             if target_book is not None:
                 target_book.close()
 
+    def _analyze_batch(
+        self,
+        source_sheet_names: Sequence[str],
+        *,
+        progress_callback: ProgressCallback = None,
+    ) -> PaymentSyncBatchPlan:
+        source = ensure_supported_workbook(self.bk_path)
+        target = ensure_supported_workbook(self.payment_path)
+        if not source.is_file() or not target.is_file():
+            raise PaymentSyncError("Không tìm thấy file BK hoặc file Thanh toán.")
+        if source.resolve() == target.resolve():
+            raise PaymentSyncError("File BK và file Thanh toán không được trùng nhau.")
+        self.stability_checker.wait(source)
+        self.stability_checker.wait(target)
+        self.lock_service.ensure_readable(source)
+        self.lock_service.ensure_readable(target)
+        source_fp = self.gateway.fingerprint(source)
+        target_fp = self.gateway.fingerprint(target)
+        run_id = self._create_run(source, target, source_fp, target_fp)
+        source_book = target_book = None
+        try:
+            source_book = self.gateway.load(source, read_only=False)
+            target_book = self.gateway.load(target, read_only=False)
+            missing = [name for name in source_sheet_names if name not in source_book.sheetnames]
+            if missing:
+                raise PaymentSyncError(
+                    f"Không tìm thấy sheet BK: {', '.join(missing)}."
+                )
+            def source_order(name: str) -> tuple[int, int, str]:
+                parsed = self.months.parse_target_sheet(name)
+                if parsed is None:
+                    return (9999, 99, name)
+                month, year = parsed
+                return (year, month, name)
+
+            ordered_source_names = sorted(
+                dict.fromkeys(source_sheet_names), key=source_order
+            )
+            normalization = normalize_bk_workbook(
+                source_book, month_service=self.months
+            )
+            month_plans: dict[str, PaymentSyncPlan] = {}
+            total = len(ordered_source_names)
+            for position, current_source in enumerate(ordered_source_names, start=1):
+                parsed = self.months.parse_target_sheet(current_source)
+                if parsed is None:
+                    raise PaymentSyncError(
+                        f"Sheet BK {current_source} không có dạng TMM YY."
+                    )
+                month, year = parsed
+                _progress(
+                    progress_callback,
+                    f"Đang phân tích {current_source} ({position}/{total})…",
+                )
+                items_by_target, item_errors = _source_target_items(
+                    source_book[current_source],
+                    normalization_issues=normalization.issues,
+                )
+                targets: dict[str, PaymentTargetPlan] = {}
+                for target_type in ("HP", "NAM"):
+                    profile = PAYMENT_PROFILES[target_type]
+                    target_sheet_name = self.months.find_payment_sheet(
+                        target_book.sheetnames, month, year, target_type
+                    )
+                    sheet_to_create = target_sheet_name is None
+                    template_sheet = None
+                    if sheet_to_create:
+                        target_sheet_name = self.months.payment_target_name(
+                            month, year, target_type
+                        )
+                        template_sheet = self.months.nearest_previous_payment_template(
+                            target_book.sheetnames, month, year, target_type
+                        )
+                        if template_sheet is None:
+                            raise PaymentSyncError(
+                                f"Không tìm thấy sheet {target_type} mẫu cho {current_source}."
+                            )
+                        _copy_profile_sheet(
+                            target_book,
+                            month_service=self.months,
+                            profile=profile,
+                            month=month,
+                            year=year,
+                            target_name=target_sheet_name,
+                            template_name=template_sheet,
+                        )
+                    target_items = items_by_target[target_type]
+                    conflicts = _analyze_profile_target(
+                        target_book[target_sheet_name],
+                        profile,
+                        target_items,
+                        item_errors,
+                    )
+                    targets[target_type] = PaymentTargetPlan(
+                        target_type=target_type,
+                        sheet_name=target_sheet_name,
+                        items=target_items,
+                        conflicts=conflicts,
+                        sheet_to_create=sheet_to_create,
+                        template_sheet=template_sheet,
+                    )
+                month_plans[current_source] = PaymentSyncPlan(
+                    source_path=source,
+                    target_path=target,
+                    source_fingerprint=source_fp,
+                    target_fingerprint=target_fp,
+                    source_sheet=current_source,
+                    targets=targets,
+                    normalization_required=normalization.changed,
+                    normalization_sheet_count=len(normalization.changed_sheets),
+                    source_vba_present=_package_has_vba(source),
+                    target_vba_present=_package_has_vba(target),
+                    run_id=run_id,
+                )
+            plan = PaymentSyncBatchPlan(
+                source_path=source,
+                target_path=target,
+                source_fingerprint=source_fp,
+                target_fingerprint=target_fp,
+                month_plans=month_plans,
+                normalization_required=normalization.changed,
+                normalization_sheet_count=len(normalization.changed_sheets),
+                source_vba_present=_package_has_vba(source),
+                target_vba_present=_package_has_vba(target),
+                run_id=run_id,
+            )
+            self._update_run(
+                run_id,
+                status=(
+                    ExcelRunStatus.WAITING_USER
+                    if plan.requires_user_input
+                    else ExcelRunStatus.ANALYZING
+                ),
+                sheet_name=plan.selected_sheet,
+                total_items=len(plan.items),
+                changed_items=plan.update_count + plan.new_count,
+                conflict_count=plan.conflict_count,
+            )
+            return plan
+        except Exception as exc:
+            self._finish_failed(run_id, exc)
+            raise
+        finally:
+            if source_book is not None:
+                source_book.close()
+            if target_book is not None:
+                target_book.close()
+
     def refine(
         self,
-        plan: PaymentSyncPlan,
+        plan: PaymentSyncPlan | PaymentSyncBatchPlan,
         resolutions: Mapping[str, Any] | None,
         *,
         progress_callback: ProgressCallback = None,
-    ) -> PaymentSyncPlan:
+    ) -> PaymentSyncPlan | PaymentSyncBatchPlan:
         """Áp dụng lựa chọn dòng/Số HĐ rồi phân tích lại trước khi ghi."""
+
+        if isinstance(plan, PaymentSyncBatchPlan):
+            refined_months: dict[str, PaymentSyncPlan] = {}
+            for source_sheet, month_plan in plan.month_plans.items():
+                refined_months[source_sheet] = self.refine(
+                    month_plan,
+                    resolutions,
+                    progress_callback=progress_callback,
+                )
+            refined_batch = copy.copy(plan)
+            refined_batch.month_plans = refined_months
+            self._update_run(
+                plan.run_id,
+                status=(
+                    ExcelRunStatus.WAITING_USER
+                    if refined_batch.requires_user_input
+                    else ExcelRunStatus.ANALYZING
+                ),
+                sheet_name=refined_batch.selected_sheet,
+                changed_items=refined_batch.update_count + refined_batch.new_count,
+                conflict_count=refined_batch.conflict_count,
+            )
+            return refined_batch
 
         resolved_values = dict(resolutions or {})
         self.gateway.assert_unchanged(
@@ -3427,11 +3611,17 @@ class PaymentSyncService:
 
     def apply(
         self,
-        plan: PaymentSyncPlan,
+        plan: PaymentSyncPlan | PaymentSyncBatchPlan,
         resolutions: Mapping[str, Any] | None = None,
         *,
         progress_callback: ProgressCallback = None,
     ) -> PaymentSyncResult:
+        if isinstance(plan, PaymentSyncBatchPlan):
+            return self._apply_batch_plan(
+                plan,
+                resolutions,
+                progress_callback=progress_callback,
+            )
         resolved_values = dict(resolutions or {})
         selected_raw = resolved_values.get("selected_new_rows")
         selected_new = (
@@ -3832,6 +4022,164 @@ class PaymentSyncService:
                     f"chưa xác định {sum(value.unmapped_carrier_items for value in target_results.values())}."
                     if changed
                     else "Dữ liệu HP/NAM đã đồng bộ."
+                ),
+            )
+            self._finish_result(result)
+            return result
+        except Exception as exc:
+            self._finish_failed(plan.run_id, exc)
+            raise
+        finally:
+            for path in (source_working, target_working):
+                if path is not None:
+                    Path(path).unlink(missing_ok=True)
+
+    def _apply_batch_plan(
+        self,
+        plan: PaymentSyncBatchPlan,
+        resolutions: Mapping[str, Any] | None = None,
+        *,
+        progress_callback: ProgressCallback = None,
+    ) -> PaymentSyncResult:
+        """Áp dụng các tháng lên bản làm việc, rồi thay hai workbook đúng một lần."""
+
+        self.gateway.assert_unchanged(
+            plan.source_path, plan.source_fingerprint, label="File BK"
+        )
+        self.gateway.assert_unchanged(
+            plan.target_path, plan.target_fingerprint, label="File Thanh toán"
+        )
+        self._update_run(plan.run_id, status=ExcelRunStatus.APPLYING)
+        source_working: Path | None = None
+        target_working: Path | None = None
+        source_backup: Path | None = None
+        target_backup: Path | None = None
+        source_after = plan.source_fingerprint
+        target_after = plan.target_fingerprint
+        source_replaced = False
+        target_results: dict[str, PaymentTargetResult] = {}
+        summary_report: CarrierSummaryResult | None = None
+        try:
+            source_working = self.backups.create_working_copy(
+                plan.source_path, run_id=f"{plan.run_id}-batch-bk"
+            )
+            target_working = self.backups.create_working_copy(
+                plan.target_path, run_id=f"{plan.run_id}-batch-payment"
+            )
+            nested_backup_dir = self.temp_dir / "payment_batch_internal"
+            total = len(plan.month_plans)
+            for position, (source_sheet, month_plan) in enumerate(
+                plan.month_plans.items(), start=1
+            ):
+                _progress(
+                    progress_callback,
+                    f"Đang ghi {source_sheet} ({position}/{total})…",
+                )
+                worker = PaymentSyncService(
+                    bk_path=source_working,
+                    payment_path=target_working,
+                    temp_dir=self.temp_dir,
+                    backup_dir=nested_backup_dir,
+                    gateway=self.gateway,
+                    lock_service=self.lock_service,
+                    stability_checker=self.stability_checker,
+                    month_service=self.months,
+                    run_repository=None,
+                    clock=self.clock,
+                )
+                working_plan = copy.deepcopy(month_plan)
+                working_plan.source_path = source_working
+                working_plan.target_path = target_working
+                working_plan.source_fingerprint = self.gateway.fingerprint(source_working)
+                working_plan.target_fingerprint = self.gateway.fingerprint(target_working)
+                working_plan.run_id = None
+                month_result = worker.apply(
+                    working_plan,
+                    resolutions,
+                    progress_callback=progress_callback,
+                )
+                if month_result.source_backup_path is not None:
+                    Path(month_result.source_backup_path).unlink(missing_ok=True)
+                if month_result.backup_path is not None:
+                    Path(month_result.backup_path).unlink(missing_ok=True)
+                for target_type, target_result in month_result.target_results.items():
+                    target_results[f"{source_sheet}:{target_type}"] = target_result
+                summary_report = month_result.carrier_summary or summary_report
+
+            source_working_fp = self.gateway.fingerprint(source_working)
+            target_working_fp = self.gateway.fingerprint(target_working)
+            source_changed = source_working_fp.sha256 != plan.source_fingerprint.sha256
+            target_changed = target_working_fp.sha256 != plan.target_fingerprint.sha256
+            if source_changed or target_changed:
+                for path in sorted(
+                    (plan.source_path, plan.target_path),
+                    key=lambda value: str(value).casefold(),
+                ):
+                    self.lock_service.ensure_writable(path)
+                self.gateway.assert_unchanged(
+                    plan.source_path, plan.source_fingerprint, label="File BK"
+                )
+                self.gateway.assert_unchanged(
+                    plan.target_path, plan.target_fingerprint, label="File Thanh toán"
+                )
+                if source_changed:
+                    source_backup = self.backups.create_backup(
+                        plan.source_path, run_id=f"{plan.run_id}-bk"
+                    )
+                    source_after = self.gateway.atomic_replace(
+                        source_working,
+                        plan.source_path,
+                        expected=plan.source_fingerprint,
+                    )
+                    source_working = None
+                    source_replaced = True
+                try:
+                    if target_changed:
+                        target_backup = self.backups.create_backup(
+                            plan.target_path, run_id=f"{plan.run_id}-payment"
+                        )
+                        target_after = self.gateway.atomic_replace(
+                            target_working,
+                            plan.target_path,
+                            expected=plan.target_fingerprint,
+                        )
+                        target_working = None
+                except Exception:
+                    if source_replaced and source_backup is not None:
+                        restore = self.backups.create_working_copy(
+                            source_backup, run_id=f"{plan.run_id}-rollback"
+                        )
+                        try:
+                            self.gateway.atomic_replace(
+                                restore, plan.source_path, expected=source_after
+                            )
+                        finally:
+                            restore.unlink(missing_ok=True)
+                    raise
+            target_sheets = tuple(
+                result.sheet_name for result in target_results.values()
+            )
+            changed = source_changed or target_changed
+            result = PaymentSyncResult(
+                status=ExcelRunStatus.SUCCEEDED if changed else ExcelRunStatus.NO_CHANGES,
+                source_path=plan.source_path,
+                target_path=plan.target_path,
+                target_results=target_results,
+                source_sheet_name=", ".join(plan.month_plans),
+                target_sheets=target_sheets,
+                backup_path=target_backup,
+                source_backup_path=source_backup,
+                fingerprint_before=plan.target_fingerprint,
+                fingerprint_after=target_after,
+                source_fingerprint_after=source_after,
+                vba_preserved=True,
+                carrier_summary=summary_report,
+                run_id=plan.run_id,
+                message=(
+                    f"Đã đồng bộ nguyên tử {len(plan.month_plans)} tháng sang "
+                    f"{len(target_sheets)} sheet HP/NAM."
+                    if changed
+                    else "Các tháng HP/NAM đã đồng bộ."
                 ),
             )
             self._finish_result(result)

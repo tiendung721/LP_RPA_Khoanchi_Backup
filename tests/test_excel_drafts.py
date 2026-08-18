@@ -149,6 +149,58 @@ def test_sheet_selection_does_not_change_source_file_history(tmp_path: Path) -> 
     database.close()
 
 
+def test_posting_group_assignments_are_restored_only_for_current_groups_and_sheets(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "app.db")
+    drafts = ExcelDraftService(ExcelDraftRepository(database))
+    plan = _plan(tmp_path, _occupied_conflict(), selected_sheet=None)
+    plan.source_kind = "ASSISTANT"
+    plan.source_groups = [
+        SimpleNamespace(
+            group_id="DOC_001", source_document_id="SOURCE_A",
+            target_sheet="T07 26"
+        ),
+        SimpleNamespace(
+            group_id="DOC_002", source_document_id="SOURCE_B",
+            target_sheet="T06 26"
+        ),
+    ]
+    plan.split_document_ids = {"SOURCE_A"}
+    plan.sheet_candidates = [
+        SimpleNamespace(sheet_name="T07 26"),
+        SimpleNamespace(sheet_name="T06 26"),
+    ]
+    drafts.save(plan, "posting", {})
+
+    restored_plan = _plan(tmp_path, _occupied_conflict(), selected_sheet=None)
+    restored_plan.source_kind = "ASSISTANT"
+    restored_plan.source_groups = [
+        SimpleNamespace(
+            group_id="DOC_001", source_document_id="SOURCE_A", target_sheet=None
+        ),
+        SimpleNamespace(
+            group_id="DOC_002", source_document_id="SOURCE_B", target_sheet=None
+        ),
+    ]
+    restored_plan.split_document_ids = set()
+    restored_plan.sheet_candidates = plan.sheet_candidates
+
+    assert drafts.restore(restored_plan, "posting")[1]["group_target_sheets"] == {
+        "DOC_001": "T07 26",
+        "DOC_002": "T06 26",
+    }
+    assert drafts.restore(restored_plan, "posting")[1]["split_document_ids"] == [
+        "SOURCE_A"
+    ]
+
+    restored_plan.sheet_candidates = [SimpleNamespace(sheet_name="T07 26")]
+    assert drafts.restore(restored_plan, "posting")[1]["group_target_sheets"] == {
+        "DOC_001": "T07 26"
+    }
+    database.close()
+
+
 def test_different_target_keeps_history_but_does_not_replay_choices(
     tmp_path: Path,
 ) -> None:

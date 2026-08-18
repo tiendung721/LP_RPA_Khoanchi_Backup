@@ -310,6 +310,49 @@ def test_one_source_row_can_update_both_targets_without_touching_manual_columns(
         workbook.close()
 
 
+def test_payment_sync_applies_two_bk_months_as_one_batch(tmp_path: Path) -> None:
+    bk, payment = tmp_path / "bk.xlsx", tmp_path / "payment.xlsx"
+    runtime = tmp_path / "runtime"
+    _save_bk(
+        bk,
+        [{"sqt": 601, "container": "CONT601", "loaded_drop": 100}],
+        month=6,
+    )
+    workbook = load_workbook(bk)
+    july = workbook.copy_worksheet(workbook["T06 26"])
+    july.title = "T07 26"
+    july.cell(2, 1).value = 701
+    july.cell(2, 2).value = "CONT701"
+    for column in SOURCE_COLUMNS.values():
+        july.cell(2, column).value = None
+    july.cell(2, SOURCE_COLUMNS["loaded_lift"]).value = 200
+    workbook.save(bk)
+    workbook.close()
+    _save_payment(payment, month=6)
+    workbook = load_workbook(payment)
+    _add_payment_sheet(workbook, "T07 26 HP", "HP")
+    _add_payment_sheet(workbook, "T07 26 NAM", "NAM")
+    workbook.save(payment)
+    workbook.close()
+    service = _service(bk, payment, runtime)
+
+    plan = service.analyze(source_sheet_names=["T06 26", "T07 26"])
+
+    assert tuple(plan.month_plans) == ("T06 26", "T07 26")
+    result = service.apply(plan, {})
+    assert result.target_sheets == (
+        "T06 26 HP", "T06 26 NAM", "T07 26 HP", "T07 26 NAM"
+    )
+    assert result.inserted_rows == 2
+    assert len(list((runtime / "Backup").glob("*.xlsx"))) <= 2
+    workbook = load_workbook(payment, data_only=False)
+    try:
+        assert workbook["T06 26 HP"]["C8"].value == 100
+        assert workbook["T07 26 NAM"]["D8"].value == 200
+    finally:
+        workbook.close()
+
+
 def test_unchanged_row_keeps_existing_update_date(tmp_path: Path) -> None:
     bk, payment = tmp_path / "bk.xlsx", tmp_path / "payment.xlsx"
     old_date = datetime(2026, 7, 1, 8, 0, 0)

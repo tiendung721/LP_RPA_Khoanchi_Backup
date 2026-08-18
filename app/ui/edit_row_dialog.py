@@ -112,6 +112,8 @@ class EditRowDialog(QDialog):
         validator: Callable[[ReviewRow], Any] | Any | None = None,
         title: str | None = None,
         allow_negative: bool = False,
+        source_document_id: str = "MANUAL",
+        source_document_name: str = "Dòng thêm thủ công",
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title or ("Thêm dòng dữ liệu" if row is None else "Sửa dòng dữ liệu"))
@@ -125,9 +127,18 @@ class EditRowDialog(QDialog):
         self._result_row: ReviewRow | None = None
         self._last_validation = RowValidation()
         self._last_fee: object = None
+        self._source_document_id = source_document_id
+        self._source_document_name = source_document_name
         self._build_ui()
         self._connect_signals()
-        self.set_row(row if row is not None else ReviewRow())
+        self.set_row(
+            row
+            if row is not None
+            else ReviewRow(
+                source_document_id=source_document_id,
+                source_document_name=source_document_name,
+            )
+        )
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -142,6 +153,13 @@ class EditRowDialog(QDialog):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setHorizontalSpacing(14)
         form.setVerticalSpacing(12)
+
+        self.source_document_label = QLabel()
+        self.source_document_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.source_document_label.setWordWrap(True)
+        form.addRow("Chứng từ nguồn:", self.source_document_label)
 
         self.container_edit = QLineEdit()
         self.container_edit.setObjectName("containerEdit")
@@ -330,6 +348,11 @@ class EditRowDialog(QDialog):
 
     def set_row(self, row: Any) -> None:
         value = coerce_review_row(row)
+        self._source_document_id = value.source_document_id
+        self._source_document_name = value.source_document_name
+        self.source_document_label.setText(
+            f"{self._source_document_name} ({self._source_document_id})"
+        )
         self._original_vessel_voyage_raw = value.vessel_voyage_raw
         self.container_edit.setText(value.cont if isinstance(value.cont, str) else "")
         self.bl_edit.setText(value.bl if isinstance(value.bl, str) else "")
@@ -420,6 +443,8 @@ class EditRowDialog(QDialog):
             invoice_container_count=count,
             container_count_basis=self.container_count_basis_combo.currentData(),
             invoice_date=normalize_optional_text(self.invoice_date_edit.text()),
+            source_document_id=self._source_document_id,
+            source_document_name=self._source_document_name,
         )
         return row, amount_error
 

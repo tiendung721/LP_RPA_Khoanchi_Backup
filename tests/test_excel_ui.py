@@ -102,7 +102,7 @@ def test_sync_button_requires_source_sheet_before_starting_analysis(
         ) -> None:
             captured["candidates"] = dialog_candidates
             captured.update(kwargs)
-            self.selected_sheet_name = "Tháng 8"
+            self.selected_sheet_names = ["Tháng 8"]
 
         def exec(self) -> QDialog.DialogCode:
             return QDialog.DialogCode.Accepted
@@ -121,7 +121,8 @@ def test_sync_button_requires_source_sheet_before_starting_analysis(
     assert captured["candidates"] == candidates
     assert captured["preselect_first"] is False
     assert captured["show_recommendations"] is False
-    assert tasks.sync_calls == [{"source_sheet_name": "Tháng 8"}]
+    assert captured["multi_select"] is True
+    assert tasks.sync_calls == [{"source_sheet_names": ["Tháng 8"]}]
 
 
 def test_sync_analysis_always_shows_full_sheet_confirmation(

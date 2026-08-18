@@ -6,7 +6,7 @@ import copy
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -155,6 +155,16 @@ class DailySyncService:
         self.run_repository = run_repository
         self.backups = ExcelBackupService(self.backup_dir)
 
+    def _ordered_target_names(self, names: Iterable[str]) -> list[str]:
+        def key(name: str) -> tuple[int, int, str]:
+            parsed = self.months.parse_target_sheet(name)
+            if parsed is None:
+                return (9999, 99, name)
+            month, year = parsed
+            return (year, month, name)
+
+        return sorted({str(name) for name in names}, key=key)
+
     def cleanup_stale_files(self) -> int:
         """Dọn đúng các artifact do luồng Excel của ứng dụng tạo ra."""
 
@@ -191,6 +201,8 @@ class DailySyncService:
         progress_callback: ProgressCallback = None,
         *,
         source_sheet_name: str | None = None,
+        source_sheet_names: Sequence[str] | None = None,
+        source_target_sheets: Mapping[str, str] | None = None,
     ) -> SyncPlan:
         source = ensure_supported_workbook(self.daily_path)
         target = ensure_supported_workbook(self.bk_path)
@@ -219,15 +231,20 @@ class DailySyncService:
                 raise DailySyncError(
                     "File Hàng ngày không có sheet Tháng 1…Tháng 12."
                 )
+            requested_source_names = set(source_sheet_names or ())
             if source_sheet_name is not None:
+                requested_source_names.add(source_sheet_name)
+            if requested_source_names:
                 source_sheets = {
                     month: sheet_name
                     for month, sheet_name in source_sheets.items()
-                    if sheet_name == source_sheet_name
+                    if sheet_name in requested_source_names
                 }
-                if not source_sheets:
+                found_names = set(source_sheets.values())
+                missing_names = requested_source_names - found_names
+                if missing_names:
                     raise DailySyncError(
-                        f"Không tìm thấy sheet nguồn {source_sheet_name!r} "
+                        f"Không tìm thấy sheet nguồn {', '.join(sorted(missing_names))!r} "
                         "trong file Hàng ngày."
                     )
 
@@ -249,6 +266,7 @@ class DailySyncService:
             conflicts: list[SyncConflict] = []
             invalid_rows: list[int] = []
             source_row_count = 0
+            source_targets: dict[str, str | None] = {}
 
             for month, current_source_name in sorted(source_sheets.items()):
                 _progress(
@@ -327,6 +345,48 @@ class DailySyncService:
                             ),
                         )
                     )
+                candidate_names = [name for _year, name in target_options]
+                requested_target = (source_target_sheets or {}).get(current_source_name)
+                if requested_target is not None and requested_target not in candidate_names:
+                    raise DailySyncError(
+                        f"Sheet đích {requested_target!r} không hợp lệ cho {current_source_name}."
+                    )
+                source_targets[current_source_name] = (
+                    requested_target
+                    if requested_target is not None
+                    else candidate_names[0]
+                    if len(candidate_names) == 1
+                    else None
+                )
+                if source_targets[current_source_name] is None:
+                    conflicts.append(
+                        SyncConflict(
+                            conflict_id=_stable_id(
+                                "sync-month",
+                                source_fingerprint.sha256,
+                                current_source_name,
+                                candidate_names,
+                            ),
+                            conflict_type=ConflictType.TARGET_MONTH_AMBIGUOUS,
+                            message=(
+                                f"{current_source_name} có nhiều sheet BK cùng tháng; "
+                                "hãy chọn đúng năm đích."
+                            ),
+                            source_sheet=current_source_name,
+                            allowed_actions=(
+                                ResolutionAction.SELECT_MONTH,
+                                ResolutionAction.CANCEL_ALL,
+                            ),
+                            details={
+                                "source_sheet": current_source_name,
+                                "sheet_candidates": [
+                                    candidate
+                                    for candidate in candidates
+                                    if candidate.source_sheet == current_source_name
+                                ],
+                            },
+                        )
+                    )
 
             source_book.close()
             source_book = None
@@ -336,32 +396,13 @@ class DailySyncService:
             target_book.close()
             target_book = None
 
-            selected_month = candidates[0].month if len(candidates) == 1 else None
+            selected_targets = {
+                target for target in source_targets.values() if target is not None
+            }
+            selected_month = candidates[0].month if len(selected_targets) == 1 else None
             selected_target = (
-                candidates[0].target_sheet if len(candidates) == 1 else None
+                next(iter(selected_targets)) if len(selected_targets) == 1 else None
             )
-            if len(candidates) > 1:
-                conflicts.append(
-                    SyncConflict(
-                        conflict_id=_stable_id(
-                            "sync-month",
-                            source_fingerprint.sha256,
-                            [candidate.target_sheet for candidate in candidates],
-                        ),
-                        conflict_type=ConflictType.TARGET_MONTH_AMBIGUOUS,
-                        message=(
-                            "Có nhiều sheet BK phù hợp; hãy chọn một sheet đích."
-                        ),
-                        allowed_actions=(
-                            ResolutionAction.SELECT_MONTH,
-                            ResolutionAction.CANCEL_ALL,
-                        ),
-                        details={
-                            "months": [candidate.month for candidate in candidates],
-                            "sheet_candidates": candidates,
-                        },
-                    )
-                )
             selected_year = (
                 candidates[0].year
                 if len(candidates) == 1
@@ -385,6 +426,8 @@ class DailySyncService:
                 selected_month=selected_month,
                 selected_target_sheet=selected_target,
                 run_id=run_id,
+                source_target_sheets=source_targets,
+                selected_target_sheets=selected_targets,
             )
             status = (
                 ExcelRunStatus.WAITING_USER
@@ -396,7 +439,7 @@ class DailySyncService:
                 status=status,
                 source_fingerprint=source_fingerprint,
                 target_fingerprint_before=target_fingerprint,
-                sheet_name=plan.selected_sheet,
+                sheet_name=", ".join(self._ordered_target_names(selected_targets)) or None,
                 total_items=source_row_count + len(invalid_rows),
                 conflict_count=plan.conflict_count,
             )
@@ -417,6 +460,21 @@ class DailySyncService:
         progress_callback: ProgressCallback = None,
     ) -> SyncResult:
         resolved = resolution_map(resolutions)
+        if plan.source_target_sheets:
+            if any(target is None for target in plan.source_target_sheets.values()):
+                if len(plan.source_target_sheets) > 1:
+                    exc = DailySyncError("Chưa ánh xạ đủ sheet đích cho các tháng nguồn.")
+                    self._finish_failed(plan.run_id, exc)
+                    raise exc
+            selected_targets = {
+                str(target) for target in plan.source_target_sheets.values() if target
+            }
+            if len(selected_targets) > 1:
+                return self._apply_multiple_targets(
+                    plan,
+                    selected_targets,
+                    progress_callback=progress_callback,
+                )
         try:
             candidate = self._selected_candidate(plan, resolved)
         except Exception as exc:
@@ -597,6 +655,186 @@ class DailySyncService:
                 message=(
                     f"Đã cập nhật {updated} dòng, thêm {inserted} dòng, "
                     f"giữ {target_only} dòng chỉ có ở BK."
+                ),
+            )
+            self._finish_result(result)
+            return result
+        except Exception as exc:
+            self._finish_failed(plan.run_id, exc)
+            raise
+        finally:
+            if working_path is not None and working_path.exists():
+                working_path.unlink()
+
+    def _apply_multiple_targets(
+        self,
+        plan: SyncPlan,
+        target_names: set[str],
+        *,
+        progress_callback: ProgressCallback = None,
+    ) -> SyncResult:
+        candidates = {
+            candidate.target_sheet: candidate
+            for candidate in plan.month_candidates
+            if candidate.target_sheet in target_names
+        }
+        if set(candidates) != target_names:
+            exc = DailySyncError("Ánh xạ sheet đồng bộ không còn tương thích.")
+            self._finish_failed(plan.run_id, exc)
+            raise exc
+        blocking = [
+            conflict
+            for conflict in plan.conflicts
+            if conflict.conflict_type is ConflictType.SYNC_GROUP_COUNT_MISMATCH
+            and conflict.details.get("target_sheet") in target_names
+        ]
+        if blocking:
+            exc = DailySyncError(
+                "Một tháng có nhóm SQT không khớp; toàn bộ lần đồng bộ đã bị chặn."
+            )
+            self._finish_failed(plan.run_id, exc)
+            raise exc
+        all_actions = [
+            action
+            for target_name in target_names
+            for action in plan.actions_by_target.get(target_name, ())
+        ]
+        counts = self._action_counts(all_actions)
+        inserted = counts[SyncActionType.INSERT]
+        updated = counts[SyncActionType.UPDATE]
+        unchanged = counts[SyncActionType.UNCHANGED]
+        target_only = counts[SyncActionType.TARGET_ONLY]
+        invalid = sum(candidates[name].invalid_count for name in target_names)
+        ordered_targets = tuple(self._ordered_target_names(target_names))
+        if not inserted and not updated:
+            result = SyncResult(
+                status=ExcelRunStatus.NO_CHANGES,
+                target_path=plan.target_path,
+                sheet_name=", ".join(ordered_targets),
+                target_sheets=ordered_targets,
+                unchanged_rows=unchanged,
+                target_only_rows=target_only,
+                invalid_rows=invalid,
+                skipped_rows=invalid,
+                conflict_count=0,
+                fingerprint_before=plan.target_fingerprint,
+                fingerprint_after=plan.target_fingerprint,
+                run_id=plan.run_id,
+                message="Các tháng đã đồng bộ; không có ô cần ghi.",
+            )
+            self._finish_result(result)
+            return result
+        self._update_run(plan.run_id, status=ExcelRunStatus.APPLYING)
+        self.gateway.assert_unchanged(
+            plan.source_path, plan.source_fingerprint, label="File Hàng ngày"
+        )
+        self.gateway.assert_unchanged(
+            plan.target_path, plan.target_fingerprint, label="File BK"
+        )
+        working_path: Path | None = None
+        backup_path: Path | None = None
+        try:
+            with self.lock_service.acquire(plan.target_path):
+                pass
+            self.gateway.assert_unchanged(
+                plan.target_path, plan.target_fingerprint, label="File BK"
+            )
+            working_path = self.backups.create_working_copy(
+                plan.target_path, run_id=plan.run_id
+            )
+            workbook = self.gateway.load(working_path, read_only=False)
+            expected_by_sheet: dict[str, dict[tuple[int, int], Any]] = {}
+            protected_by_sheet: dict[str, dict[tuple[int, int], Any]] = {}
+            try:
+                for position, target_name in enumerate(ordered_targets, start=1):
+                    _progress(
+                        progress_callback,
+                        f"Đang đồng bộ {target_name} ({position}/{len(ordered_targets)})…",
+                    )
+                    candidate = candidates[target_name]
+                    actions = list(plan.actions_by_target.get(target_name, ()))
+                    worksheet = (
+                        workbook[target_name]
+                        if target_name in workbook.sheetnames
+                        else self._create_month_sheet(
+                            workbook, candidate.month, int(candidate.year), target_name
+                        )
+                    )
+                    header = self._resolve_target_headers(worksheet)
+                    expected: dict[tuple[int, int], Any] = {}
+                    protected: dict[tuple[int, int], Any] = {}
+                    expected_by_sheet[target_name] = expected
+                    protected_by_sheet[target_name] = protected
+                    for action in actions:
+                        if (
+                            action.action is SyncActionType.UPDATE
+                            and action.source is not None
+                            and action.target_row is not None
+                        ):
+                            self._write_sync_values(
+                                worksheet, action.target_row, action.source.values, expected
+                            )
+                            for column, value in action.protected_values.items():
+                                protected[(action.target_row, column)] = value
+                    insert_actions = [
+                        action
+                        for action in actions
+                        if action.action is SyncActionType.INSERT
+                        and action.source is not None
+                    ]
+                    append_at = self._last_data_row(worksheet, header) + 1
+                    template_row = max(header.row_end + 1, append_at - 1)
+                    max_style_column = self._actual_max_column(worksheet)
+                    for offset, action in enumerate(insert_actions):
+                        target_row = append_at + offset
+                        self._copy_row_style(
+                            worksheet,
+                            template_row,
+                            target_row,
+                            max_column=max_style_column,
+                        )
+                        self._write_sync_values(
+                            worksheet, target_row, action.source.values, expected
+                        )
+                    from .payment_sync import find_summary_start, refresh_bk_summary_formulas
+
+                    if find_summary_start(worksheet) is not None:
+                        refresh_bk_summary_formulas(worksheet)
+                self.gateway.save(workbook, working_path)
+            finally:
+                workbook.close()
+            for target_name in ordered_targets:
+                self._verify_saved_sync(
+                    working_path,
+                    target_name,
+                    expected_by_sheet[target_name],
+                    protected_by_sheet[target_name],
+                )
+            backup_path = self.backups.create_backup(plan.target_path)
+            after = self.gateway.atomic_replace(
+                working_path, plan.target_path, expected=plan.target_fingerprint
+            )
+            working_path = None
+            result = SyncResult(
+                status=ExcelRunStatus.SUCCEEDED,
+                target_path=plan.target_path,
+                sheet_name=", ".join(ordered_targets),
+                target_sheets=ordered_targets,
+                added_rows=inserted,
+                inserted_rows=inserted,
+                updated_rows=updated,
+                unchanged_rows=unchanged,
+                target_only_rows=target_only,
+                invalid_rows=invalid,
+                skipped_rows=invalid,
+                conflict_count=0,
+                backup_path=backup_path,
+                fingerprint_before=plan.target_fingerprint,
+                fingerprint_after=after,
+                run_id=plan.run_id,
+                message=(
+                    f"Đã đồng bộ {len(ordered_targets)} tháng: cập nhật {updated} dòng, "
+                    f"thêm {inserted} dòng."
                 ),
             )
             self._finish_result(result)

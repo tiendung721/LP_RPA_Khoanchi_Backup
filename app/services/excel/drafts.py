@@ -184,7 +184,50 @@ class ExcelDraftService:
                     for item_id in selected
                     if str(item_id) in valid_ids
                 ]
-        restored_count = sum(key != "selected_new_rows" for key in restored)
+        if target_compatible and isinstance(globals_value, Mapping):
+            saved_splits = globals_value.get("split_document_ids")
+            current_document_ids = {
+                str(_value(group, "source_document_id", default=""))
+                for group in _sequence(_value(plan, "source_groups", default=()))
+                if str(_value(group, "source_document_id", default=""))
+            }
+            if isinstance(saved_splits, list):
+                compatible_splits = sorted(
+                    str(document_id)
+                    for document_id in saved_splits
+                    if str(document_id) in current_document_ids
+                )
+                if compatible_splits:
+                    restored["split_document_ids"] = compatible_splits
+            saved_assignments = globals_value.get("group_target_sheets")
+            groups = {
+                str(_value(group, "group_id", default="")): group
+                for group in _sequence(_value(plan, "source_groups", default=()))
+                if str(_value(group, "group_id", default=""))
+            }
+            candidate_names = {
+                str(_value(candidate, "sheet_name", "name", default="")).strip()
+                for candidate in _sequence(
+                    _value(plan, "sheet_candidates", "target_sheet_candidates", default=())
+                )
+                if str(_value(candidate, "sheet_name", "name", default="")).strip()
+            }
+            if isinstance(saved_assignments, Mapping) and groups:
+                compatible_assignments = {
+                    str(group_id): str(sheet_name)
+                    for group_id, sheet_name in saved_assignments.items()
+                    if str(group_id) in groups
+                    and str(sheet_name).strip()
+                    and (not candidate_names or str(sheet_name) in candidate_names)
+                }
+                if compatible_assignments:
+                    restored["group_target_sheets"] = compatible_assignments
+        restored_count = sum(
+            key not in {
+                "selected_new_rows", "group_target_sheets", "split_document_ids"
+            }
+            for key in restored
+        )
         return ExcelDraftRestore(
             source_file_key=source_file_key,
             resolutions=restored,
@@ -213,6 +256,21 @@ class ExcelDraftService:
         )
         entries = dict(payload.get("entries", {}))
         globals_value = dict(payload.get("globals", {}))
+        group_assignments = {
+            str(_value(group, "group_id")): str(_value(group, "target_sheet"))
+            for group in _sequence(_value(plan, "source_groups", default=()))
+            if _value(group, "group_id", default=None) not in (None, "")
+            and _value(group, "target_sheet", default=None) not in (None, "")
+        }
+        if group_assignments:
+            globals_value["group_target_sheets"] = group_assignments
+        split_document_ids = sorted(
+            str(value)
+            for value in _sequence(_value(plan, "split_document_ids", default=()))
+            if str(value).strip()
+        )
+        if split_document_ids:
+            globals_value["split_document_ids"] = split_document_ids
         conflicts = {
             self._conflict_id(conflict): conflict for conflict in self._conflicts(plan)
         }
@@ -232,6 +290,18 @@ class ExcelDraftService:
                 globals_value[key] = [
                     str(item_id) for item_id in _sequence(raw_resolution)
                 ]
+                continue
+            if key == "group_target_sheets" and isinstance(raw_resolution, Mapping):
+                globals_value[key] = {
+                    str(group_id): str(sheet_name)
+                    for group_id, sheet_name in raw_resolution.items()
+                    if str(group_id).strip() and str(sheet_name).strip()
+                }
+                continue
+            if key == "split_document_ids":
+                globals_value[key] = sorted(
+                    str(value) for value in _sequence(raw_resolution) if str(value).strip()
+                )
                 continue
             conflict = conflicts.get(key)
             if conflict is None:
