@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -40,6 +41,7 @@ _UPDATABLE_COLUMNS = frozenset(
         "skipped_items",
         "conflict_count",
         "error_message",
+        "item_outcomes",
     }
 )
 _PATH_COLUMNS = frozenset({"source_path", "target_path", "backup_path"})
@@ -50,6 +52,7 @@ _FINGERPRINT_COLUMNS = frozenset(
         "target_fingerprint_after",
     }
 )
+_JSON_COLUMNS = _FINGERPRINT_COLUMNS | frozenset({"item_outcomes"})
 _COUNT_COLUMNS = frozenset(
     {"total_items", "changed_items", "skipped_items", "conflict_count"}
 )
@@ -79,6 +82,10 @@ def _json_default(value: object) -> object:
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
         return str(value)
     to_dict = getattr(value, "to_dict", None)
     if callable(to_dict):
@@ -128,6 +135,7 @@ class ExcelRunRecord:
     skipped_items: int
     conflict_count: int
     error_message: str | None
+    item_outcomes: Any
 
     @property
     def run_id(self) -> int:
@@ -211,7 +219,7 @@ class ExcelRunRepository:
                 value = _run_status(value)
             elif key in _PATH_COLUMNS:
                 value = None if value is None else str(value)
-            elif key in _FINGERPRINT_COLUMNS:
+            elif key in _JSON_COLUMNS:
                 value = _json_text(value)
             elif key in _COUNT_COLUMNS:
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -355,6 +363,7 @@ class ExcelRunRepository:
             skipped_items=int(row["skipped_items"]),
             conflict_count=int(row["conflict_count"]),
             error_message=row["error_message"],
+            item_outcomes=_json_value(row["item_outcomes"]),
         )
 
 

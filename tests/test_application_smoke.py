@@ -101,15 +101,15 @@ def test_runtime_and_main_window_start_with_isolated_data_root(
         assert not hasattr(window.workflow_page, "pending_groups_button")
         assert (
             window.workflow_page.sync_daily_button.text()
-            == "Đồng bộ dữ liệu Hàng ngày"
+            == "Đồng bộ"
         )
         assert (
             window.workflow_page.post_expenses_button.text()
-            == "Nhập khoản chi vào BK"
+            == "Nhập vào BK"
         )
         assert (
             window.workflow_page.sync_payment_button.text()
-            == "Đồng bộ BK → Thanh toán"
+            == "Đồng bộ"
         )
         settings_edits = window.settings_page.findChildren(QLineEdit)
         assert {

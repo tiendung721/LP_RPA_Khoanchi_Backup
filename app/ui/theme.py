@@ -82,6 +82,14 @@ QFrame[actionRow="true"]:hover {{
     background: #F4F8FE;
     border-color: #BED1EC;
 }}
+QFrame[taskRow="true"] {{
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #E7EDF5;
+}}
+QFrame[taskRow="true"]:hover {{
+    background: #F7FAFE;
+}}
 QFrame[upcoming="true"] {{
     background: #F1F5F9;
     border: 1px dashed #B9C4D2;
@@ -149,6 +157,31 @@ QPushButton[primary="true"][loading="true"]:disabled {{
     color: white;
     background: #3B82F6;
     border-color: #3B82F6;
+}}
+QPushButton[link="true"] {{
+    min-height: 26px;
+    padding: 0px 4px;
+    color: #2563EB;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    font-weight: 600;
+}}
+QPushButton[link="true"]:hover {{
+    color: #1D4ED8;
+    background: #EEF4FF;
+    border: none;
+}}
+QPushButton[link="true"]:pressed {{
+    color: #1E40AF;
+    background: #E4EDFC;
+    border: none;
+    padding: 1px 4px 0px 4px;
+}}
+QPushButton[link="true"]:disabled {{
+    color: #98A2B3;
+    background: transparent;
+    border: none;
 }}
 QPushButton[danger="true"] {{
     color: {ERROR};

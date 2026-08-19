@@ -15,7 +15,7 @@ from app.rpa_expense import (
 )
 from app.rpa_expense.launcher import RpaExpenseBatLauncher
 from app.rpa_expense.service import STATUS_HEADER, SUMMARY_HEADERS
-from app.ui.rpa_expense_dialog import RpaSqtSelectionDialog
+from app.ui.rpa_expense_dialog import RpaLatestDataDialog, RpaSqtSelectionDialog
 
 
 def _build_bk(path: Path, *, with_status: bool = True) -> None:
@@ -244,3 +244,47 @@ def test_launcher_passes_the_fixed_json_path_to_bat(
     assert captured["arguments"][-1] == str(prepared.selection_path)
     assert prepared.selection_path.name == "rpa_input_selection.json"
     assert captured["working_directory"] == str(bat.parent.resolve())
+
+
+def test_latest_rpa_snapshot_changes_only_after_recording_a_successful_launch(
+    tmp_path: Path,
+) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    service = RpaExpenseService(_settings(tmp_path, bk))
+    plan = service.analyze_sheet("T07 26")
+    first = service.prepare_selection(plan, ["101"])
+
+    assert service.load_latest_launched() is None
+    service.record_launched(first)
+    persisted = service.load_latest_launched()
+    assert persisted is not None
+    assert persisted["run_id"] == first.run_id
+    assert [item["sqt"] for item in persisted["items"]] == ["101"]
+    assert persisted["launched_at"]
+
+    service.prepare_selection(plan, ["102"])
+    assert service.load_latest_launched()["run_id"] == first.run_id
+
+
+def test_latest_rpa_dialog_displays_every_sent_sqt(qtbot) -> None:
+    payload = {
+        "run_id": "run-1",
+        "sheet_name": "T07 26",
+        "launched_at": "2026-08-19T10:00:00+07:00",
+        "items": [
+            {
+                "sqt": value,
+                "source_rows": [row],
+                "status_before": "Chưa nhập",
+                "amounts": {"cuoc_bien": amount},
+            }
+            for value, row, amount in (("101", 2, 100), ("102", 3, 200))
+        ],
+    }
+    dialog = RpaLatestDataDialog(payload)
+    qtbot.addWidget(dialog)
+
+    assert dialog.table.rowCount() == 2
+    assert dialog.table.item(0, 0).text() == "101"
+    assert dialog.table.item(1, 0).text() == "102"

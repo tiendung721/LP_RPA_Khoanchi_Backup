@@ -4619,6 +4619,7 @@ class ExpensePostingService:
             changed_items=result.posted_source_items,
             skipped_items=result.skipped_source_items,
             conflict_count=result.conflict_count,
+            item_outcomes=result.item_outcomes,
         )
 
     def _finish_failed(self, run_id: int | None, exc: Exception) -> None:

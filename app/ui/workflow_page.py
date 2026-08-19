@@ -57,6 +57,8 @@ class WorkflowPage(QWidget):
     post_expenses_requested = Signal()
     sync_payment_requested = Signal()
     run_rpa_expense_requested = Signal()
+    view_latest_excel_requested = Signal(str)
+    view_latest_rpa_requested = Signal()
 
     SYNC_OPERATION = "sync"
     POSTING_OPERATION = "posting"
@@ -84,6 +86,18 @@ class WorkflowPage(QWidget):
         self.sync_payment_button.clicked.connect(self.sync_payment_requested)
         self.run_rpa_expense_button.clicked.connect(
             self.run_rpa_expense_requested
+        )
+        self.view_daily_sync_button.clicked.connect(
+            lambda: self.view_latest_excel_requested.emit(self.SYNC_OPERATION)
+        )
+        self.view_expense_posting_button.clicked.connect(
+            lambda: self.view_latest_excel_requested.emit(self.POSTING_OPERATION)
+        )
+        self.view_payment_sync_button.clicked.connect(
+            lambda: self.view_latest_excel_requested.emit(self.PAYMENT_SYNC_OPERATION)
+        )
+        self.view_rpa_expense_button.clicked.connect(
+            self.view_latest_rpa_requested
         )
         self.set_configuration(settings)
         self.set_active_batch(active_batch)
@@ -229,13 +243,15 @@ class WorkflowPage(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
-        step3 = QHBoxLayout(self.step3_card)
+        step3 = QGridLayout(self.step3_card)
         step3.setContentsMargins(14, 11, 14, 12)
-        step3.setSpacing(10)
+        step3.setHorizontalSpacing(10)
+        step3.setVerticalSpacing(0)
+        step3.setColumnStretch(1, 1)
 
         step3_intro = QWidget()
-        step3_intro.setMinimumWidth(190)
-        step3_intro.setMaximumWidth(220)
+        step3_intro.setMinimumWidth(170)
+        step3_intro.setMaximumWidth(200)
         step3_intro.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Expanding,
@@ -285,63 +301,88 @@ class WorkflowPage(QWidget):
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Preferred,
         )
-        self.sync_daily_button = QPushButton("Đồng bộ dữ liệu Hàng ngày")
+        self.sync_daily_button = QPushButton("Đồng bộ")
         self.sync_daily_button.setObjectName("syncDailyWorkbookButton")
         self.sync_daily_button.setProperty("primary", True)
-        self.post_expenses_button = QPushButton("Nhập khoản chi vào BK")
+        self.sync_daily_button.setAccessibleName("Đồng bộ dữ liệu Hàng ngày vào BK")
+        self.post_expenses_button = QPushButton("Nhập vào BK")
         self.post_expenses_button.setObjectName("postExpensesWorkbookButton")
         self.post_expenses_button.setProperty("primary", True)
-        self.sync_payment_button = QPushButton("Đồng bộ BK → Thanh toán")
+        self.post_expenses_button.setAccessibleName("Nhập khoản chi vào BK")
+        self.sync_payment_button = QPushButton("Đồng bộ")
         self.sync_payment_button.setObjectName("syncPaymentWorkbookButton")
         self.sync_payment_button.setProperty("primary", True)
+        self.sync_payment_button.setAccessibleName("Đồng bộ BK sang Thanh toán")
+        self.view_daily_sync_button = QPushButton("Chưa có dữ liệu")
+        self.view_daily_sync_button.setObjectName("viewLatestDailySyncButton")
+        self.view_expense_posting_button = QPushButton("Chưa có dữ liệu")
+        self.view_expense_posting_button.setObjectName(
+            "viewLatestExpensePostingButton"
+        )
+        self.view_payment_sync_button = QPushButton("Chưa có dữ liệu")
+        self.view_payment_sync_button.setObjectName("viewLatestPaymentSyncButton")
+        for view_button in (
+            self.view_daily_sync_button,
+            self.view_expense_posting_button,
+            self.view_payment_sync_button,
+        ):
+            view_button.setProperty("link", True)
+            view_button.setEnabled(False)
+            view_button.setMinimumWidth(0)
+            view_button.setMaximumWidth(105)
+            view_button.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Fixed,
+            )
         for button in (
             self.sync_daily_button,
             self.post_expenses_button,
             self.sync_payment_button,
         ):
-            button.setMinimumWidth(0)
-            button.setMaximumWidth(205)
+            button.setFixedWidth(110)
             button.setSizePolicy(
-                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Fixed,
                 QSizePolicy.Policy.Fixed,
         )
         self.excel_loading_bar = LinearLoadingBar()
         self.excel_loading_bar.setAccessibleName("Tiến trình xử lý Excel")
         intro3.addWidget(self.excel_loading_bar)
         intro3.addStretch(1)
-        step3.addWidget(step3_intro)
+        step3.addWidget(step3_intro, 0, 0, 3, 1)
 
         def add_excel_action(
             title_text: str,
             description: str,
             status_label: QLabel,
             button: QPushButton,
+            view_button: QPushButton,
+            row_index: int,
         ) -> QFrame:
             action = QFrame()
-            action.setProperty("actionRow", True)
+            action.setProperty("taskRow", True)
             action.setToolTip(description)
-            action_layout = QVBoxLayout(action)
-            action_layout.setContentsMargins(10, 6, 10, 6)
-            action_layout.setSpacing(5)
-            details = QVBoxLayout()
-            details.setSpacing(1)
+            action_layout = QHBoxLayout(action)
+            action_layout.setContentsMargins(10, 5, 5, 5)
+            action_layout.setSpacing(8)
             action_title = QLabel(title_text)
             action_title.setProperty("actionTitle", True)
             action_title.setToolTip(description)
-            action_title.setMinimumWidth(0)
+            action_title.setMinimumWidth(100)
+            action_title.setMaximumWidth(125)
             action_title.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Preferred,
+            )
+            status_label.setToolTip(status_label.text())
+            status_label.setSizePolicy(
                 QSizePolicy.Policy.Ignored,
                 QSizePolicy.Policy.Preferred,
             )
-            details.addWidget(action_title)
-            details.addWidget(status_label)
-            action_layout.addLayout(details)
-            action_layout.addWidget(
-                button,
-                0,
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            )
-            step3.addWidget(action, 1)
+            action_layout.addWidget(action_title)
+            action_layout.addWidget(status_label, 1)
+            action_layout.addWidget(button)
+            action_layout.addWidget(view_button)
+            step3.addWidget(action, row_index, 1)
             return action
 
         self.daily_sync_action = add_excel_action(
@@ -349,18 +390,24 @@ class WorkflowPage(QWidget):
             "Cập nhật dữ liệu từ workbook Hàng ngày vào BK Tổng hợp.",
             self.sync_status_label,
             self.sync_daily_button,
+            self.view_daily_sync_button,
+            0,
         )
         self.expense_posting_action = add_excel_action(
             "Khoản chi → BK",
             "Ghi các khoản chi đã kiểm tra và xác nhận vào BK Tổng hợp.",
             self.posting_status_label,
             self.post_expenses_button,
+            self.view_expense_posting_button,
+            1,
         )
         self.payment_sync_action = add_excel_action(
             "BK → Thanh toán",
             "Chuyển dữ liệu từ BK Tổng hợp sang workbook Thanh toán.",
             self.payment_sync_status_label,
             self.sync_payment_button,
+            self.view_payment_sync_button,
+            2,
         )
         workflow_grid.addWidget(self.step3_card, 2, 0)
 
@@ -405,14 +452,24 @@ class WorkflowPage(QWidget):
         self.run_rpa_expense_button.setProperty("primary", True)
         self.run_rpa_expense_button.setFixedWidth(primary_button_width)
         step4_controls.addWidget(self.run_rpa_expense_button)
-        self.rpa_loading_bar = LinearLoadingBar()
-        self.rpa_loading_bar.setAccessibleName("Tiến trình chuẩn bị RPA")
-        step4_controls.addWidget(self.rpa_loading_bar)
         self.rpa_expense_status_label = QLabel("Chạy RPA gần nhất: —")
         self.rpa_expense_status_label.setObjectName("rpaExpenseStatusLabel")
         self.rpa_expense_status_label.setWordWrap(True)
         self.rpa_expense_status_label.setProperty("muted", True)
-        step4_controls.addWidget(self.rpa_expense_status_label)
+        self.view_rpa_expense_button = QPushButton("Chưa có dữ liệu đã gửi")
+        self.view_rpa_expense_button.setObjectName("viewLatestRpaExpenseButton")
+        self.view_rpa_expense_button.setProperty("link", True)
+        self.view_rpa_expense_button.setMaximumWidth(165)
+        self.view_rpa_expense_button.setEnabled(False)
+        rpa_recent = QHBoxLayout()
+        rpa_recent.setContentsMargins(0, 0, 0, 0)
+        rpa_recent.setSpacing(8)
+        rpa_recent.addWidget(self.rpa_expense_status_label, 1)
+        rpa_recent.addWidget(self.view_rpa_expense_button)
+        step4_details.addLayout(rpa_recent)
+        self.rpa_loading_bar = LinearLoadingBar()
+        self.rpa_loading_bar.setAccessibleName("Tiến trình chuẩn bị RPA")
+        step4_controls.addWidget(self.rpa_loading_bar)
         step4.addLayout(step4_controls)
         workflow_grid.addWidget(self.step4_card, 3, 0)
 
@@ -674,6 +731,25 @@ class WorkflowPage(QWidget):
         self.rpa_expense_status_label.setText(
             f"Chạy RPA gần nhất: {message or 'Đã khởi chạy PAD.'}"
         )
+
+    def set_latest_excel_data_available(
+        self, operation: Any, available: bool
+    ) -> None:
+        normalized = self._excel_operation(operation)
+        buttons = {
+            self.SYNC_OPERATION: self.view_daily_sync_button,
+            self.POSTING_OPERATION: self.view_expense_posting_button,
+            self.PAYMENT_SYNC_OPERATION: self.view_payment_sync_button,
+        }
+        button = buttons[normalized]
+        button.setText("Xem lại ›" if available else "Chưa có dữ liệu")
+        button.setEnabled(bool(available))
+
+    def set_latest_rpa_data_available(self, available: bool) -> None:
+        self.view_rpa_expense_button.setText(
+            "Xem dữ liệu đã gửi ›" if available else "Chưa có dữ liệu đã gửi"
+        )
+        self.view_rpa_expense_button.setEnabled(bool(available))
 
     def set_rpa_idle(self) -> None:
         self._rpa_running = False

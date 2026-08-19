@@ -134,7 +134,11 @@ class Database:
                 self._migration_17(connection)
                 connection.execute("PRAGMA user_version = 17")
                 current_version = 17
-            self._ensure_schema_17(connection)
+            if current_version < 18:
+                self._migration_18(connection)
+                connection.execute("PRAGMA user_version = 18")
+                current_version = 18
+            self._ensure_schema_18(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -1136,6 +1140,23 @@ class Database:
     @staticmethod
     def _ensure_schema_17(connection: sqlite3.Connection) -> None:
         Database._ensure_schema_16(connection)
+
+    @staticmethod
+    def _migration_18(connection: sqlite3.Connection) -> None:
+        """Lưu manifest chi tiết để có thể xem lại kết quả Excel gần nhất."""
+
+        Database._ensure_schema_17(connection)
+        Database._ensure_schema_18(connection)
+
+    @staticmethod
+    def _ensure_schema_18(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_17(connection)
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(excel_runs)").fetchall()
+        }
+        if columns and "item_outcomes" not in columns:
+            connection.execute("ALTER TABLE excel_runs ADD COLUMN item_outcomes TEXT")
 
     @contextmanager
     def transaction(

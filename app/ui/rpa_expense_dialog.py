@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from PySide6.QtCore import Qt
@@ -183,4 +184,117 @@ class RpaSqtSelectionDialog(QDialog):
         self.accept()
 
 
-__all__ = ["RpaSqtSelectionDialog"]
+class RpaLatestDataDialog(QDialog):
+    """Bảng chỉ đọc của đúng payload gần nhất đã gửi sang PAD."""
+
+    COLUMNS = (
+        "SQT",
+        "Trạng thái trước khi gửi",
+        "Dòng BK",
+        "Cước MB",
+        "N.hạ MB",
+        "Cước biển",
+        "N.hạ/VS/D/O/Lệnh",
+        "Cước MN",
+        "Tiền hàng",
+        "Công nhân bốc xếp",
+        "Lưu cont/Quá tải",
+        "Sửa chữa",
+        "Tổng",
+    )
+    AMOUNT_KEYS = (
+        "cuoc_bo_dong_hang",
+        "nang_ha_dong_hang",
+        "cuoc_bien",
+        "nang_do_vs_lam_lenh",
+        "cuoc_bo_tra_hang",
+        "tien_hang",
+        "cong_nhan_boc_xep",
+        "luu_cont_qua_tai",
+        "sua_chua_cont",
+    )
+
+    def __init__(
+        self,
+        payload: Mapping[str, Any],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.payload = dict(payload)
+        self.setObjectName("rpaLatestDataDialog")
+        self.setWindowTitle("Dữ liệu gần nhất đã gửi sang PAD")
+        self.resize(1480, 680)
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        sheet_name = str(self.payload.get("sheet_name") or "—")
+        run_id = str(self.payload.get("run_id") or "—")
+        timestamp = str(
+            self.payload.get("launched_at")
+            or self.payload.get("created_at")
+            or "—"
+        )
+        title = QLabel(
+            f"Sheet {sheet_name} · Run {run_id}\nĐã gửi sang PAD: {timestamp}"
+        )
+        title.setWordWrap(True)
+        title.setStyleSheet("font-size: 12pt; font-weight: 700;")
+        layout.addWidget(title)
+        note = QLabel(
+            "Bảng hiển thị toàn bộ SQT trong payload đã gửi sang PAD gần nhất. "
+            "Trạng thái trong bảng là trạng thái tại thời điểm gửi."
+        )
+        note.setWordWrap(True)
+        note.setProperty("muted", True)
+        layout.addWidget(note)
+
+        items = self.payload.get("items")
+        values = items if isinstance(items, list) else []
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setObjectName("rpaLatestDataTable")
+        self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        for source in values:
+            if isinstance(source, Mapping):
+                self._add_payload_item(source)
+        layout.addWidget(self.table, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _add_payload_item(self, source: Mapping[str, Any]) -> None:
+        amounts_value = source.get("amounts")
+        amounts = amounts_value if isinstance(amounts_value, Mapping) else {}
+        amount_values = [amounts.get(key, 0) for key in self.AMOUNT_KEYS]
+        source_rows = source.get("source_rows")
+        rows_text = (
+            ", ".join(str(value) for value in source_rows)
+            if isinstance(source_rows, (list, tuple))
+            else str(source_rows or "—")
+        )
+        cells = (
+            source.get("sqt"),
+            source.get("status_before"),
+            rows_text,
+            *(_money(value) for value in amount_values),
+            _money(sum(int(value or 0) for value in amount_values)),
+        )
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        for column, value in enumerate(cells):
+            item = QTableWidgetItem(str(value if value is not None else "—"))
+            item.setToolTip(item.text())
+            self.table.setItem(row, column, item)
+
+
+__all__ = ["RpaLatestDataDialog", "RpaSqtSelectionDialog"]

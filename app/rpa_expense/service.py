@@ -321,6 +321,39 @@ class RpaExpenseService:
             payload=payload,
         )
 
+    @property
+    def latest_launched_path(self) -> Path:
+        return self.runtime_dir / "rpa_latest_launched.json"
+
+    def record_launched(self, prepared: PreparedRpaSelection) -> Path:
+        """Chỉ thay snapshot xem lại sau khi BAT/PAD đã khởi chạy thành công."""
+
+        payload = dict(prepared.payload)
+        payload["launched_at"] = datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        self._write_json_atomic(self.latest_launched_path, payload)
+        return self.latest_launched_path.resolve()
+
+    def load_latest_launched(self) -> dict[str, Any] | None:
+        path = self.latest_launched_path
+        if not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RpaExpenseError(
+                f"Không đọc được dữ liệu RPA gần nhất: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RpaExpenseError("Dữ liệu RPA gần nhất phải là object.")
+        if payload.get("operation") != RPA_EXPENSE_OPERATION:
+            raise RpaExpenseError("Dữ liệu gần nhất không đúng nghiệp vụ RPA.")
+        if not isinstance(payload.get("items"), list):
+            raise RpaExpenseError("Dữ liệu RPA gần nhất thiếu danh sách SQT.")
+        return payload
+
     def _target_path(self) -> Path:
         if not str(self.bk_path).strip() or str(self.bk_path) == ".":
             raise RpaExpenseError("Chưa cấu hình file BK Tổng hợp.")

@@ -38,7 +38,7 @@ from .review_window import ReviewWindow
 from .settings_page import SettingsPage
 from .workflow_page import WorkflowPage
 from .sea_freight_center import SeaFreightReconciliationDialog
-from .rpa_expense_dialog import RpaSqtSelectionDialog
+from .rpa_expense_dialog import RpaLatestDataDialog, RpaSqtSelectionDialog
 from .excel_dialogs import (
     ConflictResolutionDialog,
     DailySyncAllocationDialog,
@@ -322,6 +322,8 @@ class MainWindow(QMainWindow):
         self._excel_review_operation: str | None = None
         self._excel_review_confirmed = False
         self._excel_reanalysis_from_source_change = False
+        self._latest_excel_outcomes: dict[str, list[Any]] = {}
+        self._latest_rpa_payload: dict[str, Any] | None = None
         self._paths = paths or _attribute(controller, "paths", "app_paths")
         self._settings = settings or _attribute(controller, "settings")
         self._active_batch: Any | None = None
@@ -452,6 +454,12 @@ class MainWindow(QMainWindow):
         self.workflow_page.run_rpa_expense_requested.connect(
             self.start_rpa_expense
         )
+        self.workflow_page.view_latest_excel_requested.connect(
+            self.show_latest_excel_data
+        )
+        self.workflow_page.view_latest_rpa_requested.connect(
+            self.show_latest_rpa_data
+        )
         self.history_page.refresh_requested.connect(self.refresh_history)
         self.history_page.open_batch_requested.connect(self.open_review)
         self.history_page.open_path_requested.connect(self.open_containing_folder)
@@ -523,6 +531,7 @@ class MainWindow(QMainWindow):
         self.workflow_page.set_configuration(self._settings)
         self.settings_page.set_settings(self._settings)
         self._load_excel_history()
+        self._load_rpa_history()
         self.refresh_history(silent=True)
         if self._batch_service is None:
             self.workflow_page.clear_active_batch()
@@ -868,17 +877,26 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _rpa_launched(self, result: Any) -> None:
         self.workflow_page.set_rpa_result(result)
+        self._load_rpa_history()
         self.statusBar().showMessage(
             str(_attribute(result, "message", default="Đã khởi chạy PAD.")),
             10000,
         )
-        QMessageBox.information(
-            self,
-            "Đã khởi chạy RPA",
+        message = QMessageBox(self)
+        message.setIcon(QMessageBox.Icon.Information)
+        message.setWindowTitle("Đã khởi chạy RPA")
+        message.setText(
             f"{_attribute(result, 'message', default='Đã khởi chạy PAD.')}\n\n"
             f"File dữ liệu: {_attribute(result, 'selection_path', default='')}\n"
             "PAD chỉ đánh dấu “Đã nhập” sau khi thao tác Lưu trên web thành công.",
         )
+        view_details = message.addButton(
+            "Xem dữ liệu đã gửi", QMessageBox.ButtonRole.ActionRole
+        )
+        message.addButton(QMessageBox.StandardButton.Ok)
+        message.exec()
+        if message.clickedButton() is view_details:
+            self.show_latest_rpa_data()
 
     @Slot(object)
     def _rpa_failed(self, error: Any) -> None:
@@ -1696,6 +1714,16 @@ class MainWindow(QMainWindow):
             _attribute(result, "message", default="Hoàn tất xử lý Excel.") or ""
         )
         item_outcomes = list(_attribute(result, "item_outcomes", default=()) or ())
+        latest = getattr(self, "_latest_excel_outcomes", None)
+        if not isinstance(latest, dict):
+            latest = {}
+            self._latest_excel_outcomes = latest
+        latest[operation] = item_outcomes
+        availability = getattr(
+            self.workflow_page, "set_latest_excel_data_available", None
+        )
+        if callable(availability):
+            availability(operation, bool(item_outcomes))
         outcome_summary = _outcome_summary(item_outcomes)
         if operation == "payment_sync":
             result_targets = _attribute(result, "target_results", default={}) or {}
@@ -2145,7 +2173,20 @@ class MainWindow(QMainWindow):
                 LOGGER.exception("Không đọc được lịch sử %s.", operation)
                 continue
             if record is None:
+                self._latest_excel_outcomes.pop(ui_operation, None)
+                availability = getattr(
+                    self.workflow_page, "set_latest_excel_data_available", None
+                )
+                if callable(availability):
+                    availability(ui_operation, False)
                 continue
+            outcomes = _attribute(record, "item_outcomes", default=()) or ()
+            self._latest_excel_outcomes[ui_operation] = list(outcomes)
+            availability = getattr(
+                self.workflow_page, "set_latest_excel_data_available", None
+            )
+            if callable(availability):
+                availability(ui_operation, bool(outcomes))
             timestamp = _attribute(record, "completed_at", "started_at", default="")
             try:
                 from datetime import datetime
@@ -2173,6 +2214,50 @@ class MainWindow(QMainWindow):
                     f"bỏ qua {_attribute(record, 'skipped_items', default=0)}"
                 )
             self.workflow_page.set_excel_result(ui_operation, summary)
+
+    @Slot(str)
+    def show_latest_excel_data(self, operation: str) -> None:
+        try:
+            normalized = self.workflow_page._excel_operation(operation)
+        except Exception:
+            normalized = str(operation)
+        outcomes = list(self._latest_excel_outcomes.get(normalized, ()))
+        if not outcomes:
+            QMessageBox.information(
+                self,
+                "Chưa có dữ liệu",
+                "Chưa có dữ liệu hoàn tất nào của luồng này để xem lại.",
+            )
+            return
+        ExcelOutcomeDialog(outcomes, parent=self).exec()
+
+    def _load_rpa_history(self) -> None:
+        payload: dict[str, Any] | None = None
+        loader = getattr(self._rpa_expense, "load_latest_launched", None)
+        if callable(loader):
+            try:
+                value = loader()
+                payload = dict(value) if isinstance(value, Mapping) else None
+            except Exception:
+                LOGGER.exception("Không đọc được dữ liệu RPA gần nhất.")
+        self._latest_rpa_payload = payload
+        availability = getattr(
+            self.workflow_page, "set_latest_rpa_data_available", None
+        )
+        if callable(availability):
+            availability(bool(payload and payload.get("items")))
+
+    @Slot()
+    def show_latest_rpa_data(self) -> None:
+        payload = self._latest_rpa_payload
+        if not payload:
+            QMessageBox.information(
+                self,
+                "Chưa có dữ liệu RPA",
+                "Chưa có dữ liệu nào đã được gửi sang PAD để xem lại.",
+            )
+            return
+        RpaLatestDataDialog(payload, self).exec()
 
     @Slot(object)
     def check_settings(self, settings_data: Mapping[str, Any]) -> None:

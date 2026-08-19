@@ -473,7 +473,7 @@ def test_database_v17_removes_vat_history_and_recalculates_aggregates(
 
     migrated = Database(path)
 
-    assert migrated.query_one("PRAGMA user_version")[0] == 17
+    assert migrated.query_one("PRAGMA user_version")[0] == SQLITE_SCHEMA_VERSION
     assert migrated.query_one(
         """
         SELECT COUNT(*)

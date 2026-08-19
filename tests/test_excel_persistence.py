@@ -41,6 +41,10 @@ def test_v2_database_is_migrated_transactionally_to_excel_schema(
     assert database.query_one(
         "SELECT name FROM sqlite_master WHERE name = 'excel_runs'"
     )
+    excel_run_columns = {
+        row["name"] for row in database.query_all("PRAGMA table_info(excel_runs)")
+    }
+    assert "item_outcomes" in excel_run_columns
     assert database.query_one(
         "SELECT name FROM sqlite_master WHERE name = 'expense_posting_items'"
     )
@@ -101,12 +105,20 @@ def test_excel_run_repository_tracks_fingerprints_counts_and_latest_sheet(
         changed_items=2,
         skipped_items=1,
         conflict_count=1,
+        item_outcomes=[
+            {
+                "item_id": "daily-2",
+                "status": "WRITTEN",
+                "fields": [{"field_name": "SQT", "target_value_after": 101}],
+            }
+        ],
     )
 
     assert completed.target_fingerprint_before == before
     assert completed.target_fingerprint_after == {"sha256": "c" * 64}
     assert completed.backup_path == tmp_path / "Backup" / "bk.xlsx"
     assert completed.completed_at is not None
+    assert completed.item_outcomes[0]["item_id"] == "daily-2"
     assert repository.get_latest_sync_sheet() == "T07 26"
     assert repository.get_latest(
         operation="DAILY_SYNC",

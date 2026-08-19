@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
 )
 
 import app.ui.main_window as main_window_module
+from app.database import Database
+from app.repositories.excel_run_repository import ExcelRunRepository
 from app.ui.excel_dialogs import (
     ConflictResolutionDialog,
     ExcelOutcomeDialog,
@@ -45,9 +47,9 @@ def test_step_three_has_three_primary_actions_and_statuses(qtbot) -> None:
         page.post_expenses_button,
         page.sync_payment_button,
     ]
-    assert page.sync_daily_button.text() == "Đồng bộ dữ liệu Hàng ngày"
-    assert page.post_expenses_button.text() == "Nhập khoản chi vào BK"
-    assert page.sync_payment_button.text() == "Đồng bộ BK → Thanh toán"
+    assert page.sync_daily_button.text() == "Đồng bộ"
+    assert page.post_expenses_button.text() == "Nhập vào BK"
+    assert page.sync_payment_button.text() == "Đồng bộ"
     assert page.sync_status_label.text() == "Đồng bộ gần nhất: —"
     assert page.posting_status_label.text() == "Nhập khoản chi gần nhất: —"
     assert (
@@ -96,6 +98,88 @@ def test_outcome_dialog_flattens_fields_and_filters_errors(qtbot) -> None:
     assert dialog.table.item(0, 10).text() == "Thiếu SQT"
 
 
+def test_main_window_restores_latest_excel_details_after_restart(
+    monkeypatch,
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "app_state.db")
+    repository = ExcelRunRepository(database)
+    run = repository.create_run(operation="DAILY_SYNC")
+    repository.finish_run(
+        run.id,
+        status="SUCCEEDED",
+        sheet_name="T07 26",
+        item_outcomes=[
+            {
+                "item_id": "daily-row-2",
+                "status": "WRITTEN",
+                "fields": [{"field_name": "Dòng đồng bộ A–K/P"}],
+            }
+        ],
+    )
+    captured: dict[str, Any] = {}
+
+    class Dialog:
+        def __init__(self, outcomes: Any, *, parent: Any = None) -> None:
+            captured["outcomes"] = list(outcomes)
+            captured["parent"] = parent
+
+        @staticmethod
+        def exec() -> None:
+            captured["opened"] = True
+
+    monkeypatch.setattr(main_window_module, "ExcelOutcomeDialog", Dialog)
+    window = MainWindow(
+        settings={},
+        excel_run_repository=repository,
+        start_watcher=False,
+    )
+    qtbot.addWidget(window)
+
+    assert window.workflow_page.view_daily_sync_button.isEnabled()
+    window.workflow_page.view_daily_sync_button.click()
+    assert captured["opened"] is True
+    assert captured["outcomes"][0]["item_id"] == "daily-row-2"
+    database.close()
+
+
+def test_main_window_restores_latest_rpa_payload_after_restart(
+    monkeypatch,
+    qtbot,
+) -> None:
+    payload = {
+        "operation": "NHAP_KHOAN_CHI_BK",
+        "run_id": "run-1",
+        "sheet_name": "T07 26",
+        "items": [{"sqt": "101", "amounts": {}}],
+    }
+    controller = SimpleNamespace(load_latest_launched=lambda: payload)
+    captured: dict[str, Any] = {}
+
+    class Dialog:
+        def __init__(self, value: Any, parent: Any = None) -> None:
+            captured["payload"] = value
+            captured["parent"] = parent
+
+        @staticmethod
+        def exec() -> None:
+            captured["opened"] = True
+
+    monkeypatch.setattr(main_window_module, "RpaLatestDataDialog", Dialog)
+    window = MainWindow(
+        settings={},
+        rpa_expense_controller=controller,
+        start_watcher=False,
+    )
+    qtbot.addWidget(window)
+
+    assert window.workflow_page.view_rpa_expense_button.isEnabled()
+    window.workflow_page.view_rpa_expense_button.click()
+    assert captured["opened"] is True
+    assert captured["payload"]["run_id"] == "run-1"
+
+
 def test_step_three_locks_all_excel_actions_while_running(qtbot) -> None:
     page = WorkflowPage()
     qtbot.addWidget(page)
@@ -113,7 +197,7 @@ def test_step_three_locks_all_excel_actions_while_running(qtbot) -> None:
     assert page.sync_daily_button.isEnabled()
     assert page.post_expenses_button.isEnabled()
     assert page.sync_payment_button.isEnabled()
-    assert page.sync_daily_button.text() == "Đồng bộ dữ liệu Hàng ngày"
+    assert page.sync_daily_button.text() == "Đồng bộ"
 
 
 def test_sync_button_requires_source_sheet_before_starting_analysis(

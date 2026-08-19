@@ -1402,6 +1402,7 @@ class DailySyncService:
             changed_items=result.inserted_rows + result.updated_rows,
             skipped_items=result.invalid_rows,
             conflict_count=result.conflict_count,
+            item_outcomes=result.item_outcomes,
         )
 
     def _finish_failed(self, run_id: int | None, exc: Exception) -> None:

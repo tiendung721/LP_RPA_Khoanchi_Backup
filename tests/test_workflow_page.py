@@ -60,6 +60,37 @@ def test_invalid_batch_never_claims_successful_save(qtbot) -> None:
     assert not page.review_button.isEnabled()
 
 
+def test_four_latest_data_buttons_are_independent_and_emit_their_flow(qtbot) -> None:
+    page = WorkflowPage()
+    qtbot.addWidget(page)
+    excel_requests: list[str] = []
+    rpa_requests: list[bool] = []
+    page.view_latest_excel_requested.connect(excel_requests.append)
+    page.view_latest_rpa_requested.connect(lambda: rpa_requests.append(True))
+
+    assert not page.view_daily_sync_button.isEnabled()
+    assert not page.view_expense_posting_button.isEnabled()
+    assert not page.view_payment_sync_button.isEnabled()
+    assert not page.view_rpa_expense_button.isEnabled()
+    assert page.view_daily_sync_button.text() == "Chưa có dữ liệu"
+    assert page.view_rpa_expense_button.text() == "Chưa có dữ liệu đã gửi"
+
+    for operation, button in (
+        ("sync", page.view_daily_sync_button),
+        ("posting", page.view_expense_posting_button),
+        ("payment_sync", page.view_payment_sync_button),
+    ):
+        page.set_latest_excel_data_available(operation, True)
+        button.click()
+    page.set_latest_rpa_data_available(True)
+    page.view_rpa_expense_button.click()
+
+    assert excel_requests == ["sync", "posting", "payment_sync"]
+    assert rpa_requests == [True]
+    assert page.view_daily_sync_button.text() == "Xem lại ›"
+    assert page.view_rpa_expense_button.text() == "Xem dữ liệu đã gửi ›"
+
+
 def test_four_workflow_groups_fit_minimum_window_without_scroll(qtbot) -> None:
     window = MainWindow(settings={}, start_watcher=False)
     qtbot.addWidget(window)

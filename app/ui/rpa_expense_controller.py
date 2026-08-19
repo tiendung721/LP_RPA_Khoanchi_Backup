@@ -81,9 +81,17 @@ class RpaExpenseController(QObject):
                 self.progress.emit,
             )
             self.progress.emit("Đang khởi chạy BAT của PAD…")
-            return self.launcher.launch(prepared)
+            result = self.launcher.launch(prepared)
+            record_launched = getattr(self.service, "record_launched", None)
+            if callable(record_launched):
+                record_launched(prepared)
+            return result
 
         self._submit("launch", worker, self.launched)
+
+    def load_latest_launched(self) -> dict[str, Any] | None:
+        loader = getattr(self.service, "load_latest_launched", None)
+        return loader() if callable(loader) else None
 
     def _submit(self, phase: str, worker: Any, success_signal: Signal) -> None:
         with self._lock:
