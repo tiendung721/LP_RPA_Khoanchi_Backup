@@ -10,7 +10,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 import app.services.excel.payment_sync as payment_module
-from app.services.excel.models import ConflictType, ResolutionAction
+from app.services.excel.models import ConflictType, OutcomeStatus, ResolutionAction
 from app.services.excel.payment_sync import (
     DATE_NUMBER_FORMAT,
     SUMMARY_HEADERS,
@@ -390,7 +390,12 @@ def test_blank_bk_money_defaults_to_keep_and_can_be_explicitly_cleared(tmp_path:
     _bk, payment, service, payload = arrange(tmp_path / "keep")
     plan, conflict = payload
     assert conflict.default_action is ResolutionAction.KEEP_EXISTING
-    service.apply(plan, {})
+    keep_result = service.apply(plan, {})
+    assert any(
+        field.status is OutcomeStatus.USER_KEPT
+        for outcome in keep_result.item_outcomes
+        for field in outcome.fields
+    )
     workbook = load_workbook(payment)
     assert workbook["T06 26 NAM"]["D8"].value == 999
     workbook.close()
@@ -426,6 +431,62 @@ def test_partial_or_duplicate_keys_require_row_selection(
     conflict = plan.targets["HP"].conflicts[0]
     assert conflict.conflict_type is ConflictType.PARTIAL_KEY_MATCH
     assert conflict.row_candidates
+
+
+def test_selected_payment_row_survives_followup_invoice_conflict(
+    tmp_path: Path,
+) -> None:
+    bk, payment = tmp_path / "bk.xlsx", tmp_path / "payment.xlsx"
+    _save_invoice_bk(bk, [_invoice_source_row(loaded_drop=25)])
+    _save_invoice_payment(payment, hp_invoice="OLD")
+    workbook = load_workbook(payment)
+    workbook["T06 26 HP"]["B8"] = "OTHER"
+    workbook.save(payment)
+    workbook.close()
+    service = _service(bk, payment, tmp_path / "runtime")
+
+    plan = service.analyze(source_sheet_name="T06 26")
+    row_conflict = next(
+        conflict
+        for conflict in plan.conflicts
+        if conflict.conflict_type is ConflictType.PARTIAL_KEY_MATCH
+        and conflict.details.get("target_type") == "HP"
+    )
+    selected = service.refine(
+        plan,
+        {
+            row_conflict.conflict_id: {
+                "action": "SELECT_ROW",
+                "selected_row": 8,
+            }
+        },
+    )
+    selected_item = next(item for item in selected.items if item.target_type == "HP")
+    assert selected_item.selected_target_row == 8
+    invoice_conflict = next(
+        conflict
+        for conflict in selected.conflicts
+        if conflict.conflict_type is ConflictType.INVOICE_VALUE_CONFLICT
+        and conflict.details.get("target_type") == "HP"
+    )
+
+    prepared = service.refine(
+        selected,
+        {invoice_conflict.conflict_id: {"action": "OVERWRITE"}},
+    )
+    assert not prepared.conflicts
+    prepared_item = next(item for item in prepared.items if item.target_type == "HP")
+    assert prepared_item.selected_target_row == 8
+    assert prepared_item.target_row == 8
+
+    result = service.apply(prepared, {})
+    assert result.item_outcomes
+    workbook = load_workbook(payment)
+    try:
+        assert workbook["T06 26 HP"]["B8"].value == "CONT700"
+        assert workbook["T06 26 HP"]["E8"].value == "INV-HH"
+    finally:
+        workbook.close()
 
 
 def test_inserting_before_total_extends_local_sum_but_not_external_reference(tmp_path: Path) -> None:

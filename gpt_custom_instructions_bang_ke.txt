@@ -57,7 +57,6 @@ Giữ liên kết Bill, tàu/chuyến và container của cùng dòng ngay cả 
 
 Chỉ xử lý các cột nghiệp vụ sau:
 
-- THUẾ GTGT
 - PHÍ CHỨNG TỪ
 - PHÍ VỆ SINH
 - QUÁ TẢI
@@ -71,6 +70,7 @@ Chỉ xử lý các cột nghiệp vụ sau:
 - LÀM LỆNH
 
 Không xử lý các cột CƯỚC vận chuyển.
+Không xử lý cột VAT hoặc THUẾ GTGT và không bao giờ xuất fee="VAT".
 
 Nếu bảng có cột “QT” chứa số thứ tự đối chiếu sau phần chi phí thì phải bỏ qua; QUÁ TẢI chỉ lấy từ cột có đúng ý nghĩa phí quá tải.
 
@@ -109,7 +109,6 @@ Nếu Bill thiếu:
 
 # QUY TẮC PHÍ TRỰC TIẾP
 
-- VAT: amount = THUẾ GTGT của dòng; fee="VAT".
 - GH: amount = GIA HẠN của dòng; fee="GH".
 - LC: amount = LƯU HÀNG XUẤT của dòng; fee="LC".
 - NH: amount = PHÍ NÂNG + PHỤ THU PHÍ NÂNG TẠI CẢNG; fee="NH".
@@ -135,10 +134,10 @@ container + vessel_name + voyage_no + fee
 Mỗi khóa chỉ xuất một object. Giữ vị trí theo lần xuất hiện đầu tiên.
 
 Thứ tự fee trong cùng container:
-VSDL, QT, VAT, GH, LC, NH, HV, SC, LL.
+VSDL, QT, GH, LC, NH, HV, SC, LL.
 
 Không xuất object có amount bằng 0. Ô trống không tạo phí. Không tạo mã ngoài:
-VSDL, QT, VAT, GH, LC, NH, HV, SC, LL.
+VSDL, QT, GH, LC, NH, HV, SC, LL.
 
 # KIỂM TRA TRƯỚC KHI TẠO FILE
 
@@ -148,7 +147,7 @@ Phải tự kiểm tra:
 3. Mọi container cùng Bill đã tham gia chia.
 4. Tổng VSDL phân bổ khớp tổng phí chứng từ cộng vệ sinh.
 5. Tổng QT phân bổ khớp tổng QUÁ TẢI nguồn.
-6. Tổng VAT, GH, LC, NH, HV, SC và LL khớp các cột nguồn tương ứng.
+6. Tổng GH, LC, NH, HV, SC và LL khớp các cột nguồn tương ứng.
 7. Số âm được giữ đúng; dấu gạch đứng riêng không trở thành số.
 8. Root chỉ có v,d; v=2.
 9. Mỗi object đủ đúng 13 khóa.

@@ -399,3 +399,103 @@ def test_database_rebases_only_paths_inside_the_old_root(tmp_path: Path) -> None
     )
     assert moved.ready_path == new_root / "Ready" / "ready.json"
     database.close()
+
+
+def test_database_v17_removes_vat_history_and_recalculates_aggregates(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "vat-history.db"
+    database = Database(path)
+    repository = BatchRepository(database)
+    batch = repository.create_batch(
+        source_filename="old-bang-ke.json",
+        source_output_path=tmp_path / "old-bang-ke.json",
+        original_archive_path=tmp_path / "old-bang-ke.json",
+        working_path=tmp_path / "old-bang-ke.json",
+        ready_path=tmp_path / "old-bang-ke.json",
+        sha256="c" * 64,
+        status=BatchStatus.READY,
+    )
+    database.execute(
+        """
+        UPDATE batches
+        SET row_count = 3, valid_count = 3, total_amount = 600000
+        WHERE id = ?
+        """,
+        (batch.id,),
+    )
+    with database.transaction(immediate=True) as connection:
+        run_ids: list[int] = []
+        for suffix in (1, 2):
+            cursor = connection.execute(
+                """
+                INSERT INTO excel_runs (
+                    operation, started_at, status, total_items,
+                    changed_items, skipped_items, conflict_count
+                ) VALUES ('EXPENSE_POSTING', ?, 'SUCCEEDED', 3, 2, 1, 0)
+                """,
+                (f"2026-08-1{suffix}T08:00:00+07:00",),
+            )
+            run_ids.append(int(cursor.lastrowid))
+        for run_id in run_ids:
+            rows = (
+                (0, "VAT", "VAT", 100_000, "POSTED", "OVERWRITE"),
+                (1, " vat ", "VAT", 200_000, "USER_SKIPPED", "SKIP"),
+                (2, "VSDL", "VSDL", 300_000, "POSTED", "OVERWRITE"),
+            )
+            for index, original, selected, amount, status, action in rows:
+                connection.execute(
+                    """
+                    INSERT INTO expense_posting_items (
+                        run_id, batch_id, batch_hash, source_item_index,
+                        fee_original, fee_selected, rule, amount,
+                        action, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'GV', ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        batch.id,
+                        batch.sha256,
+                        index,
+                        original,
+                        selected,
+                        amount,
+                        action,
+                        status,
+                        "2026-08-18T08:00:00+07:00",
+                    ),
+                )
+    database.close()
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA user_version = 16")
+    connection.commit()
+    connection.close()
+
+    migrated = Database(path)
+
+    assert migrated.query_one("PRAGMA user_version")[0] == 17
+    assert migrated.query_one(
+        """
+        SELECT COUNT(*)
+        FROM expense_posting_items
+        WHERE UPPER(TRIM(fee_original)) = 'VAT'
+           OR UPPER(TRIM(COALESCE(fee_selected, ''))) = 'VAT'
+        """
+    )[0] == 0
+    assert migrated.query_one("SELECT COUNT(*) FROM expense_posting_items")[0] == 2
+    updated_batch = migrated.query_one(
+        "SELECT row_count, valid_count, total_amount FROM batches WHERE id = ?",
+        (batch.id,),
+    )
+    assert tuple(updated_batch) == (1, 1, 300_000)
+    updated_runs = migrated.query_all(
+        """
+        SELECT total_items, changed_items, skipped_items
+        FROM excel_runs
+        ORDER BY id
+        """
+    )
+    assert [tuple(row) for row in updated_runs] == [(1, 1, 0), (1, 1, 0)]
+    assert migrated.query_one("PRAGMA integrity_check")[0] == "ok"
+    assert migrated.query_all("PRAGMA foreign_key_check") == []
+    migrated.close()

@@ -307,3 +307,32 @@ def test_cancel_action_is_not_replayed(tmp_path: Path) -> None:
 
     assert drafts.restore(plan, "posting")[1] == {}
     database.close()
+
+
+def test_dynamic_conflict_snapshot_is_saved_and_requires_same_fingerprint(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "app.db")
+    drafts = ExcelDraftService(ExcelDraftRepository(database))
+    base = _plan(tmp_path, _occupied_conflict(current=100))
+    dynamic = _occupied_conflict(current=200)
+    dynamic.conflict_id = "dynamic-invoice"
+    resolution = {
+        dynamic.conflict_id: {
+            "conflict_id": dynamic.conflict_id,
+            "action": "OVERWRITE",
+        }
+    }
+
+    drafts.save(
+        base,
+        "posting",
+        resolution,
+        conflicts=[dynamic],
+    )
+    assert drafts.restore_for_conflicts(base, "posting", [dynamic]) == resolution
+
+    changed = _plan(tmp_path, _occupied_conflict(current=100))
+    changed.target_fingerprint = WorkbookFingerprint(10, 20, "c" * 64)
+    assert drafts.restore_for_conflicts(changed, "posting", [dynamic]) == {}
+    database.close()

@@ -130,6 +130,36 @@ class ExcelDraftService:
         result = self.restore_with_info(plan, operation)
         return result.source_file_key, dict(result.resolutions)
 
+    def restore_for_conflicts(
+        self,
+        plan: Any,
+        operation: str,
+        conflicts: Sequence[Any],
+    ) -> dict[str, Any]:
+        """Khôi phục lựa chọn tương thích cho một vòng conflict động bất kỳ."""
+
+        context = self._context(plan, operation)
+        record = self.repository.get_latest(self._source_file_key(context))
+        if record is None or not self._target_is_compatible(record.context, context):
+            return {}
+        entries = record.payload.get("entries", {})
+        if not isinstance(entries, Mapping):
+            return {}
+        restored: dict[str, Any] = {}
+        for conflict in conflicts:
+            conflict_id = self._conflict_id(conflict)
+            entry = entries.get(conflict_id)
+            if not isinstance(entry, Mapping):
+                continue
+            if entry.get("signature") != self._conflict_signature(conflict):
+                continue
+            resolution = entry.get("resolution")
+            if isinstance(resolution, Mapping) and self._resolution_is_valid(
+                conflict, resolution
+            ):
+                restored[conflict_id] = dict(resolution)
+        return restored
+
     def restore_with_info(self, plan: Any, operation: str) -> ExcelDraftRestore:
         context = self._context(plan, operation)
         source_file_key = self._source_file_key(context)
@@ -246,6 +276,8 @@ class ExcelDraftService:
         plan: Any,
         operation: str,
         resolutions: Mapping[str, Any] | Sequence[Any] | None,
+        *,
+        conflicts: Sequence[Any] | None = None,
     ) -> str:
         context = self._context(plan, operation)
         source_file_key = self._source_file_key(context)
@@ -271,8 +303,11 @@ class ExcelDraftService:
         )
         if split_document_ids:
             globals_value["split_document_ids"] = split_document_ids
-        conflicts = {
-            self._conflict_id(conflict): conflict for conflict in self._conflicts(plan)
+        conflict_values = (
+            tuple(conflicts) if conflicts is not None else self._conflicts(plan)
+        )
+        conflicts_by_id = {
+            self._conflict_id(conflict): conflict for conflict in conflict_values
         }
         if resolutions is None:
             resolution_values: dict[str, Any] = {}
@@ -303,7 +338,7 @@ class ExcelDraftService:
                     str(value) for value in _sequence(raw_resolution) if str(value).strip()
                 )
                 continue
-            conflict = conflicts.get(key)
+            conflict = conflicts_by_id.get(key)
             if conflict is None:
                 continue
             resolution = _jsonable(raw_resolution)
@@ -365,6 +400,9 @@ class ExcelDraftService:
             "source_path": _path_key(source_path),
             "source_identity": source_identity,
             "target_path": _path_key(_value(plan, "target_path", default=None)),
+            "target_fingerprint": _fingerprint_key(
+                _value(plan, "target_fingerprint", default=None)
+            ),
             "source_sheets": source_sheets,
             "selected_sheet": _value(
                 plan, "selected_sheet", "selected_target_sheet", default=None
@@ -405,7 +443,14 @@ class ExcelDraftService:
         current = current_context.get("target_path")
         if previous in (None, "") or current in (None, ""):
             return True
-        return str(previous).casefold() == str(current).casefold()
+        if str(previous).casefold() != str(current).casefold():
+            return False
+        previous_fingerprint = previous_context.get("target_fingerprint")
+        current_fingerprint = current_context.get("target_fingerprint")
+        if previous_fingerprint in (None, "") or current_fingerprint in (None, ""):
+            # Payload v1 cũ chưa có fingerprint vẫn được đọc tương thích ngược.
+            return True
+        return str(previous_fingerprint) == str(current_fingerprint)
 
     @staticmethod
     def _conflicts(plan: Any) -> tuple[Any, ...]:

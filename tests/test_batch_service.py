@@ -157,6 +157,65 @@ def test_receive_strips_only_gpt_carriers_managed_by_daily_sync(
     service.close()
 
 
+def test_receive_removes_legacy_vat_rows_and_persists_remaining_rows(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = _settings(tmp_path)
+    source = _write_json(
+        settings.output_dir / "ket_qua_boc_tach_bang_ke_old.json",
+        [
+            ["DRYU3026167", None, "VSDL", "GV", None, None, 200_000],
+            ["DRYU3026167", None, " vat ", "GV", None, None, 80_000],
+            ["GAOU2112422", None, "GH", "GV", None, None, 150_000],
+        ],
+    )
+    service = BatchService(settings)
+
+    with caplog.at_level("WARNING"):
+        result = service.receive_file(source)
+
+    assert result.review is not None
+    assert [row.fee for row in result.review.document.rows] == ["VSDL", "GH"]
+    assert result.batch.row_count == 2
+    assert result.batch.total_amount == 350_000
+    persisted = json.loads(_current_json(settings).read_text(encoding="utf-8"))
+    assert [row["fee"] for row in persisted["d"]] == ["VSDL", "GH"]
+    assert "Đã loại 1 dòng fee=VAT" in caplog.text
+    service.close()
+
+
+def test_receive_only_legacy_vat_rows_creates_empty_valid_batch(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    source = _write_json(
+        settings.output_dir / "ket_qua_boc_tach_bang_ke_old.json",
+        [["DRYU3026167", None, "VAT", "GV", None, None, 80_000]],
+    )
+    service = BatchService(settings)
+
+    result = service.receive_file(source)
+
+    assert result.review is not None
+    assert result.review.document.rows == []
+    assert result.batch.row_count == 0
+    assert result.batch.error_count == 0
+    persisted = json.loads(_current_json(settings).read_text(encoding="utf-8"))
+    assert persisted == {"v": 3, "d": []}
+    service.close()
+
+
+def test_bang_ke_prompt_explicitly_ignores_vat_fee() -> None:
+    prompt = (
+        Path(__file__).parents[1] / "gpt_custom_instructions_bang_ke.txt"
+    ).read_text(encoding="utf-8")
+
+    assert 'Không xử lý cột VAT hoặc THUẾ GTGT' in prompt
+    assert '- VAT: amount =' not in prompt
+    assert 'VSDL, QT, VAT, GH' not in prompt
+
+
 def test_manual_carrier_for_daily_sync_fee_survives_save_and_reload(
     tmp_path: Path,
 ) -> None:

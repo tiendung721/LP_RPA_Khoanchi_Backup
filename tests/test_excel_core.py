@@ -17,6 +17,7 @@ from app.services.excel.headers import (
     HeaderResolver,
     normalize_header,
 )
+from app.services.excel.bang_ke import ensure_bang_ke_fee_columns
 from app.services.excel.resolvers import (
     MonthSheetService,
     YearResolutionError,
@@ -30,6 +31,47 @@ from app.services.excel.workbook import (
     WorkbookError,
     WorkbookGateway,
 )
+
+
+@pytest.mark.parametrize("vat_header", ["VAT", "THUẾ GTGT"])
+def test_bang_ke_column_normalization_deletes_vat_and_keeps_gia_han(
+    vat_header: str,
+) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    headers = [
+        "SQT",
+        "Ngày Đóng",
+        "Số Container",
+        "SỬA CHỮA",
+        "HĐ",
+        vat_header,
+        "GIA HẠN",
+        "GHI CHÚ",
+        "CÔ NỮ",
+    ]
+    for column, header in enumerate(headers, 1):
+        sheet.cell(1, column).value = header
+    sheet["F2"] = 80_000
+    sheet["G2"] = 150_000
+    sheet["I2"] = "=F2+G2"
+
+    assert ensure_bang_ke_fee_columns(sheet, header_row=1)
+
+    assert [sheet.cell(1, column).value for column in range(1, 9)] == [
+        "SQT",
+        "Ngày Đóng",
+        "Số Container",
+        "SỬA CHỮA",
+        "HĐ",
+        "GIA HẠN",
+        "GHI CHÚ",
+        "CÔ NỮ",
+    ]
+    assert sheet["F2"].value == 150_000
+    assert sheet["H2"].value == "=0+F2"
+    assert not ensure_bang_ke_fee_columns(sheet, header_row=1)
+    workbook.close()
 
 
 @pytest.mark.parametrize(

@@ -16,10 +16,16 @@ from PySide6.QtWidgets import (
 import app.ui.main_window as main_window_module
 from app.ui.excel_dialogs import (
     ConflictResolutionDialog,
+    ExcelOutcomeDialog,
     ManualRowPickerDialog,
     MonthSelectionDialog,
     PaymentNewRowsDialog,
     RepostSelectionDialog,
+)
+from app.services.excel.models import (
+    FieldWriteOutcome,
+    ItemWriteOutcome,
+    OutcomeStatus,
 )
 from app.ui.excel_task_controller import ExcelTaskController
 from app.ui.main_window import MainWindow
@@ -48,6 +54,46 @@ def test_step_three_has_three_primary_actions_and_statuses(qtbot) -> None:
         page.payment_sync_status_label.text()
         == "Đồng bộ BK → Thanh toán gần nhất: —"
     )
+
+
+def test_outcome_dialog_flattens_fields_and_filters_errors(qtbot) -> None:
+    outcomes = [
+        ItemWriteOutcome(
+            item_id="one",
+            container="CONT1",
+            status=OutcomeStatus.PARTIAL,
+            fields=[
+                FieldWriteOutcome(
+                    field_name="Số tiền",
+                    status=OutcomeStatus.WRITTEN,
+                    reason="Đã ghi",
+                ),
+                FieldWriteOutcome(
+                    field_name="Số HĐ",
+                    status=OutcomeStatus.USER_KEPT,
+                    reason="User giữ",
+                ),
+            ],
+        ),
+        ItemWriteOutcome(
+            item_id="bad",
+            status=OutcomeStatus.INVALID_SOURCE,
+            fields=[
+                FieldWriteOutcome(
+                    field_name="Dòng nguồn",
+                    status=OutcomeStatus.INVALID_SOURCE,
+                    reason="Thiếu SQT",
+                )
+            ],
+        ),
+    ]
+    dialog = ExcelOutcomeDialog(outcomes)
+    qtbot.addWidget(dialog)
+
+    assert dialog.table.rowCount() == 3
+    dialog.filter_combo.setCurrentIndex(4)
+    assert dialog.table.rowCount() == 1
+    assert dialog.table.item(0, 10).text() == "Thiếu SQT"
 
 
 def test_step_three_locks_all_excel_actions_while_running(qtbot) -> None:

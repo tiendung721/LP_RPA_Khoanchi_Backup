@@ -50,7 +50,13 @@ from .models import (
     RowCandidate,
     SourceSheetCandidate,
 )
+from .outcomes import payment_outcomes
 from .resolvers import MonthSheetService
+from .review import (
+    CorrectionIssue,
+    CorrectionRequiredError,
+    validate_conflict_resolutions,
+)
 from .workbook import (
     ExcelBackupService,
     ExcelLockService,
@@ -504,7 +510,10 @@ def _copy_cell_style(source: Any, target: Any) -> None:
     target.number_format = source.number_format
 
 
-def _map_formula_columns(worksheet: Any, mapper: Callable[[int], int]) -> None:
+def _map_formula_columns(
+    worksheet: Any,
+    mapper: Callable[[int], int | None],
+) -> None:
     for cell in tuple(getattr(worksheet, "_cells", {}).values()):
         value = getattr(cell, "value", None)
         if not isinstance(value, str) or not value.startswith("="):
@@ -513,6 +522,8 @@ def _map_formula_columns(worksheet: Any, mapper: Callable[[int], int]) -> None:
         def replace(match: re.Match[str]) -> str:
             column = column_index_from_string(match.group("col").upper())
             mapped = mapper(column)
+            if mapped is None:
+                return "0"
             return (
                 f"{match.group('col_abs')}{get_column_letter(mapped)}"
                 f"{match.group('row_abs')}{match.group('row')}"
@@ -528,8 +539,13 @@ def _insert_column(worksheet: Any, column: int) -> None:
     worksheet.insert_cols(column)
 
 
-def _delete_column(worksheet: Any, column: int, *, replacement: int) -> None:
-    def mapper(current: int) -> int:
+def _delete_column(
+    worksheet: Any,
+    column: int,
+    *,
+    replacement: int | None,
+) -> None:
+    def mapper(current: int) -> int | None:
         if current == column:
             return replacement
         return current - 1 if current > column else current
@@ -2025,6 +2041,7 @@ def _analyze_item_invoices(
 ) -> list[PaymentSyncConflict]:
     conflicts: list[PaymentSyncConflict] = []
     item.invoice_differences = {}
+    item.invoice_review_values = {}
     for field in INVOICE_FIELDS:
         if field not in item.values:
             continue
@@ -2124,6 +2141,7 @@ def _analyze_item_invoices(
         current = worksheet.cell(row, column).value if row is not None else None
         if _invoice_key(current) == _invoice_key(incoming):
             continue
+        item.invoice_review_values[field] = (current, incoming)
         if _invoice_text(current) is None:
             item.invoice_differences[field] = (current, incoming)
             continue
@@ -2167,6 +2185,7 @@ def _analyze_item_carrier(
 ) -> list[PaymentSyncConflict]:
     incoming = carrier_text(item.carrier_value)
     item.carrier_difference = None
+    item.carrier_review_value = None
     if incoming is None:
         return []
     column = resolved.columns.get("carrier")
@@ -2190,6 +2209,7 @@ def _analyze_item_carrier(
     incoming_keys = {carrier_key(value) for value in split_carriers(incoming)}
     if incoming_keys and incoming_keys.issubset(current_keys):
         return []
+    item.carrier_review_value = (current, incoming)
     action = item.carrier_action
     if carrier_text(current) is None:
         item.carrier_difference = (current, incoming)
@@ -2261,11 +2281,81 @@ def _analyze_profile_target(
                 )
             )
             continue
-        selected_row = (selected_rows or {}).get(item.item_id)
+        selected_row = (selected_rows or {}).get(
+            item.item_id, item.selected_target_row
+        )
         if selected_row is not None:
             if not (resolved.data_start_row <= selected_row < resolved.total_row):
-                raise PaymentSyncError("Dòng Thanh toán được chọn nằm ngoài vùng dữ liệu.")
+                replacement_rows = sorted(
+                    set(by_sqt.get(item.sqt, ()))
+                    | set(by_container.get(item.container, ()))
+                )
+                if not replacement_rows:
+                    replacement_rows = [
+                        row
+                        for row in range(
+                            resolved.data_start_row, resolved.total_row
+                        )
+                        if _parse_sqt(
+                            worksheet.cell(row, resolved.columns["sqt"]).value
+                        )
+                        is not None
+                        or _container_key(
+                            worksheet.cell(
+                                row, resolved.columns["container"]
+                            ).value
+                        )
+                    ]
+                item.selected_target_row = None
+                item.target_row = None
+                item.status = "CONFLICT"
+                conflicts.append(
+                    PaymentSyncConflict(
+                        conflict_id=_stable_id(
+                            "selected-row-invalid", item.item_id, selected_row
+                        ),
+                        conflict_type=ConflictType.PARTIAL_KEY_MATCH,
+                        message=(
+                            "Dòng Thanh toán đã chọn không còn thuộc vùng dữ liệu; "
+                            "hãy chọn lại dòng đích."
+                        ),
+                        item_id=item.item_id,
+                        source_row=item.source_row,
+                        sqt=item.sqt,
+                        container=item.container,
+                        allowed_actions=(
+                            ResolutionAction.SELECT_ROW,
+                            ResolutionAction.SKIP,
+                            ResolutionAction.CANCEL_ALL,
+                        ),
+                        default_action=ResolutionAction.SELECT_ROW,
+                        row_candidates=[
+                            RowCandidate(
+                                row=candidate_row,
+                                sqt=_parse_sqt(
+                                    worksheet.cell(
+                                        candidate_row, resolved.columns["sqt"]
+                                    ).value
+                                ),
+                                container=_container_key(
+                                    worksheet.cell(
+                                        candidate_row,
+                                        resolved.columns["container"],
+                                    ).value
+                                ),
+                            )
+                            for candidate_row in replacement_rows
+                        ],
+                        details={
+                            "sheet_name": worksheet.title,
+                            "target_type": profile.target_type,
+                            "invalid_selected_row": selected_row,
+                        },
+                    )
+                )
+                continue
             matches = (selected_row,)
+            item.selected_target_row = int(selected_row)
             item.write_identity = True
         else:
             matches = exact.get((item.sqt, item.container), ())
@@ -2273,6 +2363,7 @@ def _analyze_profile_target(
             row = matches[0]
             item.target_row = row
             differences: dict[str, tuple[Any, Any]] = {}
+            item.amount_review_values = {}
             clear_fields: list[str] = []
             for field in profile.managed_fields:
                 if field not in resolved.columns:
@@ -2284,6 +2375,7 @@ def _analyze_profile_target(
                     current = cell.value
                 incoming = item.values[field]
                 if not _has_money(incoming) and _has_money(current):
+                    item.amount_review_values[field] = (current, None)
                     amount_action = item.amount_actions.get(field)
                     if amount_action is ResolutionAction.OVERWRITE:
                         differences[field] = (current, None)
@@ -3481,7 +3573,11 @@ class PaymentSyncService:
         )
         refined_items = copy.deepcopy(plan.items)
         items_by_id = {item.item_id: item for item in refined_items}
-        selected_rows: dict[str, int] = {}
+        selected_rows: dict[str, int] = {
+            item.item_id: int(item.selected_target_row)
+            for item in refined_items
+            if item.selected_target_row is not None
+        }
         for conflict in plan.conflicts:
             value = resolved_values.get(conflict.conflict_id)
             action = _resolution_action(value, conflict.default_action)
@@ -3498,6 +3594,7 @@ class PaymentSyncService:
                 if valid_rows and selected_row not in valid_rows:
                     raise PaymentSyncError("Dòng Thanh toán được chọn không hợp lệ.")
                 selected_rows[item.item_id] = selected_row
+                item.selected_target_row = selected_row
             elif conflict.conflict_type is ConflictType.MULTIPLE_SOURCE_INVOICES:
                 selected_invoice = _resolution_value(value, "selected_invoice")
                 if _invoice_key(selected_invoice) not in {
@@ -3616,6 +3713,45 @@ class PaymentSyncService:
         *,
         progress_callback: ProgressCallback = None,
     ) -> PaymentSyncResult:
+        all_conflicts = list(plan.conflicts)
+        if all_conflicts:
+            # Tương thích caller service cũ: biến default thành một resolution
+            # cụ thể, nhưng vẫn bắt buộc chạy refine/preflight trước khi ghi.
+            # SELECT_ROW không có row sẽ tiếp tục bị validator chặn.
+            replay_resolutions = dict(resolutions or {})
+            for conflict in all_conflicts:
+                if conflict.conflict_id in replay_resolutions:
+                    continue
+                if conflict.default_action is not None:
+                    replay_resolutions[conflict.conflict_id] = {
+                        "action": conflict.default_action.value
+                    }
+            issues = validate_conflict_resolutions(
+                all_conflicts, replay_resolutions
+            )
+            if issues:
+                raise CorrectionRequiredError(
+                    issues,
+                    "Thanh toán còn lựa chọn chưa xác định; workbook chưa được ghi.",
+                )
+            prepared = self.refine(
+                plan,
+                replay_resolutions,
+                progress_callback=progress_callback,
+            )
+            if prepared.conflicts:
+                raise CorrectionRequiredError(
+                    tuple(
+                        CorrectionIssue.from_conflict(conflict)
+                        for conflict in prepared.conflicts
+                    ),
+                    "Thanh toán phát sinh xung đột mới; workbook chưa được ghi.",
+                )
+            return self.apply(
+                prepared,
+                {},
+                progress_callback=progress_callback,
+            )
         if isinstance(plan, PaymentSyncBatchPlan):
             return self._apply_batch_plan(
                 plan,
@@ -3800,6 +3936,7 @@ class PaymentSyncService:
                             resolved=profile_resolved,
                             timestamp=timestamp,
                             write_identity=item.write_identity,
+                            clear_fields=clear_fields.get(item.item_id, set()),
                         )
                         if changed:
                             updated += 1
@@ -4023,6 +4160,7 @@ class PaymentSyncService:
                     if changed
                     else "Dữ liệu HP/NAM đã đồng bộ."
                 ),
+                item_outcomes=payment_outcomes(plan),
             )
             self._finish_result(result)
             return result
@@ -4181,6 +4319,7 @@ class PaymentSyncService:
                     if changed
                     else "Các tháng HP/NAM đã đồng bộ."
                 ),
+                item_outcomes=payment_outcomes(plan),
             )
             self._finish_result(result)
             return result

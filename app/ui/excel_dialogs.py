@@ -2057,6 +2057,130 @@ class PaymentNewRowsDialog(QDialog):
         ]
 
 
+class ExcelOutcomeDialog(QDialog):
+    """Chi tiết phẳng được dựng từ execution manifest thực tế."""
+
+    _FILTERS = (
+        ("Tất cả", None),
+        ("Đã ghi", {"WRITTEN", "PARTIAL"}),
+        ("Không đổi", {"UNCHANGED"}),
+        ("Giữ / bỏ qua", {"USER_KEPT", "USER_SKIPPED"}),
+        ("Lỗi", {"INVALID_SOURCE", "FAILED"}),
+    )
+
+    def __init__(
+        self,
+        outcomes: Sequence[Any],
+        *,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Chi tiết kết quả xử lý Excel")
+        self.resize(1320, 680)
+        self._rows: list[tuple[str, tuple[Any, ...]]] = []
+        for outcome in outcomes:
+            item_status = _code(_value(outcome, "status", default="UNCHANGED"))
+            fields = _sequence(_value(outcome, "fields", default=())) or (None,)
+            for field in fields:
+                field_status = _code(
+                    _value(field, "status", default=item_status)
+                )
+                target_sheet = _value(
+                    field,
+                    "target_sheet",
+                    default=_value(outcome, "target_sheet"),
+                )
+                target_cell = _value(field, "target_cell")
+                target_row = _value(
+                    field,
+                    "target_row",
+                    default=_value(outcome, "target_row"),
+                )
+                destination = target_cell or (
+                    f"dòng {target_row}" if target_row is not None else "—"
+                )
+                self._rows.append(
+                    (
+                        field_status,
+                        (
+                            _value(outcome, "container"),
+                            _value(outcome, "sqt"),
+                            _value(outcome, "bl"),
+                            _value(field, "field_name", default="Dòng dữ liệu"),
+                            _value(field, "source_value"),
+                            target_sheet,
+                            destination,
+                            _value(field, "target_value_before"),
+                            _value(field, "target_value_after"),
+                            field_status,
+                            _value(field, "reason"),
+                        ),
+                    )
+                )
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Mỗi dòng dưới đây là một thành phần đã được xét trong lần thực thi."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Lọc kết quả:"))
+        self.filter_combo = QComboBox()
+        for label, statuses in self._FILTERS:
+            self.filter_combo.addItem(label, statuses)
+        self.filter_combo.currentIndexChanged.connect(self._refresh)
+        filter_row.addWidget(self.filter_combo)
+        filter_row.addStretch(1)
+        layout.addLayout(filter_row)
+
+        self.table = QTableWidget(0, 11)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Container",
+                "SQT",
+                "BL",
+                "Loại dữ liệu",
+                "Nguồn",
+                "Sheet đích",
+                "Ô / dòng đích",
+                "Giá trị trước",
+                "Giá trị sau",
+                "Kết quả",
+                "Lý do",
+            ]
+        )
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(10, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.table, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._refresh()
+
+    def _refresh(self, _index: int = 0) -> None:
+        allowed = self.filter_combo.currentData()
+        visible = [
+            cells
+            for status, cells in self._rows
+            if allowed is None or status in allowed
+        ]
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(visible))
+        for row, cells in enumerate(visible):
+            for column, value in enumerate(cells):
+                item = QTableWidgetItem(_display(value))
+                item.setToolTip(_display(value))
+                self.table.setItem(row, column, item)
+        _enable_user_sorting(self.table)
+
+
 ExcelConflictDialog = ConflictResolutionDialog
 AggregateConflictDialog = ConflictResolutionDialog
 TargetMonthDialog = MonthSelectionDialog
@@ -2066,6 +2190,7 @@ __all__ = [
     "AggregateConflictDialog",
     "ConflictResolutionDialog",
     "DailySyncAllocationDialog",
+    "ExcelOutcomeDialog",
     "ExcelConflictDialog",
     "ManualRowPickerDialog",
     "MonthSelectionDialog",

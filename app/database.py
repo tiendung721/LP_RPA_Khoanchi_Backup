@@ -130,7 +130,11 @@ class Database:
                 self._migration_16(connection)
                 connection.execute("PRAGMA user_version = 16")
                 current_version = 16
-            self._ensure_schema_16(connection)
+            if current_version < 17:
+                self._migration_17(connection)
+                connection.execute("PRAGMA user_version = 17")
+                current_version = 17
+            self._ensure_schema_17(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -1016,6 +1020,122 @@ class Database:
             ON excel_resolution_latest(operation, updated_at DESC)
             """
         )
+
+    @staticmethod
+    def _migration_17(connection: sqlite3.Connection) -> None:
+        """Loại phí VAT khỏi lịch sử nhập khoản chi và sửa số liệu tổng hợp."""
+
+        Database._ensure_schema_16(connection)
+        posting_table = connection.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'expense_posting_items'
+            """
+        ).fetchone()
+        if posting_table is None:
+            return
+
+        vat_condition = """
+            UPPER(TRIM(fee_original)) = 'VAT'
+            OR UPPER(TRIM(COALESCE(fee_selected, ''))) = 'VAT'
+        """
+        connection.execute("DROP TABLE IF EXISTS temp.vat_cleanup_runs")
+        connection.execute("DROP TABLE IF EXISTS temp.vat_cleanup_batches")
+        connection.execute(
+            f"""
+            CREATE TEMP TABLE vat_cleanup_runs AS
+            SELECT DISTINCT run_id
+            FROM expense_posting_items
+            WHERE {vat_condition}
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE TEMP TABLE vat_cleanup_batches AS
+            SELECT batch_id,
+                   COUNT(*) AS removed_rows,
+                   COALESCE(SUM(amount), 0) AS removed_amount
+            FROM (
+                SELECT batch_id, source_item_index, MAX(amount) AS amount
+                FROM expense_posting_items
+                WHERE {vat_condition}
+                GROUP BY batch_id, source_item_index
+            )
+            GROUP BY batch_id
+            """
+        )
+        batch_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(batches)").fetchall()
+        }
+        if {"id", "row_count", "valid_count", "total_amount"}.issubset(
+            batch_columns
+        ):
+            connection.execute(
+                """
+                UPDATE batches
+                SET row_count = MAX(
+                        0,
+                        row_count - COALESCE(
+                            (SELECT removed_rows FROM vat_cleanup_batches
+                             WHERE batch_id = batches.id),
+                            0
+                        )
+                    ),
+                    valid_count = MAX(
+                        0,
+                        valid_count - COALESCE(
+                            (SELECT removed_rows FROM vat_cleanup_batches
+                             WHERE batch_id = batches.id),
+                            0
+                        )
+                    ),
+                    total_amount = MAX(
+                        0,
+                        total_amount - COALESCE(
+                            (SELECT removed_amount FROM vat_cleanup_batches
+                             WHERE batch_id = batches.id),
+                            0
+                        )
+                    )
+                WHERE id IN (SELECT batch_id FROM vat_cleanup_batches)
+                """
+            )
+        connection.execute(
+            f"DELETE FROM expense_posting_items WHERE {vat_condition}"
+        )
+        connection.execute(
+            """
+            UPDATE excel_runs
+            SET total_items = (
+                    SELECT COUNT(*)
+                    FROM expense_posting_items AS item
+                    WHERE item.run_id = excel_runs.id
+                ),
+                changed_items = (
+                    SELECT COUNT(*)
+                    FROM expense_posting_items AS item
+                    WHERE item.run_id = excel_runs.id
+                      AND item.status = 'POSTED'
+                ),
+                skipped_items = (
+                    SELECT COUNT(*)
+                    FROM expense_posting_items AS item
+                    WHERE item.run_id = excel_runs.id
+                      AND item.status IN (
+                          'USER_SKIPPED', 'NOT_MATCHED', 'UNRESOLVED', 'FAILED'
+                      )
+                )
+            WHERE id IN (SELECT run_id FROM vat_cleanup_runs)
+            """
+        )
+        connection.execute("DROP TABLE temp.vat_cleanup_runs")
+        connection.execute("DROP TABLE temp.vat_cleanup_batches")
+
+    @staticmethod
+    def _ensure_schema_17(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_16(connection)
 
     @contextmanager
     def transaction(

@@ -30,7 +30,6 @@ FEE_CATALOG = MappingProxyType(
             "detention, storage"
         ),
         "QT": "Quá tải, quá trọng lượng hoặc phụ thu trọng lượng",
-        "VAT": "Thuế GTGT",
         "GH": "Gia hạn",
         "LL": "Phí/công làm lệnh riêng",
         "SC": "Sửa chữa hoặc hư hỏng container",
@@ -92,4 +91,4 @@ APP_STATE_MAIN_WINDOW_GEOMETRY: Final = "main_window_geometry"
 APP_STATE_MAIN_WINDOW_STATE: Final = "main_window_state"
 APP_STATE_LAST_PAGE: Final = "last_page"
 
-SQLITE_SCHEMA_VERSION: Final = 16
+SQLITE_SCHEMA_VERSION: Final = 17

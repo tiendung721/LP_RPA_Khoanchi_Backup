@@ -29,6 +29,51 @@ class ExcelRunStatus(str, Enum):
     FAILED = "FAILED"
 
 
+class OutcomeStatus(str, Enum):
+    """Kết quả thực thi thực tế của một item hoặc một thành phần dữ liệu."""
+
+    WRITTEN = "WRITTEN"
+    PARTIAL = "PARTIAL"
+    UNCHANGED = "UNCHANGED"
+    USER_KEPT = "USER_KEPT"
+    USER_SKIPPED = "USER_SKIPPED"
+    INVALID_SOURCE = "INVALID_SOURCE"
+    FAILED = "FAILED"
+
+
+@dataclass(slots=True)
+class FieldWriteOutcome:
+    field_name: str
+    source_value: Any = None
+    target_value_before: Any = None
+    target_value_after: Any = None
+    action: str | None = None
+    status: OutcomeStatus = OutcomeStatus.UNCHANGED
+    source_sheet: str | None = None
+    source_row: int | None = None
+    target_sheet: str | None = None
+    target_row: int | None = None
+    target_cell: str | None = None
+    reason_code: str | None = None
+    reason: str = ""
+
+
+@dataclass(slots=True)
+class ItemWriteOutcome:
+    item_id: str
+    source_index: int | None = None
+    container: str | None = None
+    sqt: int | None = None
+    bl: str | None = None
+    fee: str | None = None
+    source_sheet: str | None = None
+    source_row: int | None = None
+    target_sheet: str | None = None
+    target_row: int | None = None
+    status: OutcomeStatus = OutcomeStatus.UNCHANGED
+    fields: list[FieldWriteOutcome] = field(default_factory=list)
+
+
 class PostingItemStatus(str, Enum):
     PLANNED = "PLANNED"
     POSTED = "POSTED"
@@ -361,6 +406,7 @@ class SyncResult:
     run_id: int | None = None
     message: str = ""
     target_sheets: tuple[str, ...] = ()
+    item_outcomes: list[ItemWriteOutcome] = field(default_factory=list)
 
     @property
     def operation(self) -> ExcelOperation:
@@ -600,6 +646,7 @@ class PostingResult:
     fingerprint_after: WorkbookFingerprint | None = None
     run_id: int | None = None
     message: str = ""
+    item_outcomes: list[ItemWriteOutcome] = field(default_factory=list)
 
     @property
     def operation(self) -> ExcelOperation:
@@ -616,19 +663,25 @@ class PaymentSyncItem:
     values: dict[str, Any]
     target_type: str = "NAM"
     target_row: int | None = None
+    # Dòng do user chọn phải độc lập với dòng được thuật toán tự khớp. Giá trị
+    # này được giữ xuyên suốt các vòng refine và luôn được ưu tiên khi phân tích.
+    selected_target_row: int | None = None
     write_identity: bool = False
     skip_item: bool = False
     status: str = "NEW"
     differences: dict[str, tuple[Any, Any]] = field(default_factory=dict)
     amount_actions: dict[str, ResolutionAction] = field(default_factory=dict)
+    amount_review_values: dict[str, tuple[Any, Any]] = field(default_factory=dict)
     invoice_values: dict[str, str | None] = field(default_factory=dict)
     invoice_candidates: dict[str, list[str]] = field(default_factory=dict)
     selected_invoices: dict[str, str] = field(default_factory=dict)
     invoice_actions: dict[str, ResolutionAction] = field(default_factory=dict)
     invoice_differences: dict[str, tuple[Any, str]] = field(default_factory=dict)
+    invoice_review_values: dict[str, tuple[Any, str]] = field(default_factory=dict)
     carrier_value: str | None = None
     carrier_action: ResolutionAction | None = None
     carrier_difference: tuple[Any, str] | None = None
+    carrier_review_value: tuple[Any, str] | None = None
 
     @property
     def is_new(self) -> bool:
@@ -973,6 +1026,7 @@ class PaymentSyncResult:
     run_id: int | None = None
     message: str = ""
     target_sheets: tuple[str, ...] = ()
+    item_outcomes: list[ItemWriteOutcome] = field(default_factory=list)
 
     @property
     def operation(self) -> ExcelOperation:

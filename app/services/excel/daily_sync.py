@@ -32,6 +32,7 @@ from .models import (
     SyncRow,
     resolution_map,
 )
+from .outcomes import sync_outcomes
 from .resolvers import MonthSheetService, YearResolver
 from .workbook import (
     ExcelBackupService,
@@ -42,6 +43,24 @@ from .workbook import (
 
 
 ProgressCallback = Callable[[str], None] | None
+
+
+def _execution_outcomes(plan: SyncPlan, target_names: Iterable[str]):
+    names = tuple(target_names)
+    invalid_reasons = {
+        int(conflict.source_row): conflict.message
+        for conflict in plan.conflicts
+        if conflict.source_row is not None
+        and conflict.conflict_type is ConflictType.INVALID_SQT
+    }
+    return sync_outcomes(
+        (
+            (name, tuple(plan.actions_by_target.get(name, ())))
+            for name in names
+        ),
+        invalid_rows=plan.invalid_rows,
+        invalid_reasons=invalid_reasons,
+    )
 
 SYNC_FIELDS: tuple[str, ...] = (
     "sqt",
@@ -523,6 +542,7 @@ class DailySyncService:
                 message=(
                     "Dữ liệu A–K/P đã đồng bộ; không có ô nào cần ghi."
                 ),
+                item_outcomes=_execution_outcomes(plan, (target_name,)),
             )
             self._finish_result(result)
             return result
@@ -656,6 +676,7 @@ class DailySyncService:
                     f"Đã cập nhật {updated} dòng, thêm {inserted} dòng, "
                     f"giữ {target_only} dòng chỉ có ở BK."
                 ),
+                item_outcomes=_execution_outcomes(plan, (target_name,)),
             )
             self._finish_result(result)
             return result
@@ -721,6 +742,7 @@ class DailySyncService:
                 fingerprint_after=plan.target_fingerprint,
                 run_id=plan.run_id,
                 message="Các tháng đã đồng bộ; không có ô cần ghi.",
+                item_outcomes=_execution_outcomes(plan, ordered_targets),
             )
             self._finish_result(result)
             return result
@@ -836,6 +858,7 @@ class DailySyncService:
                     f"Đã đồng bộ {len(ordered_targets)} tháng: cập nhật {updated} dòng, "
                     f"thêm {inserted} dòng."
                 ),
+                item_outcomes=_execution_outcomes(plan, ordered_targets),
             )
             self._finish_result(result)
             return result

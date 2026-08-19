@@ -42,6 +42,7 @@ from .rpa_expense_dialog import RpaSqtSelectionDialog
 from .excel_dialogs import (
     ConflictResolutionDialog,
     DailySyncAllocationDialog,
+    ExcelOutcomeDialog,
     MonthSelectionDialog,
     PaymentNewRowsDialog,
     PostingAllocationDialog,
@@ -81,6 +82,45 @@ def _attribute(source: Any, *names: str, default: Any = None) -> Any:
         if hasattr(source, name):
             return getattr(source, name)
     return default
+
+
+def _outcome_summary(outcomes: Any) -> str:
+    values = list(outcomes or ())
+    if not values:
+        return ""
+    counts = {
+        code: sum(
+            str(
+                getattr(
+                    _attribute(item, "status", default=""),
+                    "value",
+                    _attribute(item, "status", default=""),
+                )
+            )
+            == code
+            for item in values
+        )
+        for code in (
+            "WRITTEN",
+            "PARTIAL",
+            "UNCHANGED",
+            "USER_KEPT",
+            "USER_SKIPPED",
+            "INVALID_SOURCE",
+            "FAILED",
+        )
+    }
+    return (
+        "\n\nKết quả theo item"
+        f"\n- Tổng: {len(values)}"
+        f"\n- Ghi đầy đủ: {counts['WRITTEN']}"
+        f"\n- Ghi một phần: {counts['PARTIAL']}"
+        f"\n- Không đổi: {counts['UNCHANGED']}"
+        f"\n- User giữ: {counts['USER_KEPT']}"
+        f"\n- User bỏ qua: {counts['USER_SKIPPED']}"
+        f"\n- Nguồn không hợp lệ: {counts['INVALID_SOURCE']}"
+        f"\n- Lỗi: {counts['FAILED']}"
+    )
 
 
 def _status_code(batch: Any) -> str:
@@ -1655,6 +1695,8 @@ class MainWindow(QMainWindow):
         message = str(
             _attribute(result, "message", default="Hoàn tất xử lý Excel.") or ""
         )
+        item_outcomes = list(_attribute(result, "item_outcomes", default=()) or ())
+        outcome_summary = _outcome_summary(item_outcomes)
         if operation == "payment_sync":
             result_targets = _attribute(result, "target_results", default={}) or {}
             result_sections: list[str] = []
@@ -1706,7 +1748,7 @@ class MainWindow(QMainWindow):
                 f"Ô Số HĐ đã ghi: {_attribute(result, 'invoice_written_cells', default=0) or 0}\n"
                 f"Không đổi: {_attribute(result, 'unchanged_rows', default=0)} dòng\n"
                 f"Bỏ qua: {_attribute(result, 'skipped_rows', default=0)} dòng"
-                f"{carrier_summary_detail}"
+                f"{carrier_summary_detail}{outcome_summary}"
             )
             completion_message = QMessageBox(self)
             completion_message.setIcon(QMessageBox.Icon.Information)
@@ -1718,6 +1760,13 @@ class MainWindow(QMainWindow):
                 "Mở file Thanh toán",
                 QMessageBox.ButtonRole.ActionRole,
             )
+            view_details = (
+                completion_message.addButton(
+                    "Xem chi tiết", QMessageBox.ButtonRole.ActionRole
+                )
+                if item_outcomes
+                else None
+            )
             completion_message.addButton(QMessageBox.StandardButton.Ok)
             completion_message.exec()
             if completion_message.clickedButton() is open_payment:
@@ -1725,6 +1774,8 @@ class MainWindow(QMainWindow):
                     _attribute(result, "target_path", default=None),
                     label="file Thanh toán",
                 )
+            elif view_details is not None and completion_message.clickedButton() is view_details:
+                ExcelOutcomeDialog(item_outcomes, parent=self).exec()
             return
         if operation == "sync":
             detail = (
@@ -1735,6 +1786,7 @@ class MainWindow(QMainWindow):
                 f"Chỉ có ở BK, đã giữ: {_attribute(result, 'target_only_rows', default=0)} dòng\n"
                 "Thiếu SQT, đã bỏ qua: "
                 f"{_attribute(result, 'invalid_rows', 'skipped_rows', default=0)}"
+                f"{outcome_summary}"
             )
             title = "Đồng bộ thành công"
         else:
@@ -1744,6 +1796,7 @@ class MainWindow(QMainWindow):
                 f"Đã tồn tại: {_attribute(result, 'already_existing_items', default=0)}\n"
                 f"Bỏ qua: {_attribute(result, 'skipped_source_items', default=0)}\n"
                 f"Sheet: {_attribute(result, 'sheet_name', default='—')}"
+                f"{outcome_summary}"
             )
             title = "Nhập khoản chi hoàn tất"
         completion_message = QMessageBox(self)
@@ -1753,12 +1806,21 @@ class MainWindow(QMainWindow):
         open_bk_button = completion_message.addButton(
             "Mở file BK", QMessageBox.ButtonRole.ActionRole
         )
+        view_details = (
+            completion_message.addButton(
+                "Xem chi tiết", QMessageBox.ButtonRole.ActionRole
+            )
+            if item_outcomes
+            else None
+        )
         completion_message.addButton(QMessageBox.StandardButton.Ok)
         completion_message.exec()
         if completion_message.clickedButton() is open_bk_button:
             self._open_bk_workbook(
                 _attribute(result, "target_path", default=None)
             )
+        elif view_details is not None and completion_message.clickedButton() is view_details:
+            ExcelOutcomeDialog(item_outcomes, parent=self).exec()
 
     @Slot(object)
     def _excel_failed(self, error: Any) -> None:

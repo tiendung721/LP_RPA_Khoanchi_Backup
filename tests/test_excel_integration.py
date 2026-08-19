@@ -25,6 +25,7 @@ from app.services.excel.daily_sync import (
 from app.services.excel.models import (
     ConflictType,
     ExcelRunStatus,
+    OutcomeStatus,
     PostingItemStatus,
     ResolutionAction,
     TargetCellKind,
@@ -361,7 +362,7 @@ def test_posting_reader_accepts_v1_review_fields_without_using_them_for_amount(
     ]
 
 
-def test_bang_ke_posts_across_sheets_migrates_columns_and_adds_negative(
+def test_bang_ke_posts_across_sheets_ensures_gia_han_and_adds_negative(
     tmp_path: Path,
 ) -> None:
     ready = tmp_path / "ket_qua_boc_tach_bang_ke_fixture.json"
@@ -398,7 +399,6 @@ def test_bang_ke_posts_across_sheets_migrates_columns_and_adds_negative(
                     source_row("DRYU3045911", "VSDL", -282_000, "PRIME", "2606S"),
                     source_row("DRYU3045911", "NH", -409_300, "PRIME", "2606S"),
                     source_row("DRYU3045911", "HV", -560_000, "PRIME", "2606S"),
-                    source_row("DRYU3045911", "VAT", 80_000, "PRIME", "2606S"),
                     source_row("MSCU1234567", "GH", 150_000, "PROSPER", "2625S"),
                 ],
             },
@@ -481,13 +481,16 @@ def test_bang_ke_posts_across_sheets_migrates_columns_and_adds_negative(
     try:
         for sheet_name in ("T01 26", "T04 26"):
             sheet = workbook[sheet_name]
-            assert sheet.cell(1, 39).value == "THUẾ GTGT"
-            assert sheet.cell(1, 40).value == "GIA HẠN"
+            assert sheet.cell(1, 39).value == "GIA HẠN"
+            assert "THUẾ GTGT" not in [
+                sheet.cell(1, column).value
+                for column in range(1, sheet.max_column + 1)
+            ]
         assert workbook["T01 26"].cell(2, 30).value == 718_000
         assert workbook["T01 26"].cell(2, 26).value == 590_700
         assert workbook["T01 26"].cell(2, 28).value == 440_000
-        assert workbook["T01 26"].cell(2, 39).value == 80_000
-        assert workbook["T04 26"].cell(2, 40).value == 150_000
+        assert workbook["T01 26"].cell(2, 39).value is None
+        assert workbook["T04 26"].cell(2, 39).value == 150_000
     finally:
         workbook.close()
 
@@ -602,6 +605,11 @@ def test_daily_sync_compares_full_sheet_preserves_order_and_is_idempotent(
     assert result.inserted_rows == 4
     assert result.updated_rows == 0
     assert result.skipped_rows == 1
+    assert any(
+        outcome.status is OutcomeStatus.INVALID_SOURCE
+        and outcome.fields[0].reason
+        for outcome in result.item_outcomes
+    )
     assert result.backup_path is not None
     assert result.backup_path.is_file()
     assert result.backup_path.name == "BK 2026_latest.xlsx"
@@ -694,6 +702,7 @@ def test_daily_sync_updates_existing_rows_and_preserves_bk_only_columns(
     assert result.updated_rows == 1
     assert result.inserted_rows == 1
     assert result.target_only_rows == 1
+    assert len(result.item_outcomes) == 3
     workbook = load_workbook(target, data_only=False)
     try:
         sheet = workbook["T07 26"]
@@ -1736,6 +1745,33 @@ def test_posting_unknown_fee_and_invoice_header_are_never_auto_mapped(
     assert conflicts[ConflictType.FEE_COLUMN_MISSING].target_column is None
 
 
+def test_posting_cb_does_not_fallback_to_legacy_sea_freight_header(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready.json"
+    target = tmp_path / "BK 2026.xlsx"
+    container = "DRYU3026167"
+    _save_ready(ready, [[container, None, "CB", "HD", 200]])
+    workbook = Workbook()
+    sheet = _new_posting_sheet(workbook, "T07 26")
+    _add_posting_row(sheet, 2, container)
+    sheet.cell(1, POSTING_FEE_COLUMNS["CB"]).value = "Cước biển QT"
+    workbook.save(target)
+    workbook.close()
+
+    plan = _posting_service(ready, target, tmp_path / "Excel").analyze(
+        sheet_name="T07 26"
+    )
+
+    conflict = next(
+        item
+        for item in plan.conflicts
+        if item.conflict_type is ConflictType.FEE_COLUMN_MISSING
+    )
+    assert conflict.fee == "CB"
+    assert conflict.target_column is None
+
+
 def test_posting_rejects_invoice_unit_price_alias_after_notes(
     tmp_path: Path,
 ) -> None:
@@ -1990,6 +2026,73 @@ def test_refine_manual_row_surfaces_formula_conflict(
     ] == [ConflictType.TARGET_CELL_FORMULA]
 
 
+def test_manual_row_formula_and_invoice_actions_survive_two_refine_rounds(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready.json"
+    target = tmp_path / "BK 2026.xlsx"
+    _save_ready(
+        ready,
+        [[None, "BL-01", "CB", "HD", "00013477", None, 6_912_000]],
+    )
+    workbook = Workbook()
+    sheet = _new_posting_sheet_with_invoices(workbook, "T07 26")
+    _add_posting_row(sheet, 11, "GAOU2132666")
+    amount_column, invoice_column = POSTING_INVOICE_LAYOUT["CB"]
+    sheet.cell(11, amount_column).value = "=34560000/5"
+    sheet.cell(11, int(invoice_column)).value = "13477"
+    workbook.save(target)
+    workbook.close()
+
+    service = _posting_service(ready, target, tmp_path / "Excel")
+    plan = service.analyze(sheet_name="T07 26")
+    row_conflict = next(
+        conflict
+        for conflict in plan.conflicts
+        if conflict.conflict_type is ConflictType.BL_ONLY_NO_CONTAINER
+    )
+    selected = service.refine(
+        plan,
+        {
+            row_conflict.conflict_id: {
+                "action": "SELECT_ROW",
+                "selected_row": 11,
+            }
+        },
+    )
+    formula = next(
+        conflict
+        for conflict in selected.conflicts
+        if conflict.conflict_type is ConflictType.TARGET_CELL_FORMULA
+    )
+    invoice = next(
+        conflict
+        for conflict in selected.conflicts
+        if conflict.conflict_type is ConflictType.INVOICE_VALUE_CONFLICT
+    )
+    prepared = service.refine(
+        selected,
+        {
+            formula.conflict_id: {"action": "OVERWRITE"},
+            invoice.conflict_id: {"action": "OVERWRITE"},
+        },
+    )
+    assert not prepared.conflicts
+    assert prepared.items[0].action is ResolutionAction.OVERWRITE
+    assert prepared.items[0].invoice_action is ResolutionAction.OVERWRITE
+
+    result = service.apply(prepared, {})
+    assert result.posted_source_items == 1
+    assert result.skipped_source_items == 0
+    assert result.item_outcomes
+    workbook = load_workbook(target, data_only=False)
+    try:
+        assert workbook["T07 26"].cell(11, amount_column).value == 6_912_000
+        assert workbook["T07 26"].cell(11, int(invoice_column)).value == "00013477"
+    finally:
+        workbook.close()
+
+
 def test_apply_rejects_direct_fee_selection_until_plan_is_refined(
     tmp_path: Path,
 ) -> None:
@@ -2144,6 +2247,50 @@ def test_posting_writes_invoice_next_to_each_supported_fee_and_skips_ll(
                 assert invoice_column is None
             else:
                 assert sheet.cell(offset, int(invoice_column)).value == f"INV-{fee}"
+    finally:
+        workbook.close()
+
+
+def test_posting_resolves_shifted_cb_amount_and_invoice_columns_by_header(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready.json"
+    target = tmp_path / "BK 2026.xlsx"
+    container = "DRYU3026167"
+    _save_ready(
+        ready,
+        [[container, None, "CB", "HD", "INV-CB", None, 12_345]],
+    )
+    workbook = Workbook()
+    sheet = _new_posting_sheet_with_invoices(workbook, "T07 26")
+    _add_posting_row(sheet, 2, container)
+    legacy_column, adjacent_invoice_column = POSTING_INVOICE_LAYOUT["CB"]
+    shifted_invoice_column = 31
+    shifted_amount_column = 33
+    sheet.cell(1, legacy_column).value = "Cước biển QT"
+    sheet.cell(2, legacy_column).value = "KEEP-LEGACY"
+    sheet.cell(1, int(adjacent_invoice_column)).value = None
+    sheet.cell(1, shifted_invoice_column).value = "hoá đơn cước biển"
+    sheet.cell(1, shifted_amount_column).value = "Cước biển"
+    workbook.save(target)
+    workbook.close()
+
+    service = _posting_service(ready, target, tmp_path / "Excel")
+    plan = service.analyze(sheet_name="T07 26")
+
+    assert not plan.conflicts
+    assert plan.items[0].target_column == shifted_amount_column
+    assert plan.items[0].invoice_column == shifted_invoice_column
+    result = service.apply(plan, {})
+    assert result.written_cells == 1
+    assert result.invoice_written_cells == 1
+
+    workbook = load_workbook(target, data_only=False)
+    try:
+        sheet = workbook["T07 26"]
+        assert sheet.cell(2, shifted_amount_column).value == 12_345
+        assert sheet.cell(2, shifted_invoice_column).value == "INV-CB"
+        assert sheet.cell(2, legacy_column).value == "KEEP-LEGACY"
     finally:
         workbook.close()
 

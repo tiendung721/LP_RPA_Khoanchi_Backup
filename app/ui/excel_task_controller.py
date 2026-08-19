@@ -371,9 +371,19 @@ class ExcelTaskController(QObject):
             if operation is not None
             else self._operation_for_plan(plan)
         )
-        self._draft_context_key = self.draft_service.save(
-            plan, normalized, resolutions
-        )
+        active_conflicts = tuple(self._review_conflicts)
+        try:
+            self._draft_context_key = self.draft_service.save(
+                plan,
+                normalized,
+                resolutions,
+                conflicts=(active_conflicts or None),
+            )
+        except TypeError:
+            # Tương thích các draft adapter cũ/custom trong quá trình nâng cấp.
+            self._draft_context_key = self.draft_service.save(
+                plan, normalized, resolutions
+            )
         self._draft_saved_this_run = True
 
     def refine_plan(
@@ -437,14 +447,15 @@ class ExcelTaskController(QObject):
         )
         return future
 
-    @staticmethod
     def _prepare_review(
+        self,
         service: Any,
         base_plan: Any,
         resolutions: Mapping[str, Any],
         progress_callback: Callable[..., None],
     ) -> ReviewOutcome:
         current = base_plan
+        ledger = dict(resolutions)
         seen_states: set[tuple[str, ...]] = set()
         refine = getattr(service, "refine", None)
 
@@ -452,21 +463,32 @@ class ExcelTaskController(QObject):
             conflicts = list(
                 _items(_value(current, "conflicts", "unresolved_conflicts", default=()))
             )
+            restore_dynamic = getattr(
+                self.draft_service, "restore_for_conflicts", None
+            )
+            if conflicts and callable(restore_dynamic):
+                restored = restore_dynamic(
+                    base_plan,
+                    self._operation_for_plan(base_plan),
+                    conflicts,
+                )
+                for conflict_id, value in dict(restored or {}).items():
+                    ledger.setdefault(str(conflict_id), value)
             # Mỗi lần refine là một bước quyết định mới. Chỉ đưa các conflict
             # hiện tại về dialog để lựa chọn nguồn đã xử lý không xuất hiện
             # ngang cấp với conflict ô đích vừa được phát hiện.
-            issues = validate_conflict_resolutions(conflicts, resolutions)
+            issues = validate_conflict_resolutions(conflicts, ledger)
             if issues:
                 return ReviewOutcome.needs_correction(
                     conflicts=conflicts,
                     issues=issues,
-                    resolutions=resolutions,
+                    resolutions=ledger,
                 )
             if not conflicts or not callable(refine):
                 return ReviewOutcome(
                     prepared_plan=current,
                     conflicts=conflicts,
-                    resolutions=dict(resolutions),
+                    resolutions=dict(ledger),
                 )
 
             state = tuple(
@@ -476,13 +498,26 @@ class ExcelTaskController(QObject):
             if state in seen_states:
                 return ReviewOutcome.needs_correction(
                     conflicts=conflicts,
-                    resolutions=resolutions,
+                    resolutions=ledger,
                 )
             seen_states.add(state)
             progress_callback("Đang kiểm tra lại toàn bộ lựa chọn xung đột…")
+            # Mỗi vòng refine chỉ được tiêu thụ quyết định của các conflict đang
+            # hiện diện. Nếu truyền cả ledger của phiên, một quyết định dành cho
+            # conflict động ở vòng sau có thể làm conflict đó biến mất trước khi
+            # service kịp áp dụng quyết định vào item.
+            current_ids = {
+                str(_value(conflict, "conflict_id", "id", default=""))
+                for conflict in conflicts
+            }
+            stage_resolutions = {
+                conflict_id: value
+                for conflict_id, value in ledger.items()
+                if str(conflict_id) in current_ids
+            }
             current = refine(
                 current,
-                resolutions,
+                stage_resolutions,
                 progress_callback=progress_callback,
             )
 
@@ -491,7 +526,7 @@ class ExcelTaskController(QObject):
         )
         return ReviewOutcome.needs_correction(
             conflicts=remaining,
-            resolutions=resolutions,
+            resolutions=ledger,
         )
 
     def cancel_waiting(self) -> bool:

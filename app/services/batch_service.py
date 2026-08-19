@@ -791,14 +791,24 @@ class BatchService:
         path: Path,
         document: BatchDocument,
     ) -> BatchDocument:
-        """Làm sạch carrier trùng nguồn trước lần review đầu tiên.
+        """Bỏ phí VAT và làm sạch carrier trùng nguồn trước lần review đầu tiên.
 
         Chỉ dữ liệu vừa nhận từ GPT (chưa từng được user lưu) đi qua đây. Sau
         khi user tự nhập carrier cho CB/CBDH/VTN, bản đã lưu sẽ được giữ nguyên.
         """
 
-        prepared, stripped = strip_received_gpt_carriers(document)
-        if not stripped:
+        rows = [
+            row
+            for row in document.rows
+            if not (
+                isinstance(row.fee, str)
+                and row.fee.strip().upper() == "VAT"
+            )
+        ]
+        removed_vat = len(document.rows) - len(rows)
+        without_vat = BatchDocument(v=document.v, rows=rows)
+        prepared, stripped = strip_received_gpt_carriers(without_vat)
+        if not removed_vat and not stripped:
             return document
         try:
             self.codec.dump_atomic(
@@ -813,10 +823,16 @@ class BatchService:
             raise BatchDataError(
                 "Không thể chuẩn hóa bên vận tải trước khi hiển thị."
             ) from exc
-        LOGGER.info(
-            "Đã bỏ carrier GPT của %s dòng lấy bên vận tải từ file Hàng ngày.",
-            stripped,
-        )
+        if removed_vat:
+            LOGGER.warning(
+                "Đã loại %s dòng fee=VAT vì loại cước này không còn được hỗ trợ.",
+                removed_vat,
+            )
+        if stripped:
+            LOGGER.info(
+                "Đã bỏ carrier GPT của %s dòng lấy bên vận tải từ file Hàng ngày.",
+                stripped,
+            )
         self._notify_output_written(path)
         return reloaded
 

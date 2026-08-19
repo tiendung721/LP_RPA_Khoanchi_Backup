@@ -131,13 +131,14 @@ def test_controller_shows_only_new_conflicts_after_json_row_selection(qtbot) -> 
     class Service:
         def __init__(self) -> None:
             self.apply_count = 0
+            self.refine_resolution_ids: list[set[str]] = []
 
         @staticmethod
         def analyze(*, progress_callback) -> Any:
             return base
 
-        @staticmethod
-        def refine(plan: Any, resolutions: Any, *, progress_callback) -> Any:
+        def refine(self, plan: Any, resolutions: Any, *, progress_callback) -> Any:
+            self.refine_resolution_ids.append(set(resolutions))
             ids = {item["conflict_id"] for item in plan.get("conflicts", [])}
             if ids == {"source-choice"}:
                 return {
@@ -207,6 +208,10 @@ def test_controller_shows_only_new_conflicts_after_json_row_selection(qtbot) -> 
         qtbot.waitUntil(lambda: bool(completed), timeout=2000)
 
         assert service.apply_count == 1
+        assert service.refine_resolution_ids[-2:] == [
+            {"source-choice"},
+            {"dynamic"},
+        ]
         assert finished == ["posting"]
         assert not controller.is_busy
     finally:
