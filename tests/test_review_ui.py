@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QItemSelectionModel, Qt
@@ -14,8 +15,19 @@ from app.ui.edit_row_dialog import EditRowDialog
 from app.ui.review_window import ReviewWindow, VesselVoyageNotFoundDialog
 from app.ui.review_table_model import ReviewRow, ReviewTableModel
 from app.ui.sea_freight_center import ReconciliationPeriodDialog
-from app.sea_freight.contracts import VesselVoyageSuggestion
-from app.sea_freight.service import VesselVoyageNotFoundError
+from app.database import Database
+from app.repositories.batch_repository import BatchRepository
+from app.sea_freight.contracts import (
+    BkContainerSnapshot,
+    ContainerRecord,
+    VesselVoyageSuggestion,
+)
+from app.sea_freight.repository import SeaFreightRepository
+from app.sea_freight.service import (
+    SeaFreightReconciliationService,
+    VesselVoyageNotFoundError,
+)
+from app.models import DataRow
 
 
 def _review_payload() -> dict[str, Any]:
@@ -43,6 +55,109 @@ def _review_payload() -> dict[str, Any]:
             ],
         },
     }
+
+
+def test_cross_batch_duplicate_is_yellow_and_opens_existing_group(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "state.db")
+    batches = BatchRepository(database)
+    old_batch = batches.create_batch(
+        source_filename="old.json",
+        source_output_path=tmp_path / "old.json",
+        original_archive_path=tmp_path / "old.json",
+        working_path=tmp_path / "old.json",
+        sha256="1" * 64,
+    )
+    new_batch = batches.create_batch(
+        source_filename="new.json",
+        source_output_path=tmp_path / "new.json",
+        original_archive_path=tmp_path / "new.json",
+        working_path=tmp_path / "new.json",
+        sha256="2" * 64,
+    )
+    snapshot = BkContainerSnapshot(
+        bk_path=str((tmp_path / "BK.xlsx").resolve()),
+        bk_sheet="T07 26",
+        vessel_voyage_raw="VIETSUN RELIANCE 2623S",
+        vessel_key="VIETSUNRELIANCE",
+        voyage_key="2623S",
+        combined_key="VIETSUNRELIANCE2623S",
+        workbook_fingerprint="bk-fp",
+        snapshot_hash="snapshot",
+        containers=(ContainerRecord("TSTU0000010", "T07 26", 10, 1, None),),
+    )
+
+    class Matcher:
+        @staticmethod
+        def snapshot(*_args: Any, **_kwargs: Any) -> BkContainerSnapshot:
+            return snapshot
+
+        @staticmethod
+        def sheet_names(_path: Any) -> tuple[str, ...]:
+            return ("T07 26",)
+
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(repository, matcher=Matcher())
+    old_row = DataRow(
+        cont=None,
+        bl="VSRHPG2623S06",
+        fee="CB",
+        rule="HD",
+        amount=6_850_000,
+        invoice_no="00006504",
+        carrier="VIETSUN",
+        vessel_voyage_raw="VIETSUN RELIANCE 2623S",
+        vessel_name="VIETSUN RELIANCE",
+        voyage_no="2623S",
+        invoice_container_count=1,
+        container_count_basis="EXPLICIT",
+        invoice_date="2026-07-10",
+        source_document_name="invoice.pdf",
+    )
+    group = service.open_or_create(
+        old_row,
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=old_batch.id,
+        source_item_index=0,
+        source_sha256=old_batch.sha256,
+    )
+    repository.mark_allocated(group.id)
+    repository.mark_posted(group.id, None)
+    new_row = old_row.copy_with()
+    new_row.source_document_name = "invoice (1).pdf"
+    payload = {
+        "metadata": {
+            "id": new_batch.id,
+            "source_filename": "new.json",
+            "sha256": new_batch.sha256,
+            "status": "REVIEWING",
+        },
+        "document": {"v": 3, "d": [new_row.to_object()]},
+    }
+
+    window = ReviewWindow(payload, sea_freight_service=service)
+    qtbot.addWidget(window)
+    try:
+        assert window.model.validation_at(0).status.value == "warning"
+        assert "hồ sơ #" in window.model.data(
+            window.model.index(0, ReviewTableModel.COLUMN_MESSAGES)
+        )
+        assert window.model.data(
+            window.model.index(0, ReviewTableModel.COLUMN_LOOKUP_ACTION)
+        ) == "Xem hồ sơ"
+        runtime_id = window.model.runtime_id_at(0)
+        assert int(window.model.lookup_presentation(runtime_id).session_id) == group.id
+        assert [item.status for item in repository.list_contribution_history(group.id)] == [
+            "ACTIVE",
+            "DUPLICATE",
+        ]
+    finally:
+        window.close()
+        database.close()
 
 
 def test_reconciliation_period_uses_existing_bk_sheets_without_default_selection(

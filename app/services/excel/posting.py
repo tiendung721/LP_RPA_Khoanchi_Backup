@@ -1891,13 +1891,28 @@ class ExpensePostingService:
                 raise ExpensePostingError(
                     f"Hồ sơ đối soát lần {group.revision_no} chưa được xác nhận."
                 )
-            if status == "ALLOCATED" and self.sea_freight_service is not None:
-                self.sea_freight_service.prepare_allocation(group.id)
-            if group.generated_batch_id is None or repository is None:
-                raise ExpensePostingError(
-                    f"Hồ sơ đối soát #{group.id} chưa có batch kết quả."
+            allocation_rows = None
+            if self.sea_freight_service is not None:
+                allocation_rows = (
+                    self.sea_freight_service.prepare_allocation(group.id)
+                    if status == "ALLOCATED"
+                    else self.sea_freight_service.allocation_rows(group.id)
                 )
-            child = repository.get_by_id(int(group.generated_batch_id))
+            child = None
+            batch_service = getattr(self.provider, "batch_service", None)
+            if batch_service is not None and allocation_rows is not None:
+                # JSON đối soát là đầu ra có thể tái tạo. Luôn dựng từ dữ liệu
+                # hồ sơ hiện tại thay vì coi đường dẫn batch lịch sử là đầu vào.
+                child = batch_service.create_reconciliation_batch(
+                    group.id, allocation_rows
+                ).metadata
+            elif group.generated_batch_id is not None and repository is not None:
+                child = repository.get_by_id(int(group.generated_batch_id))
+            if child is None:
+                raise ExpensePostingError(
+                    f"Hồ sơ đối soát #{group.id} chưa tạo được kết quả hiện tại."
+                )
+            child_batch_id = int(child.id)
             child_path = getattr(child, "ready_path", None) if child is not None else None
             if child_path is None or not Path(child_path).is_file():
                 raise ExpensePostingError(
@@ -1913,7 +1928,7 @@ class ExpensePostingService:
                 )
             members.append(
                 {
-                    "batch_id": int(group.generated_batch_id),
+                    "batch_id": child_batch_id,
                     "path": child_path,
                     "sha256": child_hash,
                     "size": len(child_raw),
@@ -1923,7 +1938,7 @@ class ExpensePostingService:
             reconciliation_members.append(
                 {
                     "group_id": group.id,
-                    "batch_id": int(group.generated_batch_id),
+                    "batch_id": child_batch_id,
                     "row_count": len(child_rows),
                 }
             )
@@ -1931,7 +1946,7 @@ class ExpensePostingService:
                 combined.append(
                     {
                         **row,
-                        "origin_batch_id": int(group.generated_batch_id),
+                        "origin_batch_id": child_batch_id,
                         "origin_batch_hash": child_hash,
                         "origin_source_item_index": child_index,
                         "reconciliation_group_id": group.id,
@@ -3550,6 +3565,13 @@ class ExpensePostingService:
         details: Mapping[str, Any] | None = None,
     ) -> PostingConflict:
         conflict_details = dict(details or {})
+        vessel_voyage = " ".join(
+            str(value).strip()
+            for value in (item.vessel_name, item.voyage_no)
+            if value not in (None, "") and str(value).strip()
+        )
+        if not vessel_voyage and item.vessel_voyage_raw not in (None, ""):
+            vessel_voyage = str(item.vessel_voyage_raw).strip()
         if item.source_items:
             source = item.source_items[0]
             conflict_details.setdefault(
@@ -3601,6 +3623,7 @@ class ExpensePostingService:
             fee=item.selected_fee,
             amount=item.amount,
             carrier=join_carriers(item.carrier_candidates),
+            vessel_voyage=vessel_voyage or None,
             sheet_name=item.sheet_name,
             target_row=item.target_row,
             target_column=target_column,

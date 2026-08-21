@@ -138,7 +138,11 @@ class Database:
                 self._migration_18(connection)
                 connection.execute("PRAGMA user_version = 18")
                 current_version = 18
-            self._ensure_schema_18(connection)
+            if current_version < 19:
+                self._migration_19(connection)
+                connection.execute("PRAGMA user_version = 19")
+                current_version = 19
+            self._ensure_schema_19(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -1157,6 +1161,25 @@ class Database:
         }
         if columns and "item_outcomes" not in columns:
             connection.execute("ALTER TABLE excel_runs ADD COLUMN item_outcomes TEXT")
+
+    @staticmethod
+    def _migration_19(connection: sqlite3.Connection) -> None:
+        """Tăng tốc tra cứu lịch sử HĐ cước biển xuyên batch."""
+
+        Database._ensure_schema_18(connection)
+        Database._ensure_schema_19(connection)
+
+    @staticmethod
+    def _ensure_schema_19(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_18(connection)
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sea_freight_contribution_invoice
+            ON sea_freight_invoice_contributions(
+                UPPER(TRIM(invoice_no)), status, group_id
+            )
+            """
+        )
 
     @contextmanager
     def transaction(

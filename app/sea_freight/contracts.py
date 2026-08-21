@@ -116,6 +116,28 @@ class InvoiceContribution:
     source_document_name: str = "Dữ liệu bóc tách cũ"
 
 
+class InvoiceHistoryMatchKind(str, Enum):
+    NONE = "NONE"
+    EXACT = "EXACT"
+    CONFLICT = "CONFLICT"
+
+
+@dataclass(frozen=True, slots=True)
+class InvoiceHistoryMatch:
+    kind: InvoiceHistoryMatchKind
+    group: ReconciliationGroup | None = None
+    contribution: InvoiceContribution | None = None
+    differing_fields: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationOpenResult:
+    group: ReconciliationGroup
+    added_source_indices: tuple[int, ...] = ()
+    duplicate_source_indices: tuple[int, ...] = ()
+    requires_revision: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class SupplementImportResult:
     added_count: int

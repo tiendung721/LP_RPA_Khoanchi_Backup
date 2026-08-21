@@ -65,6 +65,142 @@ QLabel[status="warning"] {{
 QLabel[status="success"] {{
     color: {SUCCESS};
 }}
+QFrame#excelSummaryHeader {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
+QFrame#excelSummaryHeader[state="success"] {{
+    background: {SUCCESS_BG};
+    border-color: #B7E4C7;
+}}
+QFrame#excelSummaryHeader[state="warning"] {{
+    background: {WARNING_BG};
+    border-color: #E8D58B;
+}}
+QFrame#excelSummaryHeader[state="error"] {{
+    background: {ERROR_BG};
+    border-color: #F1B4AE;
+}}
+QLabel#excelSummaryIcon {{
+    color: {PRIMARY};
+    background: {PRIMARY_LIGHT};
+    border-radius: 21px;
+    font-size: 17pt;
+    font-weight: 800;
+}}
+QLabel#excelSummaryIcon[state="success"],
+QLabel#excelSummaryIcon[state="no_changes"] {{
+    color: {SUCCESS};
+    background: #DDF7E8;
+}}
+QLabel#excelSummaryIcon[state="warning"] {{
+    color: {WARNING};
+    background: #FDEFB0;
+}}
+QLabel#excelSummaryIcon[state="error"] {{
+    color: {ERROR};
+    background: #FFDAD6;
+}}
+QLabel#excelSummaryTitle {{
+    color: #101828;
+    font-size: 15pt;
+    font-weight: 700;
+}}
+QLabel#excelSummarySubtitle {{
+    color: {MUTED_TEXT};
+}}
+QScrollArea#excelSummaryScroll,
+QWidget#excelSummaryBody {{
+    background: transparent;
+}}
+QFrame#excelSummaryMetric {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
+QFrame#excelSummaryMetric[tone="primary"] {{
+    border-top: 3px solid {PRIMARY};
+}}
+QFrame#excelSummaryMetric[tone="success"] {{
+    border-top: 3px solid {SUCCESS};
+}}
+QFrame#excelSummaryMetric[tone="warning"] {{
+    border-top: 3px solid #D69E2E;
+}}
+QFrame#excelSummaryMetric[tone="neutral"] {{
+    border-top: 3px solid #94A3B8;
+}}
+QLabel#excelSummaryMetricLabel {{
+    color: {MUTED_TEXT};
+    font-size: 8.5pt;
+    font-weight: 700;
+}}
+QLabel#excelSummaryMetricValue {{
+    color: #101828;
+    font-size: 20pt;
+    font-weight: 750;
+}}
+QLabel#excelSummaryMetricValue[tone="primary"] {{ color: {PRIMARY_DARK}; }}
+QLabel#excelSummaryMetricValue[tone="success"] {{ color: {SUCCESS}; }}
+QLabel#excelSummaryMetricValue[tone="warning"] {{ color: {WARNING}; }}
+QLabel#excelSummaryMetricNote {{
+    color: {MUTED_TEXT};
+    font-size: 8.5pt;
+}}
+QFrame#excelSummaryNotice {{
+    background: {PRIMARY_LIGHT};
+    border: 1px solid #BFDBFE;
+    border-radius: 9px;
+}}
+QFrame#excelSummaryNotice[tone="success"] {{
+    background: {SUCCESS_BG};
+    border-color: #B7E4C7;
+}}
+QFrame#excelSummaryNotice[tone="warning"] {{
+    background: {WARNING_BG};
+    border-color: #E8D58B;
+}}
+QFrame#excelSummaryNotice[tone="error"] {{
+    background: {ERROR_BG};
+    border-color: #F1B4AE;
+}}
+QLabel#excelSummaryNoticeIcon {{
+    color: {PRIMARY};
+    font-weight: 800;
+}}
+QLabel#excelSummaryNoticeIcon[tone="success"] {{ color: {SUCCESS}; }}
+QLabel#excelSummaryNoticeIcon[tone="warning"] {{ color: {WARNING}; }}
+QLabel#excelSummaryNoticeIcon[tone="error"] {{ color: {ERROR}; }}
+QLabel#excelSummarySectionTitle {{
+    color: #475467;
+    font-size: 8.5pt;
+    font-weight: 700;
+}}
+QToolButton#excelSummaryDetailsToggle {{
+    min-height: 36px;
+    padding: 0 10px;
+    text-align: left;
+    color: #344054;
+    background: #F8FAFC;
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    font-weight: 650;
+}}
+QToolButton#excelSummaryDetailsToggle[tone="warning"] {{
+    color: {WARNING};
+    background: {WARNING_BG};
+    border-color: #E8D58B;
+}}
+QFrame#excelSummaryDetails {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+QFrame#excelSummaryDetails[tone="warning"] {{
+    background: #FFFCED;
+    border-color: #E8D58B;
+}}
 QFrame[card="true"], QGroupBox {{
     background: {SURFACE};
     border: 1px solid {BORDER};

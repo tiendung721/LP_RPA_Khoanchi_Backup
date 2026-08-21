@@ -62,6 +62,128 @@ class SeaFreightRepository:
         )
         return self._group(row) if row is not None else None
 
+    def find_invoice_history(
+        self,
+        invoice_no: str,
+        *,
+        exclude_batch_id: int | None = None,
+    ) -> list[tuple[InvoiceContribution, ReconciliationGroup]]:
+        """Tìm HĐ đang hoạt động ở batch khác, ưu tiên phiên hiện hành mới nhất."""
+
+        normalized = " ".join(str(invoice_no or "").split())
+        if not normalized:
+            return []
+        parameters: list[Any] = [normalized]
+        batch_filter = ""
+        if exclude_batch_id is not None:
+            batch_filter = "AND (c.source_batch_id IS NULL OR c.source_batch_id != ?)"
+            parameters.append(int(exclude_batch_id))
+        rows = self.database.query_all(
+            f"""
+            SELECT c.id AS contribution_id, g.id AS group_id
+            FROM sea_freight_invoice_contributions AS c
+            JOIN sea_freight_reconciliation_groups AS g ON g.id = c.group_id
+            WHERE UPPER(TRIM(c.invoice_no)) = UPPER(TRIM(?))
+              AND c.status = 'ACTIVE'
+              AND g.status != 'CANCELLED'
+              {batch_filter}
+            ORDER BY g.is_current DESC, g.revision_no DESC, g.id DESC, c.id DESC
+            """,
+            tuple(parameters),
+        )
+        result: list[tuple[InvoiceContribution, ReconciliationGroup]] = []
+        for row in rows:
+            contribution = self.get_contribution(int(row["contribution_id"]))
+            group = self.get_group(int(row["group_id"]))
+            if contribution is not None and group is not None:
+                result.append((contribution, group))
+        return result
+
+    def sync_duplicate_references(
+        self,
+        batch_id: int,
+        desired: list[tuple[int, dict[str, Any]]],
+    ) -> None:
+        """Đồng bộ liên kết truy vết không tham gia tính toán cho một batch."""
+
+        timestamp = _now()
+        desired_by_index = {
+            int(payload["source_item_index"]): (int(group_id), payload)
+            for group_id, payload in desired
+        }
+        with self.database.transaction(immediate=True) as connection:
+            existing_rows = connection.execute(
+                """
+                SELECT c.*
+                FROM sea_freight_invoice_contributions AS c
+                JOIN sea_freight_reconciliation_groups AS g ON g.id = c.group_id
+                WHERE c.source_batch_id = ? AND c.status = 'DUPLICATE'
+                  AND g.is_current = 1 AND g.status != 'CANCELLED'
+                ORDER BY c.id
+                """,
+                (int(batch_id),),
+            ).fetchall()
+            retained: set[int] = set()
+            for row in existing_rows:
+                source_index = int(row["source_item_index"])
+                target = desired_by_index.get(source_index)
+                keep = (
+                    target is not None
+                    and int(row["group_id"]) == target[0]
+                    and str(row["fingerprint"]) == str(target[1]["fingerprint"])
+                    and source_index not in retained
+                )
+                if keep:
+                    retained.add(source_index)
+                    continue
+                connection.execute(
+                    """
+                    UPDATE sea_freight_invoice_contributions
+                    SET status = 'REMOVED', removed_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (timestamp, timestamp, int(row["id"])),
+                )
+
+            for source_index, (group_id, payload) in desired_by_index.items():
+                if source_index in retained:
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO sea_freight_invoice_contributions(
+                        group_id, source_batch_id, source_item_index, source_sha256,
+                        source_document_id, source_document_name,
+                        invoice_no, invoice_date, bl, vessel_voyage_raw,
+                        vessel_name, voyage_no, invoice_container_count,
+                        container_count_basis, carrier, amount, fingerprint,
+                        source_kind, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              'DUPLICATE', ?, ?)
+                    """,
+                    (
+                        group_id,
+                        int(batch_id),
+                        source_index,
+                        payload["source_sha256"],
+                        payload["source_document_id"],
+                        payload["source_document_name"],
+                        payload.get("invoice_no"),
+                        payload.get("invoice_date"),
+                        payload.get("bl"),
+                        payload["vessel_voyage_raw"],
+                        payload["vessel_name"],
+                        payload["voyage_no"],
+                        payload["invoice_container_count"],
+                        payload["container_count_basis"],
+                        payload.get("carrier"),
+                        payload["amount"],
+                        payload["fingerprint"],
+                        "DUPLICATE_REFERENCE",
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+
     def list_groups(self, *, include_closed: bool = False) -> list[ReconciliationGroup]:
         where = "" if include_closed else "WHERE is_current = 1 AND status != 'CANCELLED'"
         return [
@@ -101,7 +223,7 @@ class SeaFreightRepository:
                 SELECT * FROM sea_freight_reconciliation_groups
                 WHERE bk_path = ? AND bk_sheet = ? AND vessel_key = ? AND voyage_key = ?
                   AND is_current = 1
-                  AND status NOT IN ('POSTED','CANCELLED')
+                  AND status != 'CANCELLED'
                 ORDER BY id DESC LIMIT 1
                 """,
                 (
@@ -111,6 +233,8 @@ class SeaFreightRepository:
                     snapshot.voyage_key,
                 ),
             ).fetchone()
+            if row is not None and str(row["status"]) in {"ALLOCATED", "POSTED"}:
+                return self._group(row)
             created = row is None
             if row is None:
                 cursor = connection.execute(
@@ -643,7 +767,7 @@ class SeaFreightRepository:
                 SELECT DISTINCT c.source_item_index
                 FROM sea_freight_invoice_contributions AS c
                 JOIN sea_freight_reconciliation_groups AS g ON g.id = c.group_id
-                WHERE c.source_batch_id = ? AND c.status = 'ACTIVE'
+                WHERE c.source_batch_id = ? AND c.status IN ('ACTIVE','DUPLICATE')
                   AND g.status != 'CANCELLED'
                   AND g.is_current = 1
                 """,
@@ -657,10 +781,12 @@ class SeaFreightRepository:
             SELECT c.source_item_index, g.*
             FROM sea_freight_invoice_contributions AS c
             JOIN sea_freight_reconciliation_groups AS g ON g.id = c.group_id
-            WHERE c.source_batch_id = ? AND c.status = 'ACTIVE'
+            WHERE c.source_batch_id = ? AND c.status IN ('ACTIVE','DUPLICATE')
               AND g.status != 'CANCELLED'
               AND g.is_current = 1
-            ORDER BY g.revision_no, c.id
+            ORDER BY g.revision_no,
+                     CASE c.status WHEN 'DUPLICATE' THEN 0 ELSE 1 END,
+                     c.id
             """,
             (batch_id,),
         )
@@ -670,18 +796,27 @@ class SeaFreightRepository:
         }
 
     def posting_groups_for_source_batch(self, batch_id: int) -> list[ReconciliationGroup]:
-        """Các hồ sơ hiện hành mà batch nguồn sở hữu kết quả phân bổ."""
+        """Các hồ sơ hiện hành được batch sở hữu hoặc liên kết để ghi BK."""
 
         return [
             self._group(row)
             for row in self.database.query_all(
                 """
-                SELECT * FROM sea_freight_reconciliation_groups
-                WHERE primary_source_batch_id = ? AND is_current = 1
+                SELECT * FROM sea_freight_reconciliation_groups AS g
+                WHERE g.is_current = 1
+                  AND (
+                    g.primary_source_batch_id = ?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM sea_freight_invoice_contributions AS c
+                        WHERE c.group_id = g.id AND c.source_batch_id = ?
+                          AND c.status IN ('ACTIVE','DUPLICATE')
+                    )
+                  )
                   AND status != 'CANCELLED'
                 ORDER BY primary_source_item_index, id
                 """,
-                (batch_id,),
+                (batch_id, batch_id),
             )
         ]
 
@@ -761,16 +896,18 @@ class SeaFreightRepository:
                 """
                 INSERT INTO sea_freight_invoice_contributions(
                     group_id, source_batch_id, source_item_index, source_sha256,
+                    source_document_id, source_document_name,
                     invoice_no, invoice_date, bl, vessel_voyage_raw, vessel_name,
                     voyage_no, invoice_container_count, container_count_basis,
                     carrier, amount, fingerprint, source_kind, status, created_at, updated_at
                 )
                 SELECT ?, source_batch_id, source_item_index, source_sha256,
+                       source_document_id, source_document_name,
                        invoice_no, invoice_date, bl, ?, vessel_name, voyage_no,
                        invoice_container_count, container_count_basis, carrier,
-                       amount, fingerprint, source_kind, 'ACTIVE', ?, ?
+                       amount, fingerprint, source_kind, status, ?, ?
                 FROM sea_freight_invoice_contributions
-                WHERE group_id = ? AND status = 'ACTIVE'
+                WHERE group_id = ? AND status IN ('ACTIVE','DUPLICATE')
                 ORDER BY id
                 """,
                 (new_id, snapshot.vessel_voyage_raw, timestamp, timestamp, group_id),
@@ -930,7 +1067,7 @@ class SeaFreightRepository:
                 """
                 UPDATE sea_freight_invoice_contributions
                 SET status = 'REMOVED', removed_at = ?, updated_at = ?
-                WHERE group_id = ? AND status = 'ACTIVE'
+                WHERE group_id = ? AND status != 'REMOVED'
                 """,
                 (timestamp, timestamp, group_id),
             )

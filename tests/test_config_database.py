@@ -153,6 +153,10 @@ def test_database_migration_and_active_batch_restore(tmp_path: Path) -> None:
     assert {
         "source_kind", "source_document_id", "source_document_name"
     }.issubset(contribution_columns)
+    assert database.query_one(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'idx_sea_freight_contribution_invoice'"
+    ) is not None
     database.close()
 
 

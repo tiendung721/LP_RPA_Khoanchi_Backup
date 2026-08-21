@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 from .edit_row_dialog import EditRowDialog
 from .inline_action_delegate import InlineActionDelegate
 from .review_table_model import (
+    ContainerLoadPresentation,
     FEE_CATALOG,
     ReviewFilterProxyModel,
     ReviewRow,
@@ -47,7 +48,11 @@ from .review_table_model import (
 )
 from app.constants import SCHEMA_VERSION
 from app.models import DataRow
-from app.sea_freight.contracts import GroupStatus, group_status_text
+from app.sea_freight.contracts import (
+    GroupStatus,
+    InvoiceHistoryMatchKind,
+    group_status_text,
+)
 from app.sea_freight.service import VesselVoyageNotFoundError
 from app.sea_freight.matching import normalize_match_key
 from app.ui.sea_freight_center import ReconciliationPeriodDialog
@@ -548,6 +553,7 @@ class ReviewWindow(QMainWindow):
         self.model.validationChanged.connect(self._update_stats)
         self.model.rowsChanged.connect(self._update_visible_count)
         self.model.rowsChanged.connect(self._refresh_document_filter)
+        self.model.rowsChanged.connect(self._restore_reconciliation_presentations)
         self.lookup_action_delegate.clicked.connect(
             self._lookup_action_clicked
         )
@@ -1135,19 +1141,62 @@ class ReviewWindow(QMainWindow):
     def _restore_reconciliation_presentations(self) -> None:
         if self._sea_freight_service is None or self._batch_id is None:
             return
-        try:
-            managed = self._sea_freight_service.repository.groups_for_source_batch(
-                int(self._batch_id)
+        service = self._sea_freight_service
+        batch_id = int(self._batch_id)
+        source_sha256 = str(_value(self._metadata, "sha256", default="") or "")
+        indexed_rows: list[tuple[int, DataRow]] = []
+        runtime_by_source_index: dict[int, str] = {}
+        for model_index in range(self.model.rowCount()):
+            runtime_id = self.model.runtime_id_at(model_index)
+            source_index = self._source_index_by_runtime.get(runtime_id, model_index)
+            runtime_by_source_index[source_index] = runtime_id
+            indexed_rows.append(
+                (
+                    source_index,
+                    DataRow.from_mapping(self.model.row_at(model_index).to_object()),
+                )
             )
+        matches: dict[int, Any] = {}
+        try:
+            matches = service.sync_batch_history(
+                indexed_rows,
+                source_batch_id=batch_id,
+                source_sha256=source_sha256,
+            )
+            managed = service.repository.groups_for_source_batch(batch_id)
         except Exception:
             LOGGER.exception("Không thể khôi phục trạng thái đối soát của batch %s", self._batch_id)
-            return
-        for source_index, group in managed.items():
-            if not 0 <= source_index < self.model.rowCount():
+            try:
+                managed = service.repository.groups_for_source_batch(batch_id)
+            except Exception:
+                managed = {}
+
+        warnings: dict[str, tuple[str, ...]] = {}
+        for source_index, match in matches.items():
+            runtime_id = runtime_by_source_index.get(source_index)
+            if runtime_id is None or match.group is None:
                 continue
-            runtime_id = self.model.runtime_id_at(source_index)
-            self.model.set_lookup_presentation(
-                runtime_id,
+            if match.kind is InvoiceHistoryMatchKind.EXACT:
+                invoice_no = getattr(match.contribution, "invoice_no", None) or "—"
+                warnings[runtime_id] = (
+                    f"HĐ {invoice_no} đã có trong hồ sơ #{match.group.id} – "
+                    f"Lần {match.group.revision_no} – {group_status_text(match.group)}; "
+                    "vẫn được phép ghi BK lại.",
+                )
+            elif match.kind is InvoiceHistoryMatchKind.CONFLICT:
+                invoice_no = getattr(match.contribution, "invoice_no", None) or "—"
+                differences = ", ".join(match.differing_fields)
+                warnings[runtime_id] = (
+                    f"HĐ {invoice_no} đã xuất hiện trong hồ sơ #{match.group.id} nhưng "
+                    f"khác {differences}; hãy kiểm tra trước khi tiếp tục.",
+                )
+
+        presentations: dict[str, ContainerLoadPresentation] = {}
+        for source_index, group in managed.items():
+            runtime_id = runtime_by_source_index.get(source_index)
+            if runtime_id is None:
+                continue
+            presentations[runtime_id] = ContainerLoadPresentation(
                 status=group.status.value,
                 message=(
                     (
@@ -1158,6 +1207,8 @@ class ReviewWindow(QMainWindow):
                 ),
                 session_id=str(group.id),
             )
+        self.model.replace_lookup_presentations(presentations)
+        self.model.set_contextual_warnings(warnings)
 
     def _lookup_action_clicked(self, proxy_index: QModelIndex) -> None:
         source_index = self.proxy_model.mapToSource(proxy_index)
@@ -1285,12 +1336,18 @@ class ReviewWindow(QMainWindow):
         if not selected_indices:
             QMessageBox.warning(self, "Chưa chọn hóa đơn", "Hãy chọn ít nhất một hóa đơn.")
             return False
+        outcome: Any | None = None
         try:
             open_many = getattr(service, "open_or_create_many", None)
             if callable(open_many):
-                group = open_many(
+                outcome = open_many(
                     [
-                        (index, DataRow.from_mapping(self.model.row_at(index).to_object()))
+                        (
+                            self._source_index_by_runtime.get(
+                                self.model.runtime_id_at(index), index
+                            ),
+                            DataRow.from_mapping(self.model.row_at(index).to_object()),
+                        )
                         for index in selected_indices
                     ],
                     bk_path=bk_path,
@@ -1303,6 +1360,7 @@ class ReviewWindow(QMainWindow):
                         _value(self._metadata, "sha256", default="") or ""
                     ),
                 )
+                group = getattr(outcome, "group", outcome)
             else:
                 group = service.open_or_create(
                     data_row,
@@ -1324,14 +1382,27 @@ class ReviewWindow(QMainWindow):
             QMessageBox.warning(self, "Chưa thể đối soát số cont", str(exc))
             return False
 
+        if bool(getattr(outcome, "requires_revision", False)):
+            QMessageBox.information(
+                self,
+                "Hồ sơ đã hoàn tất",
+                "Tàu/chuyến này đã có hồ sơ hoàn tất. Hãy mở hồ sơ, bấm "
+                "Đối soát lại rồi thêm HĐ mới bằng Trợ lý ảo hoặc thêm tay.",
+            )
+
         for index in selected_indices:
             selected_row = self.model.row_at(index)
             self.model.set_lookup_presentation(
                 selected_row.runtime_id,
-                status=group.status.value,
+                status=(
+                    "REQUIRES_REVISION"
+                    if getattr(outcome, "requires_revision", False)
+                    else group.status.value
+                ),
                 message=group_status_text(group),
                 session_id=str(group.id),
             )
-        self.reconciliationChanged.emit()
+        if not bool(getattr(outcome, "requires_revision", False)):
+            self.reconciliationChanged.emit()
         self.reconciliationOpenRequested.emit(group.id)
         return True

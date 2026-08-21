@@ -26,6 +26,7 @@ from app.services.excel.models import (
     ConflictType,
     ExcelRunStatus,
     OutcomeStatus,
+    PostingItem,
     PostingItemStatus,
     ResolutionAction,
     TargetCellKind,
@@ -42,6 +43,36 @@ from app.services.excel.workbook import WorkbookChangedError
 SYNC_HEADERS = [
     aliases[0] for aliases in SOURCE_HEADER_ALIASES.values()
 ]
+
+
+def test_posting_conflict_carries_effective_source_vessel_voyage(
+    tmp_path: Path,
+) -> None:
+    service = ExpensePostingService(provider=object(), bk_path=tmp_path / "BK.xlsx")
+    item = PostingItem(
+        source_indices=[0],
+        container="VSCU0000001",
+        bl="BL-01",
+        original_fee="VTN",
+        selected_fee="VTN",
+        rule="GV",
+        amount=1_000_000,
+        vessel_voyage_raw="AI RAW KHÁC",
+        vessel_name="NEW VISION",
+        voyage_no="2610S",
+    )
+
+    conflict = service._item_conflict(
+        "batch-hash",
+        0,
+        item,
+        ConflictType.TARGET_CELL_OCCUPIED,
+        "Ô đích đã có dữ liệu.",
+        (ResolutionAction.KEEP_EXISTING, ResolutionAction.OVERWRITE),
+    )
+
+    assert conflict.vessel_voyage == "NEW VISION 2610S"
+
 
 POSTING_BASE_HEADERS = (
     "SQT PM",

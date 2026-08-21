@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from typing import Iterable
 
@@ -10,7 +11,10 @@ from app.models import DataRow
 from .contracts import (
     BkContainerSnapshot,
     GroupStatus,
+    InvoiceHistoryMatch,
+    InvoiceHistoryMatchKind,
     ReconciliationGroup,
+    ReconciliationOpenResult,
     SupplementImportResult,
     VesselVoyageSuggestion,
 )
@@ -139,42 +143,14 @@ class SeaFreightReconciliationService:
         source_item_index: int,
         source_sha256: str,
     ) -> ReconciliationGroup:
-        snapshot, issue = self._snapshot_for_period(
-            row, bk_path=bk_path, month=month, year=year
-        )
-        self._require_snapshot_match(row, snapshot, issue=issue)
-        existing = self.repository.find_open_group(
-            snapshot.bk_path, snapshot.bk_sheet, snapshot.vessel_key, snapshot.voyage_key
-        )
-        if existing is None:
-            latest = self.repository.find_latest_group(
-                snapshot.bk_path, snapshot.bk_sheet, snapshot.vessel_key, snapshot.voyage_key
-            )
-            if latest is not None and latest.status in {GroupStatus.ALLOCATED, GroupStatus.POSTED}:
-                raise SeaFreightReconciliationError("Hồ sơ đã hoàn tất, không thể thêm HĐ.")
-        if existing is not None:
-            invoice_key = self._invoice_key(row.invoice_no)
-            if invoice_key and invoice_key in {
-                self._invoice_key(item.invoice_no)
-                for item in self.repository.list_contributions(existing.id)
-            }:
-                return existing
-            if existing.status in {GroupStatus.ALLOCATED, GroupStatus.POSTED}:
-                raise SeaFreightReconciliationError("Hồ sơ đã hoàn tất, không thể thêm HĐ.")
-        group = self.repository.upsert_snapshot(
-            snapshot, month=month, year=year, bk_issue=issue
-        )
-        self._add_row(
-            group.id,
-            row,
+        return self.open_or_create_many(
+            [(source_item_index, row)],
+            bk_path=bk_path,
+            month=month,
+            year=year,
             source_batch_id=source_batch_id,
-            source_item_index=source_item_index,
             source_sha256=source_sha256,
-            source_kind="INITIAL",
-        )
-        result = self.repository.get_group(group.id)
-        assert result is not None
-        return result
+        ).group
 
     def attach(
         self,
@@ -235,13 +211,13 @@ class SeaFreightReconciliationService:
         year: int,
         source_batch_id: int | None,
         source_sha256: str,
-    ) -> ReconciliationGroup:
+    ) -> ReconciliationOpenResult:
         """Gom các HĐ cùng tàu/chuyến vào một hồ sơ bằng một lần ghi nguyên tử."""
 
         selected = list(rows)
         if not selected:
             raise SeaFreightReconciliationError("Chưa chọn hóa đơn cước biển.")
-        first_index, first_row = selected[0]
+        _, first_row = selected[0]
         snapshot, issue = self._snapshot_for_period(
             first_row, bk_path=bk_path, month=month, year=year
         )
@@ -255,18 +231,66 @@ class SeaFreightReconciliationService:
                 raise SeaFreightReconciliationError(
                     "Các hóa đơn được chọn không cùng tàu/chuyến."
                 )
-        group = self.repository.upsert_snapshot(
-            snapshot, month=month, year=year, bk_issue=issue
+        current = self.repository.find_latest_group(
+            snapshot.bk_path,
+            snapshot.bk_sheet,
+            snapshot.vessel_key,
+            snapshot.voyage_key,
         )
+        if current is not None and current.status in {
+            GroupStatus.ALLOCATED,
+            GroupStatus.POSTED,
+        }:
+            contributions = self.repository.list_contributions(current.id)
+            duplicate_indices = tuple(
+                source_index
+                for source_index, row in selected
+                if any(
+                    self._invoice_key(row.invoice_no)
+                    and self._invoice_key(row.invoice_no)
+                    == self._invoice_key(item.invoice_no)
+                    and not self._history_differences(row, item)
+                    for item in contributions
+                )
+            )
+            return ReconciliationOpenResult(
+                current,
+                duplicate_source_indices=duplicate_indices,
+                requires_revision=len(duplicate_indices) != len(selected),
+            )
+
+        try:
+            group = self.repository.upsert_snapshot(
+                snapshot, month=month, year=year, bk_issue=issue
+            )
+        except sqlite3.IntegrityError as exc:
+            # Một thao tác đồng thời có thể tạo hồ sơ sau bước tra cứu. Luôn đổi
+            # va chạm DB thành kết quả/ngữ nghĩa nghiệp vụ thay vì lộ lỗi SQLite.
+            current = self.repository.find_latest_group(
+                snapshot.bk_path,
+                snapshot.bk_sheet,
+                snapshot.vessel_key,
+                snapshot.voyage_key,
+            )
+            if current is None:
+                raise SeaFreightReconciliationError(
+                    "Không thể mở hồ sơ đối soát hiện hành."
+                ) from exc
+            if current.status in {GroupStatus.ALLOCATED, GroupStatus.POSTED}:
+                return ReconciliationOpenResult(current, requires_revision=True)
+            group = current
         existing_invoices = {
             self._invoice_key(item.invoice_no)
             for item in self.repository.list_contributions(group.id)
             if self._invoice_key(item.invoice_no)
         }
         payloads: list[dict[str, object]] = []
+        added_indices: list[int] = []
+        duplicate_indices: list[int] = []
         for source_item_index, row in selected:
             invoice_key = self._invoice_key(row.invoice_no)
             if invoice_key and invoice_key in existing_invoices:
+                duplicate_indices.append(source_item_index)
                 continue
             payloads.append(
                 self._row_payload(
@@ -277,13 +301,116 @@ class SeaFreightReconciliationService:
                     source_kind="INITIAL",
                 )
             )
+            added_indices.append(source_item_index)
             if invoice_key:
                 existing_invoices.add(invoice_key)
         if payloads:
             self.repository.add_contributions(group.id, payloads)
-        result = self.repository.get_group(group.id)
-        assert result is not None
-        return result
+        refreshed = self.repository.get_group(group.id)
+        assert refreshed is not None
+        return ReconciliationOpenResult(
+            refreshed,
+            added_source_indices=tuple(added_indices),
+            duplicate_source_indices=tuple(duplicate_indices),
+        )
+
+    def inspect_invoice_history(
+        self,
+        row: DataRow,
+        *,
+        source_batch_id: int | None,
+    ) -> InvoiceHistoryMatch:
+        invoice_key = self._invoice_key(row.invoice_no)
+        if not invoice_key:
+            return InvoiceHistoryMatch(InvoiceHistoryMatchKind.NONE)
+        first_conflict: InvoiceHistoryMatch | None = None
+        history = self.repository.find_invoice_history(
+            str(row.invoice_no or ""),
+            exclude_batch_id=source_batch_id,
+        )
+        current_history = [item for item in history if item[1].is_current]
+        for contribution, group in current_history or history:
+            differing = self._history_differences(row, contribution)
+            if not differing:
+                return InvoiceHistoryMatch(
+                    InvoiceHistoryMatchKind.EXACT,
+                    group,
+                    contribution,
+                )
+            if first_conflict is None:
+                first_conflict = InvoiceHistoryMatch(
+                    InvoiceHistoryMatchKind.CONFLICT,
+                    group,
+                    contribution,
+                    differing,
+                )
+        return first_conflict or InvoiceHistoryMatch(InvoiceHistoryMatchKind.NONE)
+
+    def sync_batch_history(
+        self,
+        rows: Iterable[tuple[int, DataRow]],
+        *,
+        source_batch_id: int,
+        source_sha256: str,
+    ) -> dict[int, InvoiceHistoryMatch]:
+        """Phân loại lịch sử và đồng bộ link DUPLICATE của các dòng hiện tại."""
+
+        matches: dict[int, InvoiceHistoryMatch] = {}
+        desired: list[tuple[int, dict[str, object]]] = []
+        for source_item_index, row in rows:
+            if row.fee != "CB" or row.cont not in (None, ""):
+                continue
+            match = self.inspect_invoice_history(
+                row,
+                source_batch_id=source_batch_id,
+            )
+            matches[source_item_index] = match
+            if match.kind is not InvoiceHistoryMatchKind.EXACT or match.group is None:
+                continue
+            desired.append(
+                (
+                    match.group.id,
+                    self._row_payload(
+                        row,
+                        source_batch_id=source_batch_id,
+                        source_item_index=source_item_index,
+                        source_sha256=source_sha256,
+                        source_kind="DUPLICATE_REFERENCE",
+                    ),
+                )
+            )
+        self.repository.sync_duplicate_references(source_batch_id, desired)
+        return matches
+
+    @staticmethod
+    def _history_differences(
+        row: DataRow,
+        contribution: object,
+    ) -> tuple[str, ...]:
+        text = lambda value: " ".join(str(value or "").split()).casefold()
+        comparisons = (
+            ("ngày HĐ", text(row.invoice_date), text(getattr(contribution, "invoice_date"))),
+            ("B/L", text(row.bl), text(getattr(contribution, "bl"))),
+            (
+                "tàu/chuyến",
+                (
+                    normalize_match_key(row.vessel_name),
+                    normalize_match_key(row.voyage_no),
+                ),
+                (
+                    normalize_match_key(getattr(contribution, "vessel_name")),
+                    normalize_match_key(getattr(contribution, "voyage_no")),
+                ),
+            ),
+            (
+                "số cont",
+                row.invoice_container_count,
+                getattr(contribution, "invoice_container_count"),
+            ),
+            ("số tiền", row.amount, getattr(contribution, "amount")),
+            ("bên vận tải", text(row.carrier), text(getattr(contribution, "carrier"))),
+        )
+        return tuple(label for label, current, old in comparisons if current != old)
 
     def _add_row(
         self,

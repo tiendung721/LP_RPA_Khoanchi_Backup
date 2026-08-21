@@ -420,6 +420,7 @@ class ReviewTableModel(QAbstractTableModel):
         self._validator = validator
         self._allow_negative = bool(allow_negative)
         self._lookup_presentations: dict[str, ContainerLoadPresentation] = {}
+        self._contextual_warnings: dict[str, tuple[str, ...]] = {}
         if rows is not None:
             self.set_rows(rows, mark_dirty=False)
         else:
@@ -633,6 +634,7 @@ class ReviewTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._rows = converted
         self._lookup_presentations.clear()
+        self._contextual_warnings.clear()
         self._revalidate(emit_signal=False)
         self.endResetModel()
         self._set_dirty(mark_dirty)
@@ -693,6 +695,7 @@ class ReviewTableModel(QAbstractTableModel):
             del self._validation[start : end + 1]
             for row in removed_range:
                 self._lookup_presentations.pop(row.runtime_id, None)
+                self._contextual_warnings.pop(row.runtime_id, None)
             self.endRemoveRows()
 
         self._after_mutation()
@@ -708,6 +711,7 @@ class ReviewTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._rows[position : position + 1] = replacements
         self._lookup_presentations.pop(removed_runtime_id, None)
+        self._contextual_warnings.pop(removed_runtime_id, None)
         self._revalidate(emit_signal=False)
         self.endResetModel()
         self._set_dirty(True)
@@ -735,6 +739,41 @@ class ReviewTableModel(QAbstractTableModel):
             self.index(source_row, self.COLUMN_LOOKUP_ACTION),
             self.index(source_row, self.COLUMN_LOOKUP_ACTION),
         )
+
+    def replace_lookup_presentations(
+        self,
+        presentations: Mapping[str, ContainerLoadPresentation],
+    ) -> None:
+        self._lookup_presentations = {
+            runtime_id: value
+            for runtime_id, value in presentations.items()
+            if self.find_runtime_id(runtime_id) is not None
+        }
+        if self.rowCount():
+            self.dataChanged.emit(
+                self.index(0, self.COLUMN_LOOKUP_ACTION),
+                self.index(self.rowCount() - 1, self.COLUMN_LOOKUP_ACTION),
+            )
+
+    def set_contextual_warnings(
+        self,
+        warnings: Mapping[str, Sequence[str]],
+    ) -> None:
+        normalized = {
+            runtime_id: tuple(dict.fromkeys(str(item) for item in values if str(item)))
+            for runtime_id, values in warnings.items()
+            if self.find_runtime_id(runtime_id) is not None
+        }
+        if normalized == self._contextual_warnings:
+            return
+        self._contextual_warnings = normalized
+        self._revalidate(emit_signal=False)
+        if self.rowCount():
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(self.rowCount() - 1, self.columnCount() - 1),
+            )
+        self.validationChanged.emit(self._stats)
 
     def set_lookup_busy(self, busy: bool) -> None:
         del busy
@@ -819,6 +858,15 @@ class ReviewTableModel(QAbstractTableModel):
         external = self._run_external_validator()
         if external:
             results = self._merge_external_results(results, external)
+        for index, row in enumerate(self._rows):
+            contextual = self._contextual_warnings.get(row.runtime_id, ())
+            if not contextual:
+                continue
+            old = results[index]
+            results[index] = RowValidation(
+                old.errors,
+                tuple(dict.fromkeys(old.warnings + contextual)),
+            )
         self._validation = results
         status_counts = Counter(result.status for result in results)
         valid_amounts = [

@@ -520,6 +520,7 @@ class PostingConflict:
     fee: str | None = None
     amount: int | None = None
     carrier: str | None = None
+    vessel_voyage: str | None = None
     sheet_name: str | None = None
     target_row: int | None = None
     target_column: int | None = None

@@ -5,12 +5,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QFrame,
+    QHeaderView,
     QMessageBox,
     QPushButton,
+    QTableWidget,
 )
 
 import app.ui.main_window as main_window_module
@@ -30,6 +33,15 @@ from app.services.excel.models import (
     OutcomeStatus,
 )
 from app.ui.excel_task_controller import ExcelTaskController
+from app.ui.excel_summary_dialogs import (
+    ExcelCompletionDialog,
+    ExcelConfirmationDialog,
+    daily_confirmation_summary,
+    payment_completion_summary,
+    payment_confirmation_summary,
+    posting_completion_summary,
+    posting_confirmation_summary,
+)
 from app.ui.main_window import MainWindow
 from app.ui.settings_page import SettingsPage
 from app.ui.workflow_page import WorkflowPage
@@ -56,6 +68,74 @@ def test_step_three_has_three_primary_actions_and_statuses(qtbot) -> None:
         page.payment_sync_status_label.text()
         == "Đồng bộ BK → Thanh toán gần nhất: —"
     )
+
+
+def test_excel_confirmation_dialog_renders_cards_notice_table_and_explicit_action(
+    qtbot,
+) -> None:
+    summary = daily_confirmation_summary(
+        SimpleNamespace(),
+        candidates=[
+            SimpleNamespace(
+                source_sheet="Tháng 7",
+                target_sheet="T07 26",
+                update_count=5,
+                new_row_count=2,
+                unchanged_count=10,
+                target_only_count=1,
+                invalid_count=3,
+            )
+        ],
+    )
+    dialog = ExcelConfirmationDialog(
+        summary,
+        confirm_label="Đồng bộ 7 thay đổi vào BK",
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.windowTitle() == "Xác nhận đồng bộ Hàng ngày → BK"
+    assert len(dialog.findChildren(QFrame, "excelSummaryMetric")) == 4
+    assert len(dialog.findChildren(QFrame, "excelSummaryNotice")) == 2
+    table = dialog.findChild(QTableWidget, "excelSummaryTable")
+    assert table is not None
+    assert table.item(0, 0).text() == "Tháng 7"
+    assert table.item(0, 1).text() == "T07 26"
+    assert dialog.confirm_button.text() == "Đồng bộ 7 thay đổi vào BK"
+    assert not dialog.confirm_button.isDefault()
+
+    qtbot.mouseClick(dialog.confirm_button, Qt.MouseButton.LeftButton)
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_excel_completion_dialog_returns_open_and_detail_actions(qtbot) -> None:
+    summary = posting_completion_summary(
+        SimpleNamespace(
+            status="SUCCEEDED",
+            sheet_name="T07 26",
+            posted_source_items=2,
+            already_existing_items=4,
+            skipped_source_items=1,
+            item_outcomes=[],
+        )
+    )
+    open_dialog = ExcelCompletionDialog(
+        summary,
+        open_label="Mở file BK",
+        details_available=True,
+    )
+    qtbot.addWidget(open_dialog)
+    qtbot.mouseClick(open_dialog.open_button, Qt.MouseButton.LeftButton)
+    assert open_dialog.selected_action == ExcelCompletionDialog.OPEN_TARGET
+
+    detail_dialog = ExcelCompletionDialog(
+        summary,
+        open_label="Mở file BK",
+        details_available=True,
+    )
+    qtbot.addWidget(detail_dialog)
+    assert detail_dialog.details_button is not None
+    qtbot.mouseClick(detail_dialog.details_button, Qt.MouseButton.LeftButton)
+    assert detail_dialog.selected_action == ExcelCompletionDialog.VIEW_DETAILS
 
 
 def test_outcome_dialog_flattens_fields_and_filters_errors(qtbot) -> None:
@@ -96,6 +176,109 @@ def test_outcome_dialog_flattens_fields_and_filters_errors(qtbot) -> None:
     dialog.filter_combo.setCurrentIndex(4)
     assert dialog.table.rowCount() == 1
     assert dialog.table.item(0, 10).text() == "Thiếu SQT"
+
+
+def test_outcome_dialog_displays_friendly_vietnamese_statuses(qtbot) -> None:
+    expected_labels = {
+        OutcomeStatus.WRITTEN: "Đã cập nhật",
+        OutcomeStatus.PARTIAL: "Chỉ cập nhật một phần",
+        OutcomeStatus.UNCHANGED: "Không cần thay đổi",
+        OutcomeStatus.USER_KEPT: "Giữ nguyên theo lựa chọn",
+        OutcomeStatus.USER_SKIPPED: "Bỏ qua theo lựa chọn",
+        OutcomeStatus.INVALID_SOURCE: "Dữ liệu nguồn không hợp lệ",
+        OutcomeStatus.FAILED: "Xử lý không thành công",
+    }
+    outcomes = [
+        ItemWriteOutcome(
+            item_id=status.value,
+            fields=[
+                FieldWriteOutcome(
+                    field_name=status.value,
+                    status=status,
+                    reason=status.value,
+                )
+            ],
+        )
+        for status in expected_labels
+    ]
+    dialog = ExcelOutcomeDialog(outcomes)
+    qtbot.addWidget(dialog)
+
+    labels_by_code = {
+        dialog.table.item(row, 10).text(): dialog.table.item(row, 9).text()
+        for row in range(dialog.table.rowCount())
+    }
+    assert labels_by_code == {
+        status.value: label for status, label in expected_labels.items()
+    }
+    assert [
+        dialog.filter_combo.itemText(index)
+        for index in range(dialog.filter_combo.count())
+    ] == [
+        "Tất cả",
+        "Đã cập nhật",
+        "Không cần thay đổi",
+        "Theo lựa chọn người dùng",
+        "Cần kiểm tra",
+    ]
+
+
+def test_outcome_dialog_translates_payment_field_codes_and_formats_amounts(
+    qtbot,
+) -> None:
+    dialog = ExcelOutcomeDialog(
+        [
+            ItemWriteOutcome(
+                item_id="payment-row",
+                fields=[
+                    FieldWriteOutcome(
+                        field_name="Dòng thanh toán",
+                        source_value={
+                            "loaded_drop": 1_252_800,
+                            "storage": 1_209_600,
+                        },
+                        target_value_before={"loaded_drop": 1_000_000},
+                        target_value_after={
+                            "loaded_drop": 1_252_800,
+                            "storage": 1_209_600,
+                        },
+                        status=OutcomeStatus.WRITTEN,
+                    )
+                ],
+            )
+        ]
+    )
+    qtbot.addWidget(dialog)
+
+    expected = "Hạ hàng: 1.252.800; Lưu cont: 1.209.600"
+    assert dialog.table.item(0, 4).text() == expected
+    assert dialog.table.item(0, 7).text() == "Hạ hàng: 1.000.000"
+    assert dialog.table.item(0, 8).text() == expected
+    assert "loaded_drop" not in dialog.table.item(0, 4).text()
+    header = dialog.table.horizontalHeader()
+    for column in (4, 8):
+        assert (
+            header.sectionResizeMode(column)
+            is QHeaderView.ResizeMode.Interactive
+        )
+        assert dialog.table.columnWidth(column) == 240
+    assert (
+        dialog.table.horizontalScrollMode()
+        is dialog.table.ScrollMode.ScrollPerPixel
+    )
+    assert (
+        dialog.table.horizontalScrollBarPolicy()
+        is Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+    )
+    assert (
+        header.sectionResizeMode(10)
+        is QHeaderView.ResizeMode.Interactive
+    )
+    assert dialog.table.columnWidth(10) == 360
+    dialog.show()
+    qtbot.waitUntil(
+        lambda: dialog.table.horizontalScrollBar().maximum() > 0
+    )
 
 
 def test_main_window_restores_latest_excel_details_after_restart(
@@ -296,19 +479,19 @@ def test_sync_analysis_always_shows_full_sheet_confirmation(
         def cancel_waiting(self) -> None:
             self.cancel_calls += 1
 
-    captured: dict[str, Any] = {}
+    class Confirmation:
+        summary: Any = None
+        confirm_label = ""
 
-    def question(
-        _parent: Any,
-        title: str,
-        text: str,
-        *_args: Any,
-    ) -> QMessageBox.StandardButton:
-        captured["title"] = title
-        captured["text"] = text
-        return QMessageBox.StandardButton.Yes
+        def __init__(self, summary: Any, *, confirm_label: str, parent: Any) -> None:
+            Confirmation.summary = summary
+            Confirmation.confirm_label = confirm_label
 
-    monkeypatch.setattr(QMessageBox, "question", question)
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(main_window_module, "ExcelConfirmationDialog", Confirmation)
     tasks = Tasks()
     owner = SimpleNamespace(
         _excel_tasks=tasks,
@@ -320,11 +503,64 @@ def test_sync_analysis_always_shows_full_sheet_confirmation(
 
     assert len(tasks.apply_calls) == 1
     assert tasks.cancel_calls == 0
-    assert captured["title"] == "Xác nhận đồng bộ toàn sheet"
-    assert "Cập nhật: 5 dòng" in captured["text"]
-    assert "Thêm mới: 2 dòng" in captured["text"]
-    assert "Chỉ có ở BK, được giữ lại: 1 dòng" in captured["text"]
-    assert "Thiếu SQT, được bỏ qua: 3 dòng" in captured["text"]
+    assert Confirmation.summary.title == "Xác nhận đồng bộ Hàng ngày → BK"
+    assert [metric.value for metric in Confirmation.summary.metrics] == [5, 2, 10, 3]
+    assert Confirmation.summary.tables[0].rows[0][1:] == (
+        "T07 26", 5, 2, 10, 1, 3
+    )
+    assert Confirmation.confirm_label == "Đồng bộ 7 thay đổi vào BK"
+
+
+def test_sync_without_changes_applies_without_redundant_confirmation(
+    monkeypatch,
+) -> None:
+    candidate = SimpleNamespace(
+        source_sheet="Tháng 7",
+        target_sheet="T07 26",
+        update_count=0,
+        new_row_count=0,
+        unchanged_count=12,
+        target_only_count=2,
+        invalid_count=0,
+    )
+    plan = SimpleNamespace(
+        operation="sync",
+        conflicts=[],
+        selected_month=7,
+        selected_sheet="T07 26",
+        month_candidates=[candidate],
+    )
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.apply_calls: list[Any] = []
+
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "sync"
+
+        def apply_plan(self, value: Any, resolutions: Any, *, operation: str) -> None:
+            self.apply_calls.append((value, resolutions, operation))
+
+    class UnexpectedConfirmation:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("Không được hỏi xác nhận khi không có thay đổi.")
+
+    monkeypatch.setattr(
+        main_window_module,
+        "ExcelConfirmationDialog",
+        UnexpectedConfirmation,
+    )
+    tasks = Tasks()
+    owner = SimpleNamespace(
+        _excel_tasks=tasks,
+        _excel_operation="sync",
+        _show_excel_error=lambda *_args, **_kwargs: None,
+    )
+
+    MainWindow._excel_analysis_ready(owner, plan)
+
+    assert tasks.apply_calls == [(plan, {}, "sync")]
 
 
 def test_bang_ke_posting_skips_global_month_and_applies_multi_sheet_plan(
@@ -392,22 +628,22 @@ def test_bang_ke_posting_skips_global_month_and_applies_multi_sheet_plan(
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             raise AssertionError("BANG_KE không được hỏi một tháng chung.")
 
-    captured: dict[str, str] = {}
+    class Confirmation:
+        summary: Any = None
+        confirm_label = ""
 
-    def question(
-        _parent: Any,
-        title: str,
-        text: str,
-        *_args: Any,
-    ) -> QMessageBox.StandardButton:
-        captured["title"] = title
-        captured["text"] = text
-        return QMessageBox.StandardButton.Yes
+        def __init__(self, summary: Any, *, confirm_label: str, parent: Any) -> None:
+            Confirmation.summary = summary
+            Confirmation.confirm_label = confirm_label
+
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
 
     monkeypatch.setattr(
         main_window_module, "MonthSelectionDialog", UnexpectedMonthDialog
     )
-    monkeypatch.setattr(QMessageBox, "question", question)
+    monkeypatch.setattr(main_window_module, "ExcelConfirmationDialog", Confirmation)
     tasks = Tasks()
     owner = SimpleNamespace(
         _excel_tasks=tasks,
@@ -420,11 +656,10 @@ def test_bang_ke_posting_skips_global_month_and_applies_multi_sheet_plan(
     assert tasks.apply_calls == [(plan, {}, "posting")]
     assert tasks.cancel_calls == 0
     assert plan.confirmation_done is True
-    assert captured["title"] == "Xác nhận nhập khoản chi"
-    assert "Sheet BK: T01 26, T04 26" in captured["text"]
-    assert "File BK sẽ thay đổi 1 ô" in captured["text"]
-    assert "Ghi vào ô trống: 1 khoản" in captured["text"]
-    assert "Giữ nguyên: 1 khoản" in captured["text"]
+    assert Confirmation.summary.title == "Xác nhận nhập khoản chi vào BK"
+    assert Confirmation.summary.subtitle.endswith("2 sheet.")
+    assert [metric.value for metric in Confirmation.summary.metrics] == [1, 1, 0, 1]
+    assert Confirmation.confirm_label == "Nhập 1 khoản vào BK"
 
 
 def test_posting_confirmation_summarizes_file_effects_in_plain_language() -> None:
@@ -465,15 +700,13 @@ def test_posting_confirmation_summarizes_file_effects_in_plain_language() -> Non
         ],
     )
 
-    text = main_window_module._posting_confirmation_text(plan)
+    summary = posting_confirmation_summary(plan)
 
-    assert "Sheet BK: T07 26" in text
-    assert "File BK sẽ thay đổi 2 ô" in text
-    assert "Ghi vào ô trống: 1 khoản" in text
-    assert "Ghi đè dữ liệu hiện có: 1 khoản" in text
-    assert "Giữ nguyên: 1 khoản" in text
-    assert "Bỏ qua: 2 khoản" in text
-    assert "Đã có đúng số tiền: 1 khoản" in text
+    assert summary.subtitle == "2 ô BK sẽ thay đổi trên 1 sheet."
+    assert [metric.value for metric in summary.metrics] == [2, 2, 1, 3]
+    assert summary.tables[0].rows == (("T07 26", 1, 1, 1, 1, 2),)
+    assert summary.notices[0].tone == "warning"
+    assert "1 khoản sẽ thay thế" in summary.notices[0].text
 
 
 def test_regular_posting_still_reanalyzes_the_selected_month(monkeypatch) -> None:
@@ -916,11 +1149,15 @@ def test_daily_sync_reopens_dialog_with_saved_resolution(monkeypatch) -> None:
     monkeypatch.setattr(
         main_window_module, "ConflictResolutionDialog", Dialog
     )
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
-    )
+    class Confirmation:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(main_window_module, "ExcelConfirmationDialog", Confirmation)
     tasks = Tasks()
     owner = SimpleNamespace(
         _excel_tasks=tasks,
@@ -1133,35 +1370,34 @@ def test_payment_sync_confirmation_discloses_new_sheet_template(
         def cancel_waiting() -> None:
             raise AssertionError("Không được hủy khi người dùng xác nhận.")
 
-    captured: dict[str, str] = {}
+    class Confirmation:
+        summary: Any = None
 
-    def question(
-        _parent: Any,
-        title: str,
-        text: str,
-        *_args: Any,
-    ) -> QMessageBox.StandardButton:
-        captured["title"] = title
-        captured["text"] = text
-        return QMessageBox.StandardButton.Yes
+        def __init__(self, summary: Any, **_kwargs: Any) -> None:
+            Confirmation.summary = summary
 
-    monkeypatch.setattr(QMessageBox, "question", question)
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(main_window_module, "ExcelConfirmationDialog", Confirmation)
     tasks = Tasks()
     owner = SimpleNamespace(_excel_tasks=tasks)
 
     MainWindow._handle_payment_sync_plan(owner, plan)
 
     assert len(tasks.apply_calls) == 1
-    assert "T06 26 HP" in captured["text"]
-    assert "T05 26 HP" in captured["text"]
-    assert "T06 26 NAM" in captured["text"]
-    assert "T05 26 NAM" in captured["text"]
-    assert captured["title"] == "Xác nhận đồng bộ BK → Thanh toán"
-    assert "Sheet Thanh toán mới: Có, tạo từ T05 26" in captured["text"]
+    assert Confirmation.summary.title == "Xác nhận đồng bộ BK → Thanh toán"
+    assert Confirmation.summary.tables[0].rows == (
+        ("T06 26", "T06 26 HP", "Tạo từ T05 26 HP", 2, 1, 3, 0),
+        ("T06 26", "T06 26 NAM", "Tạo từ T05 26 NAM", 5, 4, 6, 0),
+    )
+    assert "T05 26 HP" in Confirmation.summary.notices[0].text
+    assert "T05 26 NAM" in Confirmation.summary.notices[1].text
 
 
 @pytest.mark.parametrize(
-    ("operation", "result_fields", "expected_title", "expected_detail"),
+    ("operation", "result_fields", "expected_title", "expected_metric"),
     (
         (
             "sync",
@@ -1173,8 +1409,8 @@ def test_payment_sync_confirmation_discloses_new_sheet_template(
                 "target_only_rows": 3,
                 "invalid_rows": 0,
             },
-            "Đồng bộ thành công",
-            "Sheet: T07 26",
+            "Đồng bộ Hàng ngày → BK hoàn tất",
+            2,
         ),
         (
             "posting",
@@ -1185,8 +1421,8 @@ def test_payment_sync_confirmation_discloses_new_sheet_template(
                 "already_existing_items": 2,
                 "skipped_source_items": 1,
             },
-            "Nhập khoản chi hoàn tất",
-            "Đã nhập: 10 khoản",
+            "Nhập khoản chi vào BK hoàn tất",
+            10,
         ),
     ),
 )
@@ -1196,58 +1432,31 @@ def test_bk_completion_can_open_the_written_bk_file(
     operation: str,
     result_fields: dict[str, Any],
     expected_title: str,
-    expected_detail: str,
+    expected_metric: int,
 ) -> None:
     bk_path = tmp_path / "BK 2026.xlsx"
     bk_path.touch()
     opened: list[Path] = []
 
-    class CompletionMessage:
-        class Icon:
-            Information = object()
+    class CompletionDialog:
+        OPEN_TARGET = "open_target"
+        VIEW_DETAILS = "view_details"
+        summary: Any = None
 
-        class ButtonRole:
-            ActionRole = object()
+        def __init__(self, summary: Any, **_kwargs: Any) -> None:
+            CompletionDialog.summary = summary
+            self.selected_action = self.OPEN_TARGET
 
-        class StandardButton:
-            Ok = object()
-
-        instance: Any = None
-
-        def __init__(self, _parent: Any) -> None:
-            CompletionMessage.instance = self
-            self.title = ""
-            self.text = ""
-            self.open_button = None
-            self.clicked = None
-
-        def setIcon(self, _icon: Any) -> None:
-            pass
-
-        def setWindowTitle(self, title: str) -> None:
-            self.title = title
-
-        def setText(self, text: str) -> None:
-            self.text = text
-
-        def addButton(self, button: Any, _role: Any = None) -> Any:
-            if button == "Mở file BK":
-                self.open_button = object()
-                return self.open_button
-            return object()
-
-        def exec(self) -> None:
-            self.clicked = self.open_button
-
-        def clickedButton(self) -> Any:
-            return self.clicked
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
 
     class Tasks:
         @staticmethod
         def normalize_operation(_operation: Any) -> str:
             return operation
 
-    monkeypatch.setattr(main_window_module, "QMessageBox", CompletionMessage)
+    monkeypatch.setattr(main_window_module, "ExcelCompletionDialog", CompletionDialog)
     owner = SimpleNamespace(
         _excel_context="workflow",
         _excel_operation=operation,
@@ -1266,10 +1475,8 @@ def test_bk_completion_can_open_the_written_bk_file(
 
     MainWindow._excel_completed(owner, result)
 
-    message = CompletionMessage.instance
-    assert message.title == expected_title
-    assert message.open_button is not None
-    assert expected_detail in message.text
+    assert CompletionDialog.summary.title == expected_title
+    assert CompletionDialog.summary.metrics[0].value == expected_metric
     assert opened == [bk_path]
 
 
@@ -1281,50 +1488,25 @@ def test_payment_completion_displays_carrier_invoice_summary(
     payment_path.touch()
     opened: list[Path] = []
 
-    class CompletionMessage:
-        class Icon:
-            Information = object()
+    class CompletionDialog:
+        OPEN_TARGET = "open_target"
+        VIEW_DETAILS = "view_details"
+        summary: Any = None
 
-        class ButtonRole:
-            ActionRole = object()
+        def __init__(self, summary: Any, **_kwargs: Any) -> None:
+            CompletionDialog.summary = summary
+            self.selected_action = self.OPEN_TARGET
 
-        class StandardButton:
-            Ok = object()
-
-        instance: Any = None
-
-        def __init__(self, _parent: Any) -> None:
-            CompletionMessage.instance = self
-            self.text = ""
-            self.open_button = None
-
-        def setIcon(self, _icon: Any) -> None:
-            pass
-
-        def setWindowTitle(self, _title: str) -> None:
-            pass
-
-        def setText(self, text: str) -> None:
-            self.text = text
-
-        def addButton(self, button: Any, _role: Any = None) -> Any:
-            if button == "Mở file Thanh toán":
-                self.open_button = object()
-                return self.open_button
-            return object()
-
-        def exec(self) -> None:
-            pass
-
-        def clickedButton(self) -> Any:
-            return self.open_button
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
 
     class Tasks:
         @staticmethod
         def normalize_operation(_operation: Any) -> str:
             return "payment_sync"
 
-    monkeypatch.setattr(main_window_module, "QMessageBox", CompletionMessage)
+    monkeypatch.setattr(main_window_module, "ExcelCompletionDialog", CompletionDialog)
     owner = SimpleNamespace(
         _excel_context="workflow",
         _excel_operation="payment_sync",
@@ -1354,10 +1536,12 @@ def test_payment_completion_displays_carrier_invoice_summary(
 
     MainWindow._excel_completed(owner, result)
 
-    assert "Tổng hợp theo hóa đơn và bên vận tải" in CompletionMessage.instance.text
-    assert "Số hóa đơn: 3" in CompletionMessage.instance.text
-    assert "Tổng tiền kỳ: 1.700.000" in CompletionMessage.instance.text
-    assert "Hóa đơn thuộc nhiều bên: 1" in CompletionMessage.instance.text
+    details = CompletionDialog.summary.details[0]
+    assert details.title == "Tổng hợp hóa đơn và bên vận tải"
+    assert "Số hóa đơn: 3" in details.lines
+    assert "Tổng tiền kỳ: 1.700.000" in details.lines
+    assert "Hóa đơn thuộc nhiều bên: 1" in details.lines
+    assert details.expanded is True
     assert opened == [payment_path]
 
 
@@ -2057,6 +2241,128 @@ def test_conflict_bulk_action_applies_to_all_compatible_rows_and_allows_override
 
     assert row_a.currentData() == "SELECT_ROW"
     assert dialog._action_combos["row-b"].currentData() == "SKIP"
+
+
+def test_conflict_bulk_action_applies_only_to_selected_rows_after_sorting(
+    qtbot,
+) -> None:
+    dialog = ConflictResolutionDialog(
+        [
+            {
+                "conflict_id": "row-b",
+                "type": "TARGET_CELL_OCCUPIED",
+                "container": "VSCU0000002",
+                "allowed_actions": ["KEEP_EXISTING", "OVERWRITE"],
+            },
+            {
+                "conflict_id": "row-a",
+                "type": "TARGET_CELL_OCCUPIED",
+                "container": "VSCU0000001",
+                "allowed_actions": ["KEEP_EXISTING", "OVERWRITE"],
+            },
+            {
+                "conflict_id": "row-c",
+                "type": "TARGET_CELL_OCCUPIED",
+                "container": "VSCU0000003",
+                "allowed_actions": ["KEEP_EXISTING", "OVERWRITE"],
+            },
+        ]
+    )
+    qtbot.addWidget(dialog)
+    dialog.table.sortItems(0, Qt.SortOrder.AscendingOrder)
+
+    selection = dialog.table.selectionModel()
+    flags = (
+        QItemSelectionModel.SelectionFlag.Select
+        | QItemSelectionModel.SelectionFlag.Rows
+    )
+    selection.select(dialog.table.model().index(0, 0), flags)
+    selection.select(dialog.table.model().index(2, 0), flags)
+
+    overwrite_index = next(
+        index
+        for index in range(dialog.bulk_action_combo.count())
+        if "OVERWRITE" in dialog.bulk_action_combo.itemData(index)
+    )
+    dialog.bulk_action_combo.setCurrentIndex(overwrite_index)
+
+    assert dialog.bulk_apply_selected_button.isEnabled()
+    assert dialog.bulk_apply_selected_button.text().endswith("(2)")
+    assert dialog._selected_conflict_ids() == {"row-a", "row-c"}
+
+    dialog.bulk_apply_selected_button.click()
+
+    assert dialog._action_combos["row-a"].currentData() == "OVERWRITE"
+    assert dialog._action_combos["row-c"].currentData() == "OVERWRITE"
+    assert dialog._action_combos["row-b"].currentData() == ""
+    assert "2 dòng đã chọn" in dialog.bulk_result_label.text()
+
+
+def test_conflict_selected_bulk_applies_select_row_but_still_requires_bk_row(
+    qtbot,
+) -> None:
+    dialog = ConflictResolutionDialog(
+        [
+            {
+                "conflict_id": "row-a",
+                "type": "MULTIPLE_CONTAINER_MATCH",
+                "allowed_actions": ["SELECT_ROW", "SKIP"],
+                "row_candidates": [{"row_number": 12}],
+            },
+            {
+                "conflict_id": "row-b",
+                "type": "MULTIPLE_CONTAINER_MATCH",
+                "allowed_actions": ["SELECT_ROW", "SKIP"],
+                "row_candidates": [{"row_number": 13}],
+            },
+        ]
+    )
+    qtbot.addWidget(dialog)
+    row_b = dialog._action_combos["row-b"]
+    row_b.setCurrentIndex(row_b.findData("SKIP"))
+    dialog.table.selectRow(0)
+
+    select_row_index = next(
+        index
+        for index in range(dialog.bulk_action_combo.count())
+        if "SELECT_ROW" in dialog.bulk_action_combo.itemData(index)
+    )
+    dialog.bulk_action_combo.setCurrentIndex(select_row_index)
+
+    assert dialog.bulk_apply_selected_button.isEnabled()
+    assert dialog.bulk_apply_button.isEnabled()
+
+    dialog.bulk_apply_selected_button.click()
+
+    assert dialog._action_combos["row-a"].currentData() == "SELECT_ROW"
+    assert dialog._selector_buttons["row-a"].isEnabled()
+    assert dialog._action_combos["row-b"].currentData() == "SKIP"
+    assert not dialog._selector_buttons["row-b"].isEnabled()
+
+    dialog._validate_and_accept()
+
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    assert "chưa chọn dòng BK" in dialog.validation_label.text()
+
+
+def test_expense_conflict_dialog_shows_source_vessel_voyage_only_for_posting(
+    qtbot,
+) -> None:
+    conflict = {
+        "conflict_id": "occupied",
+        "type": "TARGET_CELL_OCCUPIED",
+        "vessel_voyage": "NEW VISION 2610S",
+        "allowed_actions": ["KEEP_EXISTING", "OVERWRITE"],
+    }
+    posting = ConflictResolutionDialog([conflict], operation="posting")
+    daily = ConflictResolutionDialog([conflict], operation="sync")
+    qtbot.addWidget(posting)
+    qtbot.addWidget(daily)
+    column = posting.COLUMNS.index("Tàu / chuyến nguồn")
+
+    assert not posting.table.isColumnHidden(column)
+    assert posting.table.item(0, column).text() == "NEW VISION 2610S"
+    assert daily.table.isColumnHidden(column)
 
 
 def test_skipping_row_selection_disables_and_clears_target_value_choice(

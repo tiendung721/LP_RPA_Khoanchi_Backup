@@ -9,7 +9,7 @@ from app.database import Database
 from app.config import AppSettings
 from app.models import DataRow
 from app.repositories.batch_repository import BatchRepository
-from app.services.batch_service import BatchService
+from app.services.batch_service import BatchDataError, BatchService
 from app.services.reviewed_batch_provider import ReviewedBatchProvider
 from app.services.excel.posting import ExpensePostingService
 from app.sea_freight import (
@@ -216,7 +216,7 @@ def test_open_many_invoices_is_atomic_ready_and_preserves_document_sources(
     second.source_document_id = "DOC_002"
     second.source_document_name = "Hoa_don_B.pdf"
 
-    group = service.open_or_create_many(
+    outcome = service.open_or_create_many(
         [(0, first), (1, second)],
         bk_path=tmp_path / "BK.xlsx",
         month=7,
@@ -225,13 +225,191 @@ def test_open_many_invoices_is_atomic_ready_and_preserves_document_sources(
         source_sha256="batch-sha",
     )
 
+    group = outcome.group
     assert group.status is GroupStatus.READY
+    assert outcome.added_source_indices == (0, 1)
     contributions = repository.list_contributions(group.id)
     assert [(item.invoice_no, item.source_document_id) for item in contributions] == [
         ("INV-004", "DOC_001"),
         ("INV-006", "DOC_002"),
     ]
     assert sum(int(item.invoice_container_count) for item in contributions) == 10
+    database.close()
+
+
+def test_cross_batch_duplicate_links_existing_posted_group_without_changing_totals(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "state.db")
+    batch_repository = BatchRepository(database)
+    old_batch = batch_repository.create_batch(
+        source_filename="old.json",
+        source_output_path=tmp_path / "old.json",
+        original_archive_path=tmp_path / "old.json",
+        working_path=tmp_path / "old.json",
+        sha256="a" * 64,
+    )
+    new_batch = batch_repository.create_batch(
+        source_filename="new.json",
+        source_output_path=tmp_path / "new.json",
+        original_archive_path=tmp_path / "new.json",
+        working_path=tmp_path / "new.json",
+        sha256="b" * 64,
+    )
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=3))
+    )
+    original = _row(3, 20_550_000, "00006504", carrier="VIETSUN")
+    original.source_document_name = "C26TVS-00006504.pdf"
+    group = service.open_or_create(
+        original,
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=old_batch.id,
+        source_item_index=0,
+        source_sha256=old_batch.sha256,
+    )
+    repository.mark_allocated(group.id)
+    repository.mark_posted(group.id, None)
+    duplicate = original.copy_with()
+    duplicate.source_document_name = "C26TVS-00006504 (1).pdf"
+
+    matches = service.sync_batch_history(
+        [(3, duplicate)],
+        source_batch_id=new_batch.id,
+        source_sha256=new_batch.sha256,
+    )
+    outcome = service.open_or_create_many(
+        [(3, duplicate)],
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=new_batch.id,
+        source_sha256=new_batch.sha256,
+    )
+
+    assert matches[3].kind.value == "EXACT"
+    assert matches[3].group is not None and matches[3].group.id == group.id
+    assert outcome.group.id == group.id
+    assert outcome.duplicate_source_indices == (3,)
+    assert not outcome.requires_revision
+    assert len(repository.list_groups(include_closed=True)) == 1
+    assert len(repository.list_contributions(group.id)) == 1
+    assert repository.get_group(group.id).total_amount == 20_550_000
+    history = repository.list_contribution_history(group.id)
+    assert [item.status for item in history] == ["ACTIVE", "DUPLICATE"]
+    assert repository.managed_source_indices(new_batch.id) == {3}
+    assert repository.groups_for_source_batch(new_batch.id)[3].id == group.id
+    assert [item.id for item in repository.posting_groups_for_source_batch(new_batch.id)] == [
+        group.id
+    ]
+
+    revised = service.create_revision(group.id)
+    assert [item.status for item in repository.list_contribution_history(revised.id)] == [
+        "ACTIVE",
+        "DUPLICATE",
+    ]
+    assert repository.get_group(revised.id).total_amount == 20_550_000
+    assert repository.groups_for_source_batch(new_batch.id)[3].id == revised.id
+    database.close()
+
+
+def test_same_invoice_with_changed_business_data_is_conflict_not_link(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "state.db")
+    batch_repository = BatchRepository(database)
+    old_batch = batch_repository.create_batch(
+        source_filename="old.json",
+        source_output_path=tmp_path / "old.json",
+        original_archive_path=tmp_path / "old.json",
+        working_path=tmp_path / "old.json",
+        sha256="c" * 64,
+    )
+    new_batch = batch_repository.create_batch(
+        source_filename="new.json",
+        source_output_path=tmp_path / "new.json",
+        original_archive_path=tmp_path / "new.json",
+        working_path=tmp_path / "new.json",
+        sha256="d" * 64,
+    )
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=1))
+    )
+    original = _row(1, 6_850_000, "INV-CONFLICT")
+    group = service.open_or_create(
+        original,
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=old_batch.id,
+        source_item_index=0,
+        source_sha256=old_batch.sha256,
+    )
+    repository.mark_allocated(group.id)
+    changed = original.copy_with(amount=7_000_000)
+
+    matches = service.sync_batch_history(
+        [(0, changed)],
+        source_batch_id=new_batch.id,
+        source_sha256=new_batch.sha256,
+    )
+
+    assert matches[0].kind.value == "CONFLICT"
+    assert matches[0].differing_fields == ("số tiền",)
+    assert repository.managed_source_indices(new_batch.id) == set()
+    assert repository.groups_for_source_batch(new_batch.id) == {}
+    outcome = service.open_or_create_many(
+        [(0, changed)],
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=new_batch.id,
+        source_sha256=new_batch.sha256,
+    )
+    assert outcome.group.id == group.id
+    assert outcome.requires_revision
+    assert outcome.duplicate_source_indices == ()
+    database.close()
+
+
+def test_new_invoice_for_completed_voyage_returns_existing_group_for_rerun(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "state.db")
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=1))
+    )
+    group = service.open_or_create(
+        _row(1, 6_850_000, "INV-OLD"),
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=None,
+        source_item_index=0,
+        source_sha256="old",
+    )
+    repository.mark_allocated(group.id)
+
+    outcome = service.open_or_create_many(
+        [(1, _row(1, 7_000_000, "INV-NEW"))],
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=None,
+        source_sha256="new",
+    )
+
+    assert outcome.group.id == group.id
+    assert outcome.requires_revision
+    assert [item.invoice_no for item in repository.list_contributions(group.id)] == [
+        "INV-OLD"
+    ]
+    assert len(repository.list_groups(include_closed=True)) == 1
     database.close()
 
 
@@ -294,6 +472,71 @@ def test_ready_group_creates_only_one_system_batch(tmp_path: Path) -> None:
     assert first.metadata.source_kind == "SEA_FREIGHT_RECONCILIATION"
     assert first.metadata.reconciliation_group_id == group.id
     assert [row.amount for row in first.document.rows] == [50, 51]
+    database.close()
+
+
+def test_missing_reconciliation_json_is_recreated_from_current_group(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings(data_root=tmp_path, output_dir=tmp_path / "Output")
+    database = Database(settings.paths.database_path)
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=2))
+    )
+    group = service.attach(
+        _row(2, 101, "INV"), bk_path=tmp_path / "BK.xlsx", bk_sheet="T07 26",
+        source_batch_id=None, source_item_index=0, source_sha256="source",
+    )
+    batch_service = BatchService(settings.paths, BatchRepository(database))
+    first = batch_service.create_reconciliation_batch(
+        group.id, service.prepare_allocation(group.id)
+    )
+    repository.mark_allocated(group.id, first.metadata.id)
+    result_path = first.metadata.ready_path
+    assert result_path is not None
+    result_path.unlink()
+
+    with pytest.raises(BatchDataError):
+        batch_service.load_batch(first.metadata.id)
+
+    repaired = batch_service.create_reconciliation_batch(
+        group.id, service.prepare_allocation(group.id)
+    )
+
+    assert repaired.metadata.id == first.metadata.id
+    assert repaired.metadata.status.value == "READY"
+    assert repaired.metadata.last_error is None
+    assert result_path.is_file()
+    assert [row.amount for row in repaired.document.rows] == [50, 51]
+    database.close()
+
+
+def test_restart_preserves_reconciliation_json(tmp_path: Path) -> None:
+    settings = AppSettings(data_root=tmp_path, output_dir=tmp_path / "Output")
+    database = Database(settings.paths.database_path)
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=2))
+    )
+    group = service.attach(
+        _row(2, 101, "INV"), bk_path=tmp_path / "BK.xlsx", bk_sheet="T07 26",
+        source_batch_id=None, source_item_index=0, source_sha256="source",
+    )
+    batch_repository = BatchRepository(database)
+    first_service = BatchService(settings.paths, batch_repository)
+    result = first_service.create_reconciliation_batch(
+        group.id, service.prepare_allocation(group.id)
+    )
+    result_path = result.metadata.ready_path
+    assert result_path is not None and result_path.is_file()
+
+    restarted = BatchService(settings.paths, batch_repository)
+
+    assert result_path.is_file()
+    assert restarted.load_batch(result.metadata.id).document.to_dict() == (
+        result.document.to_dict()
+    )
     database.close()
 
 
@@ -624,6 +867,9 @@ def test_posting_bundle_keeps_normal_rows_and_replaces_managed_sea_freight(
         group.id, sea_service.prepare_allocation(group.id)
     )
     sea_repository.mark_allocated(group.id, child.metadata.id)
+    child_path = child.metadata.ready_path
+    assert child_path is not None
+    child_path.unlink()
     assert received.review is not None
     batch_service.confirm_batch(received.batch.id, received.review.document)
 
@@ -635,6 +881,7 @@ def test_posting_bundle_keeps_normal_rows_and_replaces_managed_sea_freight(
     )
     bundle = posting._posting_bundle(received.batch.id)
 
+    assert child_path.is_file()
     assert len(bundle["rows"]) == 3
     assert bundle["original_source_count"] == 1
     assert bundle["reconciliation_source_count"] == 2

@@ -48,6 +48,16 @@ from .excel_dialogs import (
     PostingAllocationDialog,
     RepostSelectionDialog,
 )
+from .excel_summary_dialogs import (
+    ExcelCompletionDialog,
+    ExcelConfirmationDialog,
+    daily_completion_summary,
+    daily_confirmation_summary,
+    payment_completion_summary,
+    payment_confirmation_summary,
+    posting_completion_summary,
+    posting_confirmation_summary,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -84,45 +94,6 @@ def _attribute(source: Any, *names: str, default: Any = None) -> Any:
     return default
 
 
-def _outcome_summary(outcomes: Any) -> str:
-    values = list(outcomes or ())
-    if not values:
-        return ""
-    counts = {
-        code: sum(
-            str(
-                getattr(
-                    _attribute(item, "status", default=""),
-                    "value",
-                    _attribute(item, "status", default=""),
-                )
-            )
-            == code
-            for item in values
-        )
-        for code in (
-            "WRITTEN",
-            "PARTIAL",
-            "UNCHANGED",
-            "USER_KEPT",
-            "USER_SKIPPED",
-            "INVALID_SOURCE",
-            "FAILED",
-        )
-    }
-    return (
-        "\n\nKết quả theo item"
-        f"\n- Tổng: {len(values)}"
-        f"\n- Ghi đầy đủ: {counts['WRITTEN']}"
-        f"\n- Ghi một phần: {counts['PARTIAL']}"
-        f"\n- Không đổi: {counts['UNCHANGED']}"
-        f"\n- User giữ: {counts['USER_KEPT']}"
-        f"\n- User bỏ qua: {counts['USER_SKIPPED']}"
-        f"\n- Nguồn không hợp lệ: {counts['INVALID_SOURCE']}"
-        f"\n- Lỗi: {counts['FAILED']}"
-    )
-
-
 def _status_code(batch: Any) -> str:
     metadata = _attribute(batch, "metadata", default=batch)
     status = _attribute(metadata, "status", default="")
@@ -132,111 +103,6 @@ def _status_code(batch: Any) -> str:
 def _batch_id(batch: Any) -> Any:
     metadata = _attribute(batch, "metadata", default=batch)
     return _attribute(metadata, "id", "batch_id")
-
-
-def _enum_code(value: Any) -> str:
-    return str(getattr(value, "value", value) or "").split(".")[-1].upper()
-
-
-def _posting_item_count(item: Any) -> int:
-    source_indices = list(_attribute(item, "source_indices", default=()) or ())
-    return len(source_indices) or 1
-
-
-def _posting_confirmation_counts(plan: Any) -> dict[str, int]:
-    counts = {
-        "changed_cells": 0,
-        "write_new": 0,
-        "overwrite": 0,
-        "keep_existing": 0,
-        "skip": 0,
-        "already_existing": 0,
-    }
-    for item in list(_attribute(plan, "items", default=()) or ()):
-        item_count = _posting_item_count(item)
-        status = _enum_code(_attribute(item, "status", default=""))
-        action = _enum_code(_attribute(item, "action", default=""))
-        cell_state = _attribute(item, "cell_state", default=None)
-        cell_kind = _enum_code(_attribute(cell_state, "kind", default=""))
-
-        if status == "ALREADY_EXISTS":
-            counts["already_existing"] += item_count
-        elif action in {"KEEP_EXISTING", "KEEP_FORMULA"}:
-            counts["keep_existing"] += item_count
-        elif action == "SKIP" or status in {
-            "USER_SKIPPED",
-            "NOT_MATCHED",
-            "UNRESOLVED",
-        }:
-            counts["skip"] += item_count
-        elif status == "PLANNED":
-            counts["changed_cells"] += 1
-            if cell_kind in {"EMPTY", "ZERO"}:
-                counts["write_new"] += item_count
-            else:
-                counts["overwrite"] += item_count
-    return counts
-
-
-def _posting_confirmation_text(plan: Any) -> str:
-    counts = _posting_confirmation_counts(plan)
-    sheets = sorted(
-        {
-            str(value).strip()
-            for value in (
-                list(_attribute(plan, "target_sheets", default=()) or ())
-                + [
-                    _attribute(
-                        plan,
-                        "selected_sheet",
-                        "selected_sheet_name",
-                        default=None,
-                    )
-                ]
-            )
-            if str(value or "").strip()
-        }
-    )
-    lines: list[str] = []
-    source_groups = list(_attribute(plan, "source_groups", default=()) or ())
-    if source_groups:
-        lines.append("Phân bổ chứng từ:")
-        for group in source_groups:
-            document = str(
-                _attribute(group, "source_document_name", default="Chứng từ")
-            )
-            invoice = _attribute(group, "invoice_no", default=None)
-            target = _attribute(group, "target_sheet", default="—")
-            item_count = len(
-                list(_attribute(group, "source_item_indices", default=()) or ())
-            )
-            label = document + (f" — HĐ {invoice}" if invoice else "")
-            lines.append(f"- {label} → {target}: {item_count} khoản")
-        lines.append("")
-    if sheets:
-        lines.extend((f"Sheet BK: {', '.join(sheets)}", ""))
-    if counts["changed_cells"]:
-        lines.extend(
-            (
-                f"File BK sẽ thay đổi {counts['changed_cells']} ô:",
-                f"- Ghi vào ô trống: {counts['write_new']} khoản",
-                f"- Ghi đè dữ liệu hiện có: {counts['overwrite']} khoản",
-            )
-        )
-    else:
-        lines.append("Không có ô tiền nào cần thay đổi trong file BK.")
-    lines.extend(
-        (
-            "",
-            "Các khoản không làm thay đổi dữ liệu tiền:",
-            f"- Giữ nguyên: {counts['keep_existing']} khoản",
-            f"- Bỏ qua: {counts['skip']} khoản",
-            f"- Đã có đúng số tiền: {counts['already_existing']} khoản",
-            "",
-            "Tiếp tục ghi file BK?",
-        )
-    )
-    return "\n".join(lines)
 
 
 class MainWindow(QMainWindow):
@@ -1300,6 +1166,7 @@ class MainWindow(QMainWindow):
                     dialog = ConflictResolutionDialog(
                         remaining,
                         self,
+                        operation=operation,
                         initial_resolutions=resolutions,
                         restore_info=getattr(self, "_excel_restore_info", {}),
                         issues=source_reload_issues,
@@ -1337,14 +1204,17 @@ class MainWindow(QMainWindow):
                 and bool(_attribute(plan, "confirmation_required", default=False))
                 and not bool(_attribute(plan, "confirmation_done", default=False))
             ):
-                answer = QMessageBox.question(
-                    self,
-                    "Xác nhận nhập khoản chi",
-                    _posting_confirmation_text(plan),
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
+                summary = posting_confirmation_summary(plan)
+                dialog = ExcelConfirmationDialog(
+                    summary,
+                    confirm_label=(
+                        f"Nhập {summary.change_count} khoản vào BK"
+                        if summary.change_count
+                        else "Tiếp tục kiểm tra BK"
+                    ),
+                    parent=self,
                 )
-                if answer != QMessageBox.StandardButton.Yes:
+                if dialog.exec() != QDialog.DialogCode.Accepted:
                     self._excel_tasks.cancel_waiting()
                     return
                 plan.confirmation_done = True
@@ -1386,93 +1256,26 @@ class MainWindow(QMainWindow):
                         str(_attribute(item, "target_sheet", "sheet_name"))
                         for item in selected_candidates
                     )
-                updates = sum(
-                    int(_attribute(item, "update_count", default=0) or 0)
-                    for item in selected_candidates
-                ) if selected_candidates else int(
-                    _attribute(
-                        candidate,
-                        "update_count",
-                        default=_attribute(plan, "update_count", default=0),
+                display_candidates = selected_candidates or (
+                    [candidate] if candidate is not None else []
+                )
+                summary = daily_confirmation_summary(
+                    plan,
+                    candidates=display_candidates,
+                )
+                # Khi không có thay đổi, service vẫn cần chạy để ghi nhận kết
+                # quả NO_CHANGES nhưng không cần bắt người dùng xác nhận ghi file.
+                if summary.change_count:
+                    dialog = ExcelConfirmationDialog(
+                        summary,
+                        confirm_label=(
+                            f"Đồng bộ {summary.change_count} thay đổi vào BK"
+                        ),
+                        parent=self,
                     )
-                    or 0
-                )
-                inserts = sum(
-                    int(_attribute(item, "new_row_count", default=0) or 0)
-                    for item in selected_candidates
-                ) if selected_candidates else int(
-                    _attribute(
-                        candidate,
-                        "new_row_count",
-                        default=_attribute(plan, "insert_count", default=0),
-                    )
-                    or 0
-                )
-                unchanged = sum(
-                    int(_attribute(item, "unchanged_count", default=0) or 0)
-                    for item in selected_candidates
-                ) if selected_candidates else int(
-                    _attribute(
-                        candidate,
-                        "unchanged_count",
-                        default=_attribute(plan, "unchanged_count", default=0),
-                    )
-                    or 0
-                )
-                target_only = sum(
-                    int(_attribute(item, "target_only_count", default=0) or 0)
-                    for item in selected_candidates
-                ) if selected_candidates else int(
-                    _attribute(
-                        candidate,
-                        "target_only_count",
-                        default=_attribute(plan, "target_only_count", default=0),
-                    )
-                    or 0
-                )
-                invalid = sum(
-                    int(_attribute(item, "invalid_count", default=0) or 0)
-                    for item in selected_candidates
-                ) if selected_candidates else int(
-                    _attribute(
-                        candidate,
-                        "invalid_count",
-                        default=_attribute(plan, "invalid_count", default=0),
-                    )
-                    or 0
-                )
-                sync_detail = "\n".join(
-                    (
-                        f"- {_attribute(item, 'source_sheet', default='—')} → "
-                        f"{_attribute(item, 'target_sheet', 'sheet_name', default='—')}: "
-                        f"cập nhật {_attribute(item, 'update_count', default=0)}, "
-                        f"thêm {_attribute(item, 'new_row_count', default=0)}, "
-                        f"không đổi {_attribute(item, 'unchanged_count', default=0)}"
-                    )
-                    for item in selected_candidates
-                )
-                if sync_detail:
-                    sync_detail += "\n\n"
-                answer = QMessageBox.question(
-                    self,
-                    "Xác nhận đồng bộ toàn sheet",
-                    (
-                        f"Sheet BK: {selected_sync_sheet or '—'}\n\n"
-                        f"{sync_detail}"
-                        f"Cập nhật: {updates} dòng\n"
-                        f"Thêm mới: {inserts} dòng\n"
-                        f"Không đổi: {unchanged} dòng\n"
-                        f"Chỉ có ở BK, được giữ lại: {target_only} dòng\n"
-                        f"Thiếu SQT, được bỏ qua: {invalid} dòng\n\n"
-                        "Tiếp tục ghi file BK?"
-                    ),
-                    QMessageBox.StandardButton.Yes
-                    | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if answer != QMessageBox.StandardButton.Yes:
-                    self._excel_tasks.cancel_waiting()
-                    return
+                    if dialog.exec() != QDialog.DialogCode.Accepted:
+                        self._excel_tasks.cancel_waiting()
+                        return
                 if getattr(self, "_excel_review_plan", None) is not None:
                     setattr(self, "_excel_review_confirmed", True)
             selector_actions = {
@@ -1535,6 +1338,7 @@ class MainWindow(QMainWindow):
                 conflict_dialog = ConflictResolutionDialog(
                     conflicts,
                     self,
+                    operation="payment_sync",
                     initial_resolutions=resolutions,
                     restore_info=getattr(self, "_excel_restore_info", {}),
                 )
@@ -1594,84 +1398,17 @@ class MainWindow(QMainWindow):
                 self, plan, resolutions, "payment_sync"
             )
 
-        source_sheet = _attribute(plan, "source_sheet", default="—")
-        target_sheet = _attribute(plan, "target_sheet", default="—")
-        target_sections: list[str] = []
-        month_plans = _attribute(plan, "month_plans", default={}) or {}
-        plans_for_display = (
-            list(month_plans.items()) if month_plans else [(source_sheet, plan)]
-        )
-        for month_source, display_plan in plans_for_display:
-            target_plans = _attribute(display_plan, "targets", default={}) or {}
-            for target_type in ("HP", "NAM"):
-                target = _attribute(target_plans, target_type, default=None)
-                if target is None:
-                    continue
-                created = bool(_attribute(target, "sheet_to_create", default=False))
-                template = _attribute(target, "template_sheet", default="—")
-                section = (
-                    f"{month_source} → {_attribute(target, 'sheet_name', default=target_type)}\n"
-                    f"- Sheet mới: {'Có' if created else 'Không'}\n"
-                )
-                if created:
-                    section += f"- Sheet mẫu: {template}\n"
-                section += (
-                    f"- Dòng mới: {_attribute(target, 'new_count', default=0)}\n"
-                    f"- Cập nhật: {_attribute(target, 'update_count', default=0)}\n"
-                    f"- Ô Số HĐ sẽ cập nhật: {_attribute(target, 'invoice_change_count', default=0)}\n"
-                    f"- Không đổi: {_attribute(target, 'unchanged_count', default=0)}\n"
-                    f"- Xung đột: {_attribute(target, 'conflict_count', default=0)}"
-                )
-                target_sections.append(section)
-        target_detail = "\n\n".join(target_sections)
-        updates = int(_attribute(plan, "update_count", default=0) or 0)
-        unchanged = int(_attribute(plan, "unchanged_count", default=0) or 0)
-        new_count = int(_attribute(plan, "new_count", default=0) or 0)
-        invoice_changes = int(
-            _attribute(plan, "invoice_change_count", default=0) or 0
-        )
-        selected_new_count = len(
-            resolutions.get("selected_new_rows", [None] * new_count)
-        )
-        skipped_new = max(0, new_count - selected_new_count)
-        conflict_count = int(
-            _attribute(plan, "conflict_count", default=len(conflicts)) or 0
-        )
-        normalize_sheets = int(
-            _attribute(plan, "normalization_sheet_count", default=0) or 0
-        )
-        target_sheet_created = bool(
-            _attribute(plan, "target_sheet_created", default=False)
-        )
-        template_sheet = _attribute(plan, "template_sheet", default="—")
-        creation_detail = (
-            f"Sheet Thanh toán mới: Có, tạo từ {template_sheet}\n"
-            if target_sheet_created
-            else "Sheet Thanh toán mới: Không\n"
-        )
         if not bool(getattr(self, "_excel_review_confirmed", False)):
-            answer = QMessageBox.question(
-                self,
-                "Xác nhận đồng bộ BK → Thanh toán",
-                (
-                    f"Sheet BK: {source_sheet}\n"
-                    f"Sheet Thanh toán: {target_sheet}\n\n"
-                    f"{creation_detail}"
-                    f"{target_detail}\n\n"
-                    f"Cập nhật: {updates} dòng\n"
-                    f"Ô Số HĐ sẽ cập nhật: {invoice_changes}\n"
-                    f"Không đổi: {unchanged} dòng\n"
-                    f"Dòng mới được chọn: {selected_new_count}/{new_count}\n"
-                    f"Bỏ qua dòng mới: {skipped_new}\n"
-                    f"Xung đột: {conflict_count}\n"
-                    f"Sheet BK cần chuẩn hóa: {normalize_sheets}\n\n"
-                    "Tiếp tục ghi hai workbook?"
-                ),
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+            summary = payment_confirmation_summary(
+                plan,
+                selected_new_ids=resolutions.get("selected_new_rows"),
             )
-            if answer != QMessageBox.StandardButton.Yes:
+            dialog = ExcelConfirmationDialog(
+                summary,
+                confirm_label="Đồng bộ sang Thanh toán",
+                parent=self,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
                 self._excel_tasks.cancel_waiting()
                 return
             if getattr(self, "_excel_review_plan", None) is not None:
@@ -1710,9 +1447,6 @@ class MainWindow(QMainWindow):
             pass
         self.workflow_page.set_excel_result(operation, result)
         self._load_excel_history()
-        message = str(
-            _attribute(result, "message", default="Hoàn tất xử lý Excel.") or ""
-        )
         item_outcomes = list(_attribute(result, "item_outcomes", default=()) or ())
         latest = getattr(self, "_latest_excel_outcomes", None)
         if not isinstance(latest, dict):
@@ -1724,130 +1458,37 @@ class MainWindow(QMainWindow):
         )
         if callable(availability):
             availability(operation, bool(item_outcomes))
-        outcome_summary = _outcome_summary(item_outcomes)
         if operation == "payment_sync":
-            result_targets = _attribute(result, "target_results", default={}) or {}
-            result_sections: list[str] = []
-            for target_key, target_result in result_targets.items():
-                result_sections.append(
-                    (
-                        f"{_attribute(target_result, 'sheet_name', default=target_key)}\n"
-                        f"- Đã tạo mới: {'Có' if bool(_attribute(target_result, 'sheet_created', default=False)) else 'Không'}\n"
-                        f"- Đã cập nhật: {_attribute(target_result, 'updated_rows', default=0)}\n"
-                        f"- Đã thêm: {_attribute(target_result, 'inserted_rows', default=0)}\n"
-                        f"- Ô Số HĐ đã ghi: {_attribute(target_result, 'invoice_written_cells', default=0)}\n"
-                        f"- Không đổi: {_attribute(target_result, 'unchanged_rows', default=0)}\n"
-                        f"- Bỏ qua: {_attribute(target_result, 'skipped_rows', default=0)}"
-                    )
-                )
-            result_target_detail = "\n\n".join(result_sections)
-            carrier_summary = _attribute(result, "carrier_summary", default=None)
-            carrier_summary_detail = ""
-            if carrier_summary is not None:
-                summary_total = _attribute(
-                    carrier_summary, "selected_period_total", default=0
-                )
-                try:
-                    summary_total_text = f"{float(summary_total):,.0f}".replace(
-                        ",", "."
-                    )
-                except (TypeError, ValueError):
-                    summary_total_text = str(summary_total)
-                carrier_summary_detail = (
-                    "\n\nTổng hợp theo hóa đơn và bên vận tải\n"
-                    f"- Kỳ: {_attribute(carrier_summary, 'period', default='—')}\n"
-                    f"- Bên vận tải: {_attribute(carrier_summary, 'carrier_count', default=0)}\n"
-                    f"- Số hóa đơn: {_attribute(carrier_summary, 'invoice_count', default=0)}\n"
-                    f"- Tổng tiền kỳ: {summary_total_text}\n"
-                    f"- Khoản chưa có HĐ: {_attribute(carrier_summary, 'missing_invoice_items', default=0)}\n"
-                    f"- Khoản chưa xác định vận tải: {_attribute(carrier_summary, 'unmapped_carrier_items', default=0)}\n"
-                    f"- Hóa đơn thuộc nhiều bên: {_attribute(carrier_summary, 'cross_carrier_invoices', default=0)}\n"
-                    f"- Khoản nghi trùng: {_attribute(carrier_summary, 'suspected_duplicate_items', default=0)}"
-                )
-            detail = (
-                f"{message}\n\n"
-                f"{result_target_detail}\n\n"
-                f"Sheet BK: {_attribute(result, 'source_sheet_name', default='—')}\n"
-                f"Sheet Thanh toán: {_attribute(result, 'sheet_name', default='—')}\n"
-                f"Đã tạo sheet mới: "
-                f"{'Có' if bool(_attribute(result, 'sheet_created', default=False)) else 'Không'}\n"
-                f"Đã cập nhật: {_attribute(result, 'updated_rows', default=0)} dòng\n"
-                f"Đã thêm: {_attribute(result, 'inserted_rows', default=0)} dòng\n"
-                f"Ô Số HĐ đã ghi: {_attribute(result, 'invoice_written_cells', default=0) or 0}\n"
-                f"Không đổi: {_attribute(result, 'unchanged_rows', default=0)} dòng\n"
-                f"Bỏ qua: {_attribute(result, 'skipped_rows', default=0)} dòng"
-                f"{carrier_summary_detail}{outcome_summary}"
+            summary = payment_completion_summary(result)
+            dialog = ExcelCompletionDialog(
+                summary,
+                open_label="Mở file Thanh toán",
+                details_available=bool(item_outcomes),
+                parent=self,
             )
-            completion_message = QMessageBox(self)
-            completion_message.setIcon(QMessageBox.Icon.Information)
-            completion_message.setWindowTitle(
-                "Đồng bộ BK → Thanh toán hoàn tất"
-            )
-            completion_message.setText(detail)
-            open_payment = completion_message.addButton(
-                "Mở file Thanh toán",
-                QMessageBox.ButtonRole.ActionRole,
-            )
-            view_details = (
-                completion_message.addButton(
-                    "Xem chi tiết", QMessageBox.ButtonRole.ActionRole
-                )
-                if item_outcomes
-                else None
-            )
-            completion_message.addButton(QMessageBox.StandardButton.Ok)
-            completion_message.exec()
-            if completion_message.clickedButton() is open_payment:
+            dialog.exec()
+            if dialog.selected_action == ExcelCompletionDialog.OPEN_TARGET:
                 self._open_workbook_path(
                     _attribute(result, "target_path", default=None),
                     label="file Thanh toán",
                 )
-            elif view_details is not None and completion_message.clickedButton() is view_details:
+            elif dialog.selected_action == ExcelCompletionDialog.VIEW_DETAILS:
                 ExcelOutcomeDialog(item_outcomes, parent=self).exec()
             return
         if operation == "sync":
-            detail = (
-                f"{message}\n\n"
-                f"Sheet: {_attribute(result, 'sheet_name', default='—')}\n"
-                f"Đã cập nhật: {_attribute(result, 'updated_rows', default=0)} dòng\n"
-                f"Đã thêm: {_attribute(result, 'inserted_rows', 'added_rows', default=0)} dòng\n"
-                f"Chỉ có ở BK, đã giữ: {_attribute(result, 'target_only_rows', default=0)} dòng\n"
-                "Thiếu SQT, đã bỏ qua: "
-                f"{_attribute(result, 'invalid_rows', 'skipped_rows', default=0)}"
-                f"{outcome_summary}"
-            )
-            title = "Đồng bộ thành công"
+            summary = daily_completion_summary(result)
         else:
-            detail = (
-                f"{message}\n\n"
-                f"Đã nhập: {_attribute(result, 'posted_source_items', default=0)} khoản\n"
-                f"Đã tồn tại: {_attribute(result, 'already_existing_items', default=0)}\n"
-                f"Bỏ qua: {_attribute(result, 'skipped_source_items', default=0)}\n"
-                f"Sheet: {_attribute(result, 'sheet_name', default='—')}"
-                f"{outcome_summary}"
-            )
-            title = "Nhập khoản chi hoàn tất"
-        completion_message = QMessageBox(self)
-        completion_message.setIcon(QMessageBox.Icon.Information)
-        completion_message.setWindowTitle(title)
-        completion_message.setText(detail)
-        open_bk_button = completion_message.addButton(
-            "Mở file BK", QMessageBox.ButtonRole.ActionRole
+            summary = posting_completion_summary(result)
+        dialog = ExcelCompletionDialog(
+            summary,
+            open_label="Mở file BK",
+            details_available=bool(item_outcomes),
+            parent=self,
         )
-        view_details = (
-            completion_message.addButton(
-                "Xem chi tiết", QMessageBox.ButtonRole.ActionRole
-            )
-            if item_outcomes
-            else None
-        )
-        completion_message.addButton(QMessageBox.StandardButton.Ok)
-        completion_message.exec()
-        if completion_message.clickedButton() is open_bk_button:
-            self._open_bk_workbook(
-                _attribute(result, "target_path", default=None)
-            )
-        elif view_details is not None and completion_message.clickedButton() is view_details:
+        dialog.exec()
+        if dialog.selected_action == ExcelCompletionDialog.OPEN_TARGET:
+            self._open_bk_workbook(_attribute(result, "target_path", default=None))
+        elif dialog.selected_action == ExcelCompletionDialog.VIEW_DETAILS:
             ExcelOutcomeDialog(item_outcomes, parent=self).exec()
 
     @Slot(object)
@@ -1939,6 +1580,7 @@ class MainWindow(QMainWindow):
             dialog = ConflictResolutionDialog(
                 _attribute(outcome, "conflicts", default=()) or (),
                 self,
+                operation=self._excel_operation,
                 initial_resolutions=_attribute(
                     outcome, "resolutions", default={}
                 )

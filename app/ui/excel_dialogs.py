@@ -41,6 +41,22 @@ VALID_FEE_CODES = (
 )
 
 
+PAYMENT_FIELD_LABELS = {
+    "sea_freight": "Cước biển",
+    "north_freight": "Cước MB",
+    "empty_lift": "Nâng vỏ",
+    "loaded_drop": "Hạ hàng",
+    "loaded_lift": "Nâng hàng",
+    "empty_drop": "Hạ vỏ",
+    "south_freight": "VTN",
+    "storage": "Lưu cont",
+    "overweight": "Quá tải",
+    "vs_do": "VS + D/O",
+    "command_fee": "Làm lệnh",
+    "repair": "Sửa chữa",
+}
+
+
 def _value(source: Any, *names: str, default: Any = None) -> Any:
     if source is None:
         return default
@@ -91,6 +107,20 @@ def _format_amount(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return f"{int(value):,}".replace(",", ".")
     return _display(value)
+
+
+def _outcome_value_display(value: Any) -> str:
+    """Hiển thị dữ liệu thanh toán bằng tên nghiệp vụ thay vì mã nội bộ."""
+
+    if not isinstance(value, Mapping):
+        return _display(value)
+    if not value:
+        return "—"
+    return "; ".join(
+        f"{PAYMENT_FIELD_LABELS.get(str(key), str(key).replace('_', ' '))}: "
+        f"{_format_amount(item_value)}"
+        for key, item_value in value.items()
+    )
 
 
 def _format_datetime(value: Any) -> str:
@@ -757,6 +787,23 @@ BULK_ACTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+SELECTED_BULK_EXCLUDED_ACTIONS = frozenset(
+    {
+        "SELECT_MONTH",
+        "SELECT_SHEET",
+        "SELECT_FEE",
+        "SELECT_INVOICE",
+        "SELECT_SOURCE_ITEM",
+        "SELECT_CARRIER",
+        "POST_UNPOSTED_ONLY",
+        "REANALYZE",
+        "RETRY",
+        "CANCEL",
+        "CANCEL_ALL",
+    }
+)
+
+
 ROW_SELECTION_CONFLICT_TYPES = frozenset(
     {
         "CONTAINER_NOT_FOUND",
@@ -948,6 +995,7 @@ class ConflictResolutionDialog(QDialog):
     COLUMNS = (
         "Container",
         "B/L",
+        "Tàu / chuyến nguồn",
         "SQT",
         "Phí",
         "Số tiền",
@@ -971,6 +1019,7 @@ class ConflictResolutionDialog(QDialog):
         initial_resolutions: Mapping[str, Any] | None = None,
         restore_info: Mapping[str, Any] | None = None,
         issues: Sequence[Any] | None = None,
+        operation: Any | None = None,
     ) -> None:
         super().__init__(parent)
         self.plan = plan_or_conflicts
@@ -985,6 +1034,20 @@ class ConflictResolutionDialog(QDialog):
         self.initial_resolutions = dict(initial_resolutions or {})
         self.restore_info = dict(restore_info or {})
         self.issues = list(issues or ())
+        raw_operation = operation
+        if raw_operation is None and not isinstance(plan_or_conflicts, Sequence):
+            raw_operation = _value(plan_or_conflicts, "operation", "operation_type")
+        self.operation = _code(raw_operation)
+        self._show_vessel_voyage = self.operation in {
+            "POSTING",
+            "EXPENSE_POSTING",
+        }
+        if not self.operation:
+            self._show_vessel_voyage = any(
+                _value(conflict, "vessel_voyage", "vessel_voyage_raw")
+                not in (None, "")
+                for conflict in self.conflicts
+            )
         self._action_combos: dict[str, QComboBox] = {}
         self._selected_rows: dict[str, Any] = {}
         self._selected_source_sheets: dict[str, str] = {}
@@ -1057,7 +1120,14 @@ class ConflictResolutionDialog(QDialog):
         self.bulk_action_combo = QComboBox()
         self.bulk_action_combo.setObjectName("conflictBulkActionCombo")
         self.bulk_action_combo.setMinimumWidth(230)
-        self.bulk_apply_button = QPushButton("Áp dụng cho toàn bộ")
+        self.bulk_apply_selected_button = QPushButton(
+            "Áp dụng cho dòng đã chọn (0)"
+        )
+        self.bulk_apply_selected_button.setObjectName(
+            "conflictBulkApplySelectedButton"
+        )
+        self.bulk_apply_selected_button.setEnabled(False)
+        self.bulk_apply_button = QPushButton("Áp dụng cho tất cả phù hợp")
         self.bulk_apply_button.setObjectName("conflictBulkApplyButton")
         self.bulk_apply_button.setEnabled(False)
         self.bulk_result_label = QLabel()
@@ -1065,6 +1135,7 @@ class ConflictResolutionDialog(QDialog):
         self.bulk_result_label.setProperty("muted", True)
         bulk_layout.addWidget(bulk_label)
         bulk_layout.addWidget(self.bulk_action_combo)
+        bulk_layout.addWidget(self.bulk_apply_selected_button)
         bulk_layout.addWidget(self.bulk_apply_button)
         bulk_layout.addWidget(self.bulk_result_label, 1)
         layout.addLayout(bulk_layout)
@@ -1076,12 +1147,19 @@ class ConflictResolutionDialog(QDialog):
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
+        self.table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
         )
         self.table.horizontalHeader().setSectionResizeMode(
-            11, QHeaderView.ResizeMode.Stretch
+            self.COLUMNS.index("Vấn đề"), QHeaderView.ResizeMode.Stretch
+        )
+        self.table.setColumnHidden(
+            self.COLUMNS.index("Tàu / chuyến nguồn"),
+            not self._show_vessel_voyage,
         )
         layout.addWidget(self.table, 1)
 
@@ -1095,6 +1173,10 @@ class ConflictResolutionDialog(QDialog):
             self._update_bulk_apply_enabled
         )
         self.bulk_apply_button.clicked.connect(self._apply_bulk_action)
+        self.bulk_apply_selected_button.clicked.connect(
+            self._apply_bulk_action_to_selected
+        )
+        self.table.itemSelectionChanged.connect(self._update_bulk_apply_enabled)
 
         self.validation_label = QLabel()
         self.validation_label.setObjectName("conflictValidationLabel")
@@ -1149,6 +1231,7 @@ class ConflictResolutionDialog(QDialog):
         self._wire_action_dependencies()
         self._refresh_bulk_actions()
         self.bulk_result_label.clear()
+        self.table.clearSelection()
         self.table.setSortingEnabled(True)
         self.setResult(0)
         self.show_issues(self.issues)
@@ -1275,19 +1358,78 @@ class ConflictResolutionDialog(QDialog):
         self._update_bulk_apply_enabled()
 
     def _update_bulk_apply_enabled(self, _index: int = -1) -> None:
-        action_codes = self.bulk_action_combo.currentData()
+        action_codes = tuple(
+            str(code)
+            for code in _sequence(self.bulk_action_combo.currentData())
+            if code
+        )
+        selected_count = len(self._selected_conflict_ids())
+        selected_codes = tuple(
+            code
+            for code in action_codes
+            if code not in SELECTED_BULK_EXCLUDED_ACTIONS
+        )
         self.bulk_apply_button.setEnabled(bool(action_codes))
+        self.bulk_apply_selected_button.setText(
+            f"Áp dụng cho dòng đã chọn ({selected_count})"
+        )
+        self.bulk_apply_selected_button.setEnabled(
+            bool(selected_count and selected_codes)
+        )
+
+    def _selected_conflict_ids(self) -> set[str]:
+        selected: set[str] = set()
+        selection_model = self.table.selectionModel()
+        if selection_model is None:
+            return selected
+        for index in selection_model.selectedRows():
+            identity_item = self.table.item(index.row(), 0)
+            if identity_item is None:
+                continue
+            conflict_id = identity_item.data(Qt.ItemDataRole.UserRole + 1)
+            if conflict_id not in (None, ""):
+                selected.add(str(conflict_id))
+        return selected
 
     def _apply_bulk_action(self) -> None:
         """Đặt lựa chọn chung; từng dòng vẫn có thể được sửa lại sau đó."""
 
+        self._apply_bulk_action_for_ids(None)
+
+    def _apply_bulk_action_to_selected(self) -> None:
+        """Đặt lựa chọn chung cho đúng các dòng đang được bôi chọn."""
+
+        self._apply_bulk_action_for_ids(self._selected_conflict_ids())
+
+    def _apply_bulk_action_for_ids(
+        self, selected_conflict_ids: set[str] | None
+    ) -> None:
+        """Áp dụng một nhóm hành động cho toàn bộ hoặc một tập conflict ID."""
+
         raw_codes = self.bulk_action_combo.currentData()
         action_codes = tuple(str(code) for code in _sequence(raw_codes) if code)
+        selected_only = selected_conflict_ids is not None
+        if selected_only:
+            action_codes = tuple(
+                code
+                for code in action_codes
+                if code not in SELECTED_BULK_EXCLUDED_ACTIONS
+            )
         if not action_codes:
+            return
+
+        target_ids = (
+            set(self._action_combos)
+            if selected_conflict_ids is None
+            else set(selected_conflict_ids)
+        )
+        if not target_ids:
             return
 
         applied_count = 0
         for conflict_id, combo in self._action_combos.items():
+            if conflict_id not in target_ids:
+                continue
             if conflict_id in self._inactive_conflict_ids:
                 continue
             target_index = next(
@@ -1303,18 +1445,19 @@ class ConflictResolutionDialog(QDialog):
             combo.setCurrentIndex(target_index)
             applied_count += 1
 
-        total_count = len(self._action_combos)
+        total_count = len(target_ids)
         selected_label = self.bulk_action_combo.currentText().rsplit(" (", 1)[0]
         if applied_count == total_count:
             message = (
-                f"Đã áp dụng “{selected_label}” cho toàn bộ "
-                f"{total_count} dòng."
+                f"Đã áp dụng “{selected_label}” cho "
+                f"{total_count} dòng{' đã chọn' if selected_only else ''}."
             )
         else:
             remaining_count = total_count - applied_count
             message = (
                 f"Đã áp dụng “{selected_label}” cho {applied_count}/{total_count} "
-                f"dòng; {remaining_count} dòng không có lựa chọn này."
+                f"dòng{' đã chọn' if selected_only else ''}; {remaining_count} dòng "
+                "không hỗ trợ lựa chọn này."
             )
         self.bulk_result_label.setText(message)
 
@@ -1358,6 +1501,7 @@ class ConflictResolutionDialog(QDialog):
         values = (
             _value(conflict, "container", "container_number"),
             _value(conflict, "bl", "bill_of_lading"),
+            _value(conflict, "vessel_voyage", "vessel_voyage_raw"),
             _value(conflict, "sqt", "sequence_number"),
             _value(conflict, "selected_fee", "fee", "fee_code"),
             _format_amount(_value(conflict, "amount", "incoming_amount")),
@@ -1425,13 +1569,21 @@ class ConflictResolutionDialog(QDialog):
             else max(0, default_index)
         )
         self._action_combos[conflict_id] = action_combo
-        self.table.setCellWidget(row, 12, action_combo)
+        self.table.setCellWidget(
+            row, self.COLUMNS.index("Cách xử lý"), action_combo
+        )
 
         selector = self._selector_for(row, conflict, conflict_id, conflict_type)
         if selector is not None:
-            self.table.setCellWidget(row, 13, selector)
+            self.table.setCellWidget(
+                row, self.COLUMNS.index("Dòng / phí / sheet chọn"), selector
+            )
         else:
-            self.table.setItem(row, 13, QTableWidgetItem("—"))
+            self.table.setItem(
+                row,
+                self.COLUMNS.index("Dòng / phí / sheet chọn"),
+                QTableWidgetItem("—"),
+            )
         self._apply_initial_resolution(conflict_id, action_combo)
 
     def _apply_initial_resolution(
@@ -1977,20 +2129,7 @@ class PaymentNewRowsDialog(QDialog):
         )
         layout.addWidget(self.table, 1)
 
-        labels = {
-            "sea_freight": "Cước biển",
-            "north_freight": "Cước MB",
-            "empty_lift": "Nâng vỏ",
-            "loaded_drop": "Hạ hàng",
-            "loaded_lift": "Nâng hàng",
-            "empty_drop": "Hạ vỏ",
-            "south_freight": "VTN",
-            "storage": "Lưu cont",
-            "overweight": "Quá tải",
-            "vs_do": "VS + D/O",
-            "command_fee": "Làm lệnh",
-            "repair": "Sửa chữa",
-        }
+        labels = PAYMENT_FIELD_LABELS
         for source in self.items:
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -2060,12 +2199,22 @@ class PaymentNewRowsDialog(QDialog):
 class ExcelOutcomeDialog(QDialog):
     """Chi tiết phẳng được dựng từ execution manifest thực tế."""
 
+    _STATUS_LABELS = {
+        "WRITTEN": "Đã cập nhật",
+        "PARTIAL": "Chỉ cập nhật một phần",
+        "UNCHANGED": "Không cần thay đổi",
+        "USER_KEPT": "Giữ nguyên theo lựa chọn",
+        "USER_SKIPPED": "Bỏ qua theo lựa chọn",
+        "INVALID_SOURCE": "Dữ liệu nguồn không hợp lệ",
+        "FAILED": "Xử lý không thành công",
+    }
+
     _FILTERS = (
         ("Tất cả", None),
-        ("Đã ghi", {"WRITTEN", "PARTIAL"}),
-        ("Không đổi", {"UNCHANGED"}),
-        ("Giữ / bỏ qua", {"USER_KEPT", "USER_SKIPPED"}),
-        ("Lỗi", {"INVALID_SOURCE", "FAILED"}),
+        ("Đã cập nhật", {"WRITTEN", "PARTIAL"}),
+        ("Không cần thay đổi", {"UNCHANGED"}),
+        ("Theo lựa chọn người dùng", {"USER_KEPT", "USER_SKIPPED"}),
+        ("Cần kiểm tra", {"INVALID_SOURCE", "FAILED"}),
     )
 
     def __init__(
@@ -2107,12 +2256,20 @@ class ExcelOutcomeDialog(QDialog):
                             _value(outcome, "sqt"),
                             _value(outcome, "bl"),
                             _value(field, "field_name", default="Dòng dữ liệu"),
-                            _value(field, "source_value"),
+                            _outcome_value_display(
+                                _value(field, "source_value")
+                            ),
                             target_sheet,
                             destination,
-                            _value(field, "target_value_before"),
-                            _value(field, "target_value_after"),
-                            field_status,
+                            _outcome_value_display(
+                                _value(field, "target_value_before")
+                            ),
+                            _outcome_value_display(
+                                _value(field, "target_value_after")
+                            ),
+                            self._STATUS_LABELS.get(
+                                field_status, "Chưa xác định"
+                            ),
                             _value(field, "reason"),
                         ),
                     )
@@ -2152,11 +2309,23 @@ class ExcelOutcomeDialog(QDialog):
         )
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self.table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(10, QHeaderView.ResizeMode.Stretch)
+        for column in (4, 8):
+            header.setSectionResizeMode(
+                column, QHeaderView.ResizeMode.Interactive
+            )
+            header.resizeSection(column, 240)
+        header.setSectionResizeMode(10, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(10, 360)
         layout.addWidget(self.table, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)

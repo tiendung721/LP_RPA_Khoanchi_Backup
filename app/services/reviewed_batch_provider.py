@@ -22,18 +22,22 @@ class ReviewedBatchProvider:
     ) -> None:
         if isinstance(source, BatchService):
             self.repository = source.repository
+            self.batch_service: BatchService | None = source
             inferred_root = source.paths.output_dir
             self._owns_repository = False
         elif isinstance(source, BatchRepository):
             self.repository = source
+            self.batch_service = None
             inferred_root = None
             self._owns_repository = False
         elif isinstance(source, Database):
             self.repository = BatchRepository(source)
+            self.batch_service = None
             inferred_root = None
             self._owns_repository = False
         else:
             self.repository = BatchRepository(Database(source))
+            self.batch_service = None
             inferred_root = None
             self._owns_repository = True
         self.ready_root = (

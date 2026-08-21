@@ -78,6 +78,9 @@ Bước 1 hoặc chọn JSON thủ công.
 - Hồ sơ đã hoàn tất hoặc đã ghi BK được phép **Đối soát lại**. Mỗi lần tạo một
   phiên mới, giữ nguyên phiên và nhật ký cũ. Nếu BK đã có giá trị khác, mặc định
   giữ nguyên và chỉ ghi đè khi người dùng chọn rõ trong màn hình xử lý xung đột.
+- HĐ cước biển xuất hiện lại trong một batch khác được đánh dấu cảnh báo màu vàng
+  và liên kết về đúng hồ sơ tàu/chuyến hiện có. Liên kết này chỉ phục vụ truy vết,
+  không cộng lại tiền hoặc số cont và không chặn người dùng chọn nhập lại vào BK.
 - Khi một hồ sơ bị hủy, các HĐ được giải phóng để có thể đối soát lại và tạo
   kết quả mới. Hồ sơ, HĐ và nhật ký cũ vẫn được giữ trong SQLite để tra cứu;
   batch kết quả của hồ sơ đã hủy được lưu trữ và không còn được phép ghi BK.

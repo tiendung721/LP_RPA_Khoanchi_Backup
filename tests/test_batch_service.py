@@ -236,7 +236,7 @@ def test_manual_carrier_for_daily_sync_fee_survives_save_and_reload(
     service.close()
 
 
-def test_startup_removes_legacy_json_storage_but_keeps_excel_files(
+def test_startup_removes_legacy_json_storage_but_preserves_ready_results(
     tmp_path: Path,
 ) -> None:
     settings = _settings(tmp_path)
@@ -244,7 +244,6 @@ def test_startup_removes_legacy_json_storage_but_keeps_excel_files(
         settings.paths.archive_original_dir / "original.json",
         settings.paths.workspace_dir / "1" / "working.json",
         settings.paths.workspace_dir / "1" / "working.json.bak",
-        settings.paths.ready_dir / "ready.json",
         settings.paths.rejected_dir / "bad.json",
     )
     for path in legacy_files:
@@ -253,12 +252,15 @@ def test_startup_removes_legacy_json_storage_but_keeps_excel_files(
     excel_backup = settings.paths.excel_backup_dir / "BK_backup.xlsx"
     excel_backup.parent.mkdir(parents=True, exist_ok=True)
     excel_backup.write_bytes(b"excel")
+    ready_result = settings.paths.ready_dir / "sea_freight_group_7.json"
+    ready_result.parent.mkdir(parents=True, exist_ok=True)
+    ready_result.write_text('{"v":3,"d":[]}', encoding="utf-8")
 
     service = BatchService(settings)
 
     assert not (settings.paths.system_dir / "Archive").exists()
     assert not settings.paths.workspace_dir.exists()
-    assert not settings.paths.ready_dir.exists()
+    assert ready_result.read_text(encoding="utf-8") == '{"v":3,"d":[]}'
     assert not settings.paths.rejected_dir.exists()
     assert excel_backup.read_bytes() == b"excel"
     service.close()

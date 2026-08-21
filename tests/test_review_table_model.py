@@ -138,6 +138,37 @@ def test_duplicate_rows_are_only_a_warning(qtbot) -> None:
     assert model.rowCount() == 2
 
 
+def test_contextual_history_warning_is_yellow_and_non_blocking(qtbot) -> None:
+    row = ReviewRow(
+        cont=None,
+        bl="BL-1",
+        fee="CB",
+        rule="HD",
+        amount=6_850_000,
+        invoice_no="00006504",
+        vessel_name="VIETSUN RELIANCE",
+        voyage_no="2623S",
+        invoice_container_count=1,
+        container_count_basis="EXPLICIT",
+    )
+    model = ReviewTableModel([row])
+
+    model.set_contextual_warnings(
+        {row.runtime_id: ("HĐ đã có trong hồ sơ #13; vẫn được phép ghi BK lại.",)}
+    )
+
+    assert model.validation_at(0).status is RowStatus.WARNING
+    assert model.stats.warning == 1
+    assert model.stats.error == 0
+    assert "hồ sơ #13" in model.data(
+        model.index(0, ReviewTableModel.COLUMN_MESSAGES)
+    )
+    assert model.data(
+        model.index(0, ReviewTableModel.COLUMN_MESSAGES),
+        Qt.ItemDataRole.BackgroundRole,
+    ) is not None
+
+
 def test_friendly_amount_parser_and_text_normalization() -> None:
     for text in ("13554000", "13.554.000", "13,554,000", "13 554 000"):
         assert parse_amount(text) == 13_554_000

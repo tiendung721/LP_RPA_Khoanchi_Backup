@@ -25,7 +25,7 @@ from app.models import (
     ValidationResult,
 )
 from app.repositories.batch_repository import BatchRepository, local_now_iso
-from app.schema import coerce_document, document_to_dict
+from app.schema import coerce_document
 from app.services.carrier_policy import strip_received_gpt_carriers
 from app.services.file_stability import file_sha256, is_temporary_file
 from app.services.json_codec import JsonCodec, JsonCodecError
@@ -501,7 +501,7 @@ class BatchService:
     def create_reconciliation_batch(
         self, group_id: int, rows: Iterable[DataRow]
     ) -> BatchReview:
-        """Tạo một batch READY bất biến từ kết quả phân bổ cước biển."""
+        """Ghi kết quả hiện tại; metadata cũ chỉ dùng để giữ lịch sử."""
 
         document = BatchDocument(v=SCHEMA_VERSION, rows=list(rows))
         validation = self.validation_service.validate_document(document)
@@ -515,19 +515,25 @@ class BatchService:
         )
         if existing is not None:
             batch_id = int(existing["id"])
-            current = self.load_batch(batch_id)
-            if document_to_dict(current.document) == document_to_dict(document):
-                return current
-            if current.metadata.status is not BatchStatus.READY:
+            current = self.repository.require_by_id(batch_id)
+            if current.status is BatchStatus.ARCHIVED:
                 raise BatchServiceError(
-                    "Batch phân bổ đã được sử dụng; không thể cập nhật lại tự động."
+                    "Batch kết quả thuộc một hồ sơ lịch sử; hãy tạo phiên đối soát mới."
                 )
-            target = current.metadata.ready_path or current.metadata.working_path
+            # Không đọc file cũ trước khi ghi. File Ready chỉ là đầu ra có thể
+            # tái tạo từ HĐ + cont đang lưu trong hồ sơ đối soát.
+            target = self.paths.ready_dir / f"sea_freight_group_{group_id}.json"
             self.codec.dump_atomic(target, document, create_backup=True)
+            reloaded = self.codec.load(target)
             timestamp = local_now_iso()
             metadata = self.repository.update_batch(
                 batch_id,
+                source_filename=target.name,
+                original_archive_path=target,
+                working_path=target,
+                ready_path=target,
                 sha256=self._reconciliation_sha(target, group_id),
+                status=BatchStatus.READY,
                 last_saved_at=timestamp,
                 confirmed_at=timestamp,
                 row_count=validation.summary.total_rows,
@@ -535,8 +541,9 @@ class BatchService:
                 warning_count=validation.summary.warning_count,
                 error_count=validation.error_count,
                 total_amount=validation.summary.total_amount,
+                last_error=None,
             )
-            return BatchReview(metadata, document, validation)
+            return BatchReview(metadata, reloaded, validation)
         target = self.paths.ready_dir / f"sea_freight_group_{group_id}.json"
         self.codec.dump_atomic(target, document, create_backup=False)
         digest = self._reconciliation_sha(target, group_id)
@@ -862,7 +869,6 @@ class BatchService:
         for legacy_dir in (
             self.paths.system_dir / "Archive",
             self.paths.workspace_dir,
-            self.paths.ready_dir,
             self.paths.rejected_dir,
         ):
             if not legacy_dir.exists():
