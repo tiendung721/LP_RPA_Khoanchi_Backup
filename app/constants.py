@@ -15,8 +15,8 @@ SCHEMA_VERSION: Final = 3
 FEE_CATALOG = MappingProxyType(
     {
         "CB": "Cước biển",
-        "CBDH": "Cước bộ đóng hàng; gồm DtD, Dr-to-Dr và Door-to-Door",
-        "VTN": "Cước bộ trả hàng",
+        "CBDH": "Cước bộ đóng hàng; gồm DtD và Door-to-Door",
+        "VTN": "Cước bộ trả hàng; gồm Dr-to-Dr (Dr to Dr)",
         "NV": "Nâng vỏ, nâng container rỗng",
         "HH": "Hạ hàng, hạ container có hàng từ xe xuống bãi",
         "NH": "Nâng hàng, nâng container có hàng từ bãi lên xe",

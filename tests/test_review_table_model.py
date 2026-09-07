@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 
 from app.ui.review_table_model import (
+    FEE_CATALOG,
     ReviewFilterProxyModel,
     ReviewRow,
     ReviewTableModel,
@@ -17,6 +18,11 @@ def _rows() -> list[list[object]]:
         [None, "BL123456789", "CB", "HD", None, None, 27_500_000],
         ["ABCD1234567", "HBL-01", "VSDL", "ST", None, None, 850_000],
     ]
+
+
+def test_dr_to_dr_is_listed_as_return_road_freight() -> None:
+    assert "Dr-to-Dr" not in FEE_CATALOG["CBDH"]
+    assert "Dr-to-Dr" in FEE_CATALOG["VTN"]
 
 
 def test_sort_filter_does_not_change_source_order(qtbot) -> None:

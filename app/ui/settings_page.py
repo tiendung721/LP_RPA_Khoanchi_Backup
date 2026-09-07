@@ -77,6 +77,7 @@ class SettingsPage(QWidget):
         form.setVerticalSpacing(12)
 
         bat_row = QHBoxLayout()
+        bat_row.setContentsMargins(0, 0, 0, 0)
         self.bat_edit = QLineEdit()
         self.bat_edit.setObjectName("assistantBatEdit")
         self.bat_edit.setPlaceholderText("Chọn Mo_Tro_Ly_RPA.bat")
@@ -89,6 +90,7 @@ class SettingsPage(QWidget):
         form.addRow("File .bat mở Trợ lý ảo:", bat_widget)
 
         bang_ke_bat_row = QHBoxLayout()
+        bang_ke_bat_row.setContentsMargins(0, 0, 0, 0)
         self.bang_ke_bat_edit = QLineEdit()
         self.bang_ke_bat_edit.setObjectName("bangKeAssistantBatEdit")
         self.bang_ke_bat_edit.setPlaceholderText("Chọn Mo_Tool_Bang_Ke.bat")
@@ -101,6 +103,7 @@ class SettingsPage(QWidget):
         form.addRow("File .bat mở tool bảng kê:", bang_ke_bat_widget)
 
         output_row = QHBoxLayout()
+        output_row.setContentsMargins(0, 0, 0, 0)
         self.output_edit = QLineEdit()
         self.output_edit.setObjectName("outputDirEdit")
         self.output_edit.setClearButtonEnabled(True)
@@ -112,6 +115,7 @@ class SettingsPage(QWidget):
         form.addRow("Thư mục Output:", output_widget)
 
         rpa_expense_bat_row = QHBoxLayout()
+        rpa_expense_bat_row.setContentsMargins(0, 0, 0, 0)
         self.rpa_expense_bat_edit = QLineEdit()
         self.rpa_expense_bat_edit.setObjectName("rpaExpenseBatEdit")
         self.rpa_expense_bat_edit.setPlaceholderText(
@@ -129,6 +133,7 @@ class SettingsPage(QWidget):
         form.addRow("BAT RPA nhập quyết toán:", rpa_expense_bat_widget)
 
         daily_row = QHBoxLayout()
+        daily_row.setContentsMargins(0, 0, 0, 0)
         self.daily_workbook_edit = QLineEdit()
         self.daily_workbook_edit.setObjectName("dailyWorkbookEdit")
         self.daily_workbook_edit.setPlaceholderText(
@@ -144,6 +149,7 @@ class SettingsPage(QWidget):
         form.addRow("File Hàng ngày:", daily_widget)
 
         bk_row = QHBoxLayout()
+        bk_row.setContentsMargins(0, 0, 0, 0)
         self.bk_workbook_edit = QLineEdit()
         self.bk_workbook_edit.setObjectName("bkWorkbookEdit")
         self.bk_workbook_edit.setPlaceholderText(
@@ -159,6 +165,7 @@ class SettingsPage(QWidget):
         form.addRow("File BK Tổng hợp:", bk_widget)
 
         payment_row = QHBoxLayout()
+        payment_row.setContentsMargins(0, 0, 0, 0)
         self.payment_workbook_edit = QLineEdit()
         self.payment_workbook_edit.setObjectName("paymentWorkbookEdit")
         self.payment_workbook_edit.setPlaceholderText(

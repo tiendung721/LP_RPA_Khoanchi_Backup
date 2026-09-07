@@ -79,6 +79,7 @@ BASE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "closing_date": ("Ngày Đóng", "Ngày đóng hàng"),
     "container": ("Số Container", "Container", "Số cont"),
     "cargo_type": ("Loại hàng", "Tên hàng"),
+    "closing_place": SOURCE_HEADER_ALIASES["closing_place"],
     "vessel": ("Tên tàu", "Tàu"),
     "recipient": ("Người nhận", "Khách hàng"),
     "notes": ("Ghi chú", "Ghi Chú"),
@@ -2704,6 +2705,11 @@ class ExpensePostingService:
                     closing_date=worksheet.cell(
                         row, columns["closing_date"]
                     ).value,
+                    closing_place=(
+                        worksheet.cell(row, columns["closing_place"]).value
+                        if "closing_place" in columns
+                        else None
+                    ),
                     vessel=(
                         worksheet.cell(row, columns["vessel"]).value
                         if "vessel" in columns
@@ -3146,6 +3152,16 @@ class ExpensePostingService:
                         default=ResolutionAction.SELECT_SOURCE_ITEM,
                         details={
                             "item_indexes": list(item_indexes),
+                            "invoice_candidates": _unique_invoice_values(
+                                invoice
+                                for index in item_indexes
+                                for invoice in analyzed_items[index].invoice_candidates
+                            ),
+                            "carrier_candidates": unique_carriers(
+                                carrier
+                                for index in item_indexes
+                                for carrier in analyzed_items[index].carrier_candidates
+                            ),
                             "source_item_options": [
                                 {
                                     "source_item_index": analyzed_items[index].source_indices[0],
@@ -3267,6 +3283,11 @@ class ExpensePostingService:
                 "scope": "carrier",
                 "carrier_group": group,
                 "item_indexes": list(indexes),
+                "invoice_candidates": _unique_invoice_values(
+                    invoice
+                    for index in indexes
+                    for invoice in items[index].invoice_candidates
+                ),
                 "carrier_candidates": incoming,
                 "invoice_carriers": {
                     invoice_labels[key]: unique_carriers(values)
@@ -3276,20 +3297,6 @@ class ExpensePostingService:
                 "carrier_cell": cell.coordinate,
                 "carrier_current_value": cell.value,
             }
-            if group in DAILY_MANAGED_CARRIER_GROUPS:
-                # Carrier GPT của CB/CBDH/VTN đã bị bỏ khi tiếp nhận. Một giá
-                # trị còn xuất hiện ở đây vì thế là ngoại lệ user chủ động nhập.
-                # Có giá trị thì dùng, để trống thì giữ nguồn chuẩn Hàng ngày.
-                for index in indexes:
-                    items[index].carrier_action = (
-                        ResolutionAction.OVERWRITE
-                        if incoming
-                        else ResolutionAction.KEEP_EXISTING
-                    )
-                    items[index].carrier_value_after = (
-                        join_carriers(incoming) if incoming else cell.value
-                    )
-                continue
             if ambiguous:
                 ambiguous_candidates = unique_carriers(
                     carrier
@@ -3310,6 +3317,48 @@ class ExpensePostingService:
                             "carrier_candidates": ambiguous_candidates,
                             "incoming_carriers": incoming,
                             "ambiguous_invoice_carriers": ambiguous,
+                        },
+                    )
+                )
+                continue
+            if group in DAILY_MANAGED_CARRIER_GROUPS:
+                # Carrier GPT của CB/CBDH/VTN đã bị bỏ khi tiếp nhận. Nếu có
+                # incoming ở đây thì đó là giá trị chuẩn đã điền trên màn hình
+                # review hoặc giá trị user đã sửa và xác nhận.
+                current = split_carriers(cell.value)
+                if not incoming:
+                    for index in indexes:
+                        items[index].carrier_action = ResolutionAction.KEEP_EXISTING
+                        items[index].carrier_value_after = cell.value
+                    continue
+                if not current:
+                    for index in indexes:
+                        items[index].carrier_action = ResolutionAction.OVERWRITE
+                        items[index].carrier_value_after = join_carriers(incoming)
+                    continue
+                if {carrier_key(value) for value in incoming} == {
+                    carrier_key(value) for value in current
+                }:
+                    for index in indexes:
+                        items[index].carrier_action = ResolutionAction.KEEP_EXISTING
+                        items[index].carrier_value_after = cell.value
+                    continue
+                conflicts.append(
+                    self._item_conflict(
+                        batch_hash,
+                        indexes[0],
+                        first,
+                        ConflictType.CARRIER_VALUE_CONFLICT,
+                        f"Ô bên vận tải nhóm {group} đang khác với dữ liệu đã xác nhận.",
+                        (
+                            ResolutionAction.KEEP_EXISTING,
+                            ResolutionAction.OVERWRITE,
+                        ),
+                        default=ResolutionAction.KEEP_EXISTING,
+                        details={
+                            **details,
+                            "existing_carrier_candidates": current,
+                            "requires_existing_carrier_selection": len(current) > 1,
                         },
                     )
                 )
@@ -3582,6 +3631,12 @@ class ExpensePostingService:
             )
             conflict_details.setdefault("invoice_no", source.get("invoice_no"))
             conflict_details.setdefault("target_sheet", item.sheet_name)
+        conflict_details.setdefault(
+            "invoice_candidates", list(item.invoice_candidates)
+        )
+        conflict_details.setdefault(
+            "carrier_candidates", list(item.carrier_candidates)
+        )
         invoice_scope = conflict_details.get("scope") == "invoice"
         carrier_scope = conflict_details.get("scope") == "carrier"
         target_column = (
@@ -3622,7 +3677,7 @@ class ExpensePostingService:
             bl=item.bl,
             fee=item.selected_fee,
             amount=item.amount,
-            carrier=join_carriers(item.carrier_candidates),
+            carrier=join_carriers(conflict_details.get("carrier_candidates", ())),
             vessel_voyage=vessel_voyage or None,
             sheet_name=item.sheet_name,
             target_row=item.target_row,

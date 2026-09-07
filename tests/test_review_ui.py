@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+from openpyxl import Workbook
 from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -56,6 +58,92 @@ def _review_payload() -> dict[str, Any]:
         },
     }
 
+
+def test_review_populates_all_managed_carriers_from_daily_workbook(
+    qtbot, tmp_path: Path
+) -> None:
+    daily = tmp_path / "Hàng ngày 2026.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Tháng 8"
+    worksheet.append(
+        ["SQT PM", "Số Container", "VT biển", "Vận chuyển"]
+    )
+    worksheet.append([700, "CONT700", "DAILY SEA", "DAILY ROAD"])
+    workbook.save(daily)
+    workbook.close()
+    payload = {
+        "metadata": {
+            "id": 8,
+            "status": "REVIEWING",
+            "source_kind": "ASSISTANT",
+        },
+        "document": {
+            "v": 3,
+            "d": [
+                {
+                    "source_document_id": "DOC-1",
+                    "source_document_name": "invoice.pdf",
+                    "container": "CONT700",
+                    "fee": "CB",
+                    "rule": "CV",
+                    "invoice_no": "HD-1",
+                    "invoice_date": "2026-08-10",
+                    "carrier": None,
+                    "amount": 50,
+                },
+                {
+                    "source_document_id": "DOC-1",
+                    "source_document_name": "invoice.pdf",
+                    "container": "CONT700",
+                    "fee": "CBDH",
+                    "rule": "CV",
+                    "invoice_no": "HD-2",
+                    "invoice_date": "2026-08-10",
+                    "carrier": None,
+                    "amount": 100,
+                },
+                {
+                    "source_document_id": "DOC-1",
+                    "source_document_name": "invoice.pdf",
+                    "container": "CONT700",
+                    "fee": "VTN",
+                    "rule": "CV",
+                    "invoice_no": "HD-3",
+                    "invoice_date": "2026-08-10",
+                    "carrier": None,
+                    "amount": 150,
+                },
+                {
+                    "source_document_id": "DOC-1",
+                    "source_document_name": "invoice.pdf",
+                    "container": "CONT700",
+                    "fee": "CBDH",
+                    "rule": "CV",
+                    "invoice_no": "HD-4",
+                    "invoice_date": "2026-08-10",
+                    "carrier": "USER EDIT",
+                    "amount": 200,
+                }
+            ],
+        },
+    }
+
+    window = ReviewWindow(
+        payload,
+        settings=SimpleNamespace(daily_workbook_path=str(daily)),
+    )
+    qtbot.addWidget(window)
+
+    assert [row.carrier for row in window.model.rows()] == [
+        "DAILY SEA",
+        "DAILY ROAD",
+        "DAILY ROAD",
+        "USER EDIT",
+    ]
+    assert window.model.dirty
+    window.model.mark_clean()
+    window.close()
 
 def test_cross_batch_duplicate_is_yellow_and_opens_existing_group(
     qtbot,

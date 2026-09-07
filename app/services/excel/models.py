@@ -426,6 +426,7 @@ class RowCandidate:
     mapping_invalid: bool = False
     cargo_type: Any = None
     closing_date: Any = None
+    closing_place: Any = None
     vessel: Any = None
     recipient: Any = None
     carrier: Any = None

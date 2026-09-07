@@ -37,11 +37,11 @@ Mỗi object đủ, không thừa, đúng 15 khóa theo thứ tự:
 - `carrier`: đơn vị vận tải/hãng tàu/đơn vị dịch vụ thực tế khi chứng từ xác định rõ. Chỉ lấy người bán nếu họ trực tiếp cung cấp dịch vụ; không suy từ tên file.
 
 # MÃ PHÍ VÀ PHÂN LOẠI
-CB cước biển; CBDH cước bộ đóng hàng/DtD; VTN cước bộ trả hàng; NV nâng vỏ; HH hạ hàng; NH nâng hàng; HV hạ vỏ; VSDL vệ sinh/D-O/chứng từ/seal/điện thả hàng/THC độc lập; LC lưu container/vỏ/hàng, gia hạn, demurrage/detention/storage; QT quá tải/trọng lượng; LL công làm lệnh riêng; SC sửa chữa/hư hỏng container; CXD chưa đủ căn cứ hoặc chưa có mã. Không tạo mã mới.
+CB cước biển; CBDH cước bộ đóng hàng/DtD; VTN cước bộ trả hàng/Dr-to-Dr/Dr to Dr; NV nâng vỏ; HH hạ hàng; NH nâng hàng; HV hạ vỏ; VSDL vệ sinh/D-O/chứng từ/seal/điện thả hàng/THC độc lập; LC lưu container/vỏ/hàng, gia hạn, demurrage/detention/storage; QT quá tải/trọng lượng; LL công làm lệnh riêng; SC sửa chữa/hư hỏng container; CXD chưa đủ căn cứ hoặc chưa có mã. Không tạo mã mới.
 
 Ưu tiên: SC→LC→QT→NV→HH→NH→HV→VSDL→LL→CB→CBDH→VTN→CXD.
 - CB là vận chuyển biển cảng→cảng. THC trong hóa đơn biển thuộc CB; THC độc lập thuộc VSDL. Tàu/chuyến đơn độc không biến tuyến bộ thành CB.
-- CBDH: kho/nhà máy/nơi đóng→cảng/bãi/terminal hoặc chuỗi DtD thống nhất. VTN: cảng/bãi/terminal→kho/khách hàng; không tách chặng thuộc DtD.
+- CBDH: kho/nhà máy/nơi đóng→cảng/bãi/terminal hoặc chuỗi DtD thống nhất. VTN: cảng/bãi/terminal→kho/khách hàng; Dr-to-Dr/Dr to Dr luôn là VTN; không tách chặng thuộc DtD.
 - Bãi→xe rỗng=NV; xe→bãi hàng=HH; bãi→xe hàng=NH; xe→bãi rỗng=HV; nâng hạ không rõ=CXD.
 - D/O/chứng từ/seal/vệ sinh/điện thả/THC độc lập=VSDL; lưu/gia hạn=LC; quá tải=QT; LL chỉ khi ghi rõ công làm lệnh; repair/damage=SC.
 - Không rõ bản chất, phí phát sinh/chi hộ không có chi tiết, nhiều loại chung một tiền không tách được => CXD. Đặt cọc có thể hoàn lại không xuất.

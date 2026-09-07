@@ -60,6 +60,8 @@ def test_posting_conflict_carries_effective_source_vessel_voyage(
         vessel_voyage_raw="AI RAW KHÁC",
         vessel_name="NEW VISION",
         voyage_no="2610S",
+        invoice_candidates=["HD-01"],
+        carrier_candidates=["DAILY ROAD"],
     )
 
     conflict = service._item_conflict(
@@ -72,6 +74,8 @@ def test_posting_conflict_carries_effective_source_vessel_voyage(
     )
 
     assert conflict.vessel_voyage == "NEW VISION 2610S"
+    assert conflict.details["invoice_candidates"] == ["HD-01"]
+    assert conflict.carrier == "DAILY ROAD"
 
 
 POSTING_BASE_HEADERS = (
@@ -1293,6 +1297,10 @@ def test_posting_duplicate_container_across_months_requires_source_sheet(
         "T07 26",
         "T06 26",
     ]
+    assert [candidate.closing_place for candidate in conflict.row_candidates] == [
+        "Kho A",
+        "Kho A",
+    ]
     refined = service.refine(
         plan,
         {
@@ -2410,6 +2418,7 @@ def test_same_cell_expenses_require_one_json_line_before_invoice_write(
         for conflict in plan.conflicts
         if conflict.conflict_type is ConflictType.MULTIPLE_EXPENSE_SAME_CELL
     )
+    assert same_cell.details["invoice_candidates"] == ["INV-A", "INV-B"]
     selected = service.refine(
         plan,
         {

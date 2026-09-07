@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QScrollArea
 
 from app.ui.settings_page import SettingsPage
+from app.ui.theme import APP_STYLESHEET
 from app.ui.workflow_page import WorkflowPage
 
 
@@ -57,6 +58,23 @@ def test_settings_checking_feedback_restores_button(qtbot) -> None:
     assert page.check_button.text() == "Kiểm tra cấu hình"
     assert page.check_button.property("loading") is False
     assert page.check_button.isEnabled()
+
+
+def test_settings_page_fits_minimum_application_height_without_scrollbar(
+    qtbot,
+) -> None:
+    page = SettingsPage()
+    page.setStyleSheet(APP_STYLESHEET)
+    page.resize(980, 600)
+    qtbot.addWidget(page)
+
+    page.show()
+    qtbot.wait(10)
+
+    scroll = page.findChild(QScrollArea)
+    assert scroll is not None
+    assert not scroll.verticalScrollBar().isVisible()
+    assert scroll.verticalScrollBar().maximum() == 0
 
 
 def test_workflow_uses_named_groups_instead_of_numbered_steps(qtbot) -> None:

@@ -132,7 +132,7 @@ def test_posting_blank_daily_sync_carrier_keeps_existing_value(
         workbook.close()
 
 
-def test_posting_manual_daily_sync_carrier_overrides_existing_value(
+def test_posting_reviewed_daily_sync_carrier_requires_overwrite_choice(
     tmp_path: Path,
 ) -> None:
     bk = tmp_path / "bk.xlsx"
@@ -148,11 +148,20 @@ def test_posting_manual_daily_sync_carrier_overrides_existing_value(
     )
 
     plan = service.analyze(batch_id=1, sheet_name="T07 26")
-    assert not any(
-        conflict.conflict_type is ConflictType.CARRIER_VALUE_CONFLICT
+    conflict = next(
+        conflict
         for conflict in plan.conflicts
+        if conflict.conflict_type is ConflictType.CARRIER_VALUE_CONFLICT
     )
-    service.apply(plan, {})
+    assert conflict.carrier == "USER ROAD"
+    assert conflict.allowed_actions == (
+        ResolutionAction.KEEP_EXISTING,
+        ResolutionAction.OVERWRITE,
+    )
+    service.apply(
+        plan,
+        {conflict.conflict_id: {"action": "OVERWRITE"}},
+    )
 
     workbook = load_workbook(bk, data_only=False)
     try:

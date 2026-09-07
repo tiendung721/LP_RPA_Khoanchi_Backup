@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
 )
 
+import app.ui.excel_dialogs as excel_dialogs_module
 import app.ui.main_window as main_window_module
 from app.database import Database
 from app.repositories.excel_run_repository import ExcelRunRepository
@@ -1953,6 +1954,29 @@ def test_month_and_conflict_dialogs_collect_generic_mapping(qtbot) -> None:
     assert result["unknown"]["selected_fee"] == "SC"
 
 
+def test_generic_posting_conflict_displays_invoice_and_reviewed_carrier(qtbot) -> None:
+    dialog = ConflictResolutionDialog(
+        [
+            {
+                "conflict_id": "missing-container",
+                "type": "CONTAINER_NOT_FOUND",
+                "container": "CONT700",
+                "fee": "CBDH",
+                "carrier": "DAILY ROAD",
+                "details": {"invoice_no": "HD-700"},
+                "allowed_actions": ["SELECT_ROW", "SKIP"],
+            }
+        ],
+        operation="posting",
+    )
+    qtbot.addWidget(dialog)
+
+    invoice_column = dialog.COLUMNS.index("Số HĐ từ JSON")
+    carrier_column = dialog.COLUMNS.index("Bên vận tải")
+    assert dialog.table.item(0, invoice_column).text() == "HD-700"
+    assert dialog.table.item(0, carrier_column).text() == "DAILY ROAD"
+
+
 def test_conflict_dialog_prefills_saved_resolutions(qtbot) -> None:
     dialog = ConflictResolutionDialog(
         [
@@ -2010,6 +2034,7 @@ def test_conflict_dialog_restores_selected_row_and_source_sheet(qtbot) -> None:
                     {
                         "source_sheet": "T01 26",
                         "row": 55,
+                        "sqt": 701,
                         "container": "ABCD1234567",
                     }
                 ],
@@ -2030,7 +2055,10 @@ def test_conflict_dialog_restores_selected_row_and_source_sheet(qtbot) -> None:
     assert dialog._action_combos["selected-row"].currentData() == "SELECT_ROW"
     assert dialog._selected_rows["selected-row"] == 55
     assert dialog._selected_source_sheets["selected-row"] == "T01 26"
-    assert dialog._selector_buttons["selected-row"].text() == "T01 26 – dòng 55"
+    assert (
+        dialog._selector_buttons["selected-row"].text()
+        == "T01 26 – dòng 55 – SQT 701"
+    )
     assert dialog.resolution_map()["selected-row"] == {
         "conflict_id": "selected-row",
         "action": "SELECT_ROW",
@@ -2041,6 +2069,55 @@ def test_conflict_dialog_restores_selected_row_and_source_sheet(qtbot) -> None:
 
     dialog._validate_and_accept()
     assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_conflict_dialog_new_row_selection_label_includes_sqt(
+    qtbot, monkeypatch
+) -> None:
+    candidate = {
+        "source_sheet": "T08 26",
+        "row": 96,
+        "sqt": 848,
+        "container": "DRYU3045130",
+    }
+    conflict = {
+        "conflict_id": "selected-row",
+        "type": "MULTIPLE_CONTAINER_MATCH",
+        "allowed_actions": ["SELECT_ROW", "SKIP"],
+        "row_candidates": [candidate],
+    }
+    dialog = ConflictResolutionDialog([conflict], operation="posting")
+    qtbot.addWidget(dialog)
+
+    class AcceptedPicker:
+        selected_row = 96
+        selected_source_sheet = "T08 26"
+        selected_candidate = candidate
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def exec(self) -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        excel_dialogs_module,
+        "ManualRowPickerDialog",
+        AcceptedPicker,
+    )
+    action_combo = dialog._action_combos["selected-row"]
+    action_combo.setCurrentIndex(action_combo.findData("SELECT_ROW"))
+    button = dialog._selector_buttons["selected-row"]
+    dialog._pick_row(conflict, "selected-row", button)
+
+    assert button.text() == "T08 26 – dòng 96 – SQT 848"
+    assert dialog.resolution_map()["selected-row"] == {
+        "conflict_id": "selected-row",
+        "action": "SELECT_ROW",
+        "selected_row": 96,
+        "row": 96,
+        "selected_source_sheet": "T08 26",
+    }
 
 
 def test_posting_month_dialog_has_no_default_or_recommendation(qtbot) -> None:
@@ -2492,6 +2569,7 @@ def test_manual_row_picker_returns_source_sheet_and_workbook_row(qtbot) -> None:
                 "container": "DRYU3026167",
                 "goods_type": "Gạo",
                 "closing_date": "28/07/2026",
+                "closing_place": "Kho A",
                 "vessel": "Tàu A",
                 "recipient": "Công ty B",
                 "carrier": "Vận tải ABC",
@@ -2504,8 +2582,10 @@ def test_manual_row_picker_returns_source_sheet_and_workbook_row(qtbot) -> None:
 
     assert dialog.selected_row == 12
     assert dialog.selected_source_sheet == "T06 26"
-    assert dialog.table.columnCount() == 8
-    assert dialog.table.item(0, 7).text() == "Vận tải ABC"
+    assert dialog.table.columnCount() == 9
+    assert dialog.table.horizontalHeaderItem(5).text() == "Nơi đóng hàng"
+    assert dialog.table.item(0, 5).text() == "Kho A"
+    assert dialog.table.item(0, 8).text() == "Vận tải ABC"
     assert "Cột" not in [
         dialog.table.horizontalHeaderItem(column).text()
         for column in range(dialog.table.columnCount())

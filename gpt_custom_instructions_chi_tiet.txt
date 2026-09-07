@@ -118,8 +118,8 @@ Root chỉ có đúng hai khóa `v` và `d`. Mỗi phần tử của `d` là m�
 
 # 8. MÃ LOẠI CƯỚC CHÍNH THỨC
 - `CB`: Cước biển.
-- `CBDH`: Cước bộ đóng hàng; gồm DtD, Dr-to-Dr, Door-to-Door.
-- `VTN`: Cước bộ trả hàng.
+- `CBDH`: Cước bộ đóng hàng; gồm DtD, Door-to-Door.
+- `VTN`: Cước bộ trả hàng; gồm Dr-to-Dr (Dr to Dr).
 - `NV`: Nâng vỏ, nâng container rỗng.
 - `HH`: Hạ hàng, hạ container có hàng từ xe xuống bãi.
 - `NH`: Nâng hàng, nâng container có hàng từ bãi lên xe.
@@ -270,7 +270,7 @@ Quy tắc:
 Dùng CBDH khi chiều tuyến:
 - Nhà máy/kho/nơi đóng hàng → cảng, bãi hoặc terminal.
 - Nơi đóng hàng → điểm hạ container hàng xuất.
-- Chuỗi DtD, Dr-to-Dr hoặc Door-to-Door của nghiệp vụ đóng hàng.
+- Chuỗi DtD hoặc Door-to-Door của nghiệp vụ đóng hàng.
 
 Quy tắc:
 1. Mỗi container một object khi có tiền riêng.
@@ -284,12 +284,14 @@ Quy tắc:
 Dùng VTN khi:
 - Cảng/terminal/bãi cảng → kho, nhà máy, khách hàng hoặc địa điểm nội địa.
 - Lấy container hàng tại cảng và giao/trả hàng về nội địa.
+- Chứng từ ghi Dr-to-Dr hoặc Dr to Dr.
 
 Quy tắc:
 1. Chiều cảng→nội địa là căn cứ chính.
 2. Không suy VTN chỉ từ tên tỉnh, nhà cung cấp, file hoặc thư mục.
 3. Không tách VTN khỏi chuỗi Door-to-Door đã xác định là CBDH.
 4. Mỗi container một object khi có tiền riêng.
+5. Dr-to-Dr/Dr to Dr luôn được phân loại là VTN, không phân loại là CBDH.
 
 # 21. QUY TẮC NÂNG/HẠ CONTAINER
 Phân loại theo trạng thái container và chiều di chuyển:

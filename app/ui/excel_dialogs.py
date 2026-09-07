@@ -563,7 +563,7 @@ class ManualRowPickerDialog(QDialog):
         self.setWindowTitle(
             f"Chọn dòng trong {sheet_name}" if sheet_name else "Chọn dòng BK"
         )
-        self.resize(850, 410)
+        self.resize(1000, 410)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -575,7 +575,7 @@ class ManualRowPickerDialog(QDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
         self.table.setObjectName("manualRowCandidateTable")
         self.table.setHorizontalHeaderLabels(
             [
@@ -584,6 +584,7 @@ class ManualRowPickerDialog(QDialog):
                 "Container",
                 "Loại hàng",
                 "Ngày đóng",
+                "Nơi đóng hàng",
                 "Tàu",
                 "Người nhận",
                 "Bên vận tải",
@@ -612,6 +613,13 @@ class ManualRowPickerDialog(QDialog):
                 _value(candidate, "container", "container_number"),
                 _value(candidate, "cargo_type", "goods_type", "loai_hang"),
                 _value(candidate, "closing_date", "ngay_dong"),
+                _value(
+                    candidate,
+                    "closing_place",
+                    "packing_place",
+                    "loading_place",
+                    "noi_dong",
+                ),
                 _value(candidate, "vessel", "ship", "ten_tau"),
                 _value(candidate, "recipient", "nguoi_nhan"),
                 _value(candidate, "carrier", "transport_provider", "transport"),
@@ -1482,6 +1490,15 @@ class ConflictResolutionDialog(QDialog):
             _value(details, "invoice_candidates", default=())
         )
         invoice_display = ", ".join(str(value) for value in invoice_candidates)
+        if not invoice_display:
+            invoice_value = _value(
+                conflict,
+                "invoice_no",
+                "selected_invoice",
+                default=_value(details, "invoice_no", "selected_invoice"),
+            )
+            if invoice_value not in (None, ""):
+                invoice_display = str(invoice_value)
         carrier_candidates = _sequence(
             _value(details, "carrier_candidates", default=())
         )
@@ -1611,10 +1628,19 @@ class ConflictResolutionDialog(QDialog):
                     self._selected_source_sheets[conflict_id] = str(selected_sheet)
                 button = self._selector_buttons.get(conflict_id)
                 if button is not None:
-                    label = f"Dòng {selected_row}"
-                    if selected_sheet not in (None, ""):
-                        label = f"{selected_sheet} – dòng {selected_row}"
-                    button.setText(label)
+                    conflict = self._conflicts_by_id.get(conflict_id)
+                    candidate = self._candidate_for_selected_row(
+                        conflict,
+                        selected_row,
+                        selected_sheet,
+                    )
+                    button.setText(
+                        self._selected_row_label(
+                            selected_row,
+                            selected_sheet,
+                            candidate,
+                        )
+                    )
 
         combo_values = (
             (self._selected_fees, ("selected_fee", "fee")),
@@ -1664,6 +1690,7 @@ class ConflictResolutionDialog(QDialog):
         }:
             button = QPushButton("Chọn dòng…")
             button.setObjectName(f"selectConflictRow_{row}")
+            button.setMinimumWidth(220)
             button.clicked.connect(
                 lambda _checked=False, c=conflict, key=conflict_id, b=button: (
                     self._pick_row(c, key, b)
@@ -1804,10 +1831,67 @@ class ConflictResolutionDialog(QDialog):
         if selected_source_sheet:
             self._selected_source_sheets[conflict_id] = selected_source_sheet
         button.setText(
+            self._selected_row_label(
+                selected_row,
+                selected_source_sheet,
+                dialog.selected_candidate,
+            )
+        )
+
+    @staticmethod
+    def _candidate_for_selected_row(
+        conflict: Any,
+        selected_row: Any,
+        selected_source_sheet: Any,
+    ) -> Any | None:
+        matches: list[Any] = []
+        candidates = _sequence(
+            _value(
+                conflict,
+                "row_candidates",
+                "candidate_rows",
+                "candidates",
+                default=(),
+            )
+        )
+        for candidate in candidates:
+            candidate_row = _value(
+                candidate,
+                "row",
+                "row_number",
+                "target_row",
+                "excel_row",
+            )
+            if str(candidate_row) != str(selected_row):
+                continue
+            candidate_sheet = _value(
+                candidate,
+                "source_sheet",
+                "sheet_name",
+                "sheet",
+            )
+            if (
+                selected_source_sheet not in (None, "")
+                and candidate_sheet not in (None, "")
+                and str(candidate_sheet) != str(selected_source_sheet)
+            ):
+                continue
+            matches.append(candidate)
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _selected_row_label(
+        selected_row: Any,
+        selected_source_sheet: Any,
+        candidate: Any | None,
+    ) -> str:
+        row_label = (
             f"{selected_source_sheet} – dòng {selected_row}"
-            if selected_source_sheet
+            if selected_source_sheet not in (None, "")
             else f"Dòng {selected_row}"
         )
+        sqt = _value(candidate, "sqt", "sequence_number")
+        return f"{row_label} – SQT {_display(sqt)}"
 
     @staticmethod
     def _actions(conflict: Any, conflict_type: str) -> tuple[Any, ...]:

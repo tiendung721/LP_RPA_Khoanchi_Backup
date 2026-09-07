@@ -45,9 +45,11 @@ from .review_table_model import (
     ReviewStats,
     ReviewTableModel,
     RowStatus,
+    coerce_review_row,
 )
 from app.constants import SCHEMA_VERSION
 from app.models import DataRow
+from app.services.review_carrier_lookup import ReviewCarrierLookup
 from app.sea_freight.contracts import (
     GroupStatus,
     InvoiceHistoryMatchKind,
@@ -304,6 +306,9 @@ class ReviewWindow(QMainWindow):
             str(_value(self._metadata, "source_kind", default="ASSISTANT"))
             == "BANG_KE"
         )
+        initial_rows, populated_carrier_count = self._rows_with_standard_carriers(
+            initial_rows
+        )
 
         self.model = ReviewTableModel(
             initial_rows,
@@ -325,6 +330,34 @@ class ReviewWindow(QMainWindow):
         self._update_dirty(False)
         self._update_action_state()
         self._restore_reconciliation_presentations()
+        if populated_carrier_count:
+            self.model.mark_dirty()
+            self.statusBar().showMessage(
+                f"Đã điền Bên vận tải chuẩn từ file Hàng ngày cho "
+                f"{populated_carrier_count} khoản chi; hãy kiểm tra và xác nhận.",
+                12000,
+            )
+
+    def _rows_with_standard_carriers(
+        self, rows: Sequence[Any]
+    ) -> tuple[list[ReviewRow], int]:
+        prepared = [coerce_review_row(row) for row in rows]
+        source_kind = str(
+            _value(self._metadata, "source_kind", default="ASSISTANT")
+        ).split(".")[-1].upper()
+        if source_kind != "ASSISTANT":
+            return prepared, 0
+        daily_path = _value(self._settings, "daily_workbook_path", default="")
+        if not str(daily_path or "").strip():
+            return prepared, 0
+        try:
+            resolved = ReviewCarrierLookup(daily_path).resolve(prepared)
+        except Exception:
+            LOGGER.exception("Không thể tra Bên vận tải chuẩn cho màn hình review.")
+            return prepared, 0
+        for index, carrier in resolved.items():
+            prepared[index].carrier = carrier
+        return prepared, len(resolved)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -1106,7 +1139,14 @@ class ReviewWindow(QMainWindow):
         self._batch_id = _value(metadata, "id", "batch_id")
         self._status = str(_value(metadata, "status", default="REVIEWING")).split(".")[-1].upper()
         self._last_saved_at = _value(metadata, "last_saved_at")
-        self.model.set_rows(rows, mark_dirty=False)
+        rows, populated_carrier_count = self._rows_with_standard_carriers(rows)
+        self.model.set_rows(rows, mark_dirty=bool(populated_carrier_count))
+        if populated_carrier_count:
+            self.statusBar().showMessage(
+                f"Đã điền Bên vận tải chuẩn từ file Hàng ngày cho "
+                f"{populated_carrier_count} khoản chi; hãy kiểm tra và xác nhận.",
+                12000,
+            )
         self._update_metadata_labels()
         self._source_index_by_runtime = {
             self.model.runtime_id_at(index): index
