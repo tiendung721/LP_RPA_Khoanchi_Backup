@@ -201,6 +201,44 @@ QFrame#excelSummaryDetails[tone="warning"] {{
     background: #FFFCED;
     border-color: #E8D58B;
 }}
+QFrame#conflictProblemDetails {{
+    background: {SURFACE};
+    border: 1px solid #BFDBFE;
+    border-left: 4px solid {PRIMARY};
+    border-radius: 8px;
+}}
+QLabel#conflictProblemDetailsTitle {{
+    color: #172B4D;
+    font-size: 10.5pt;
+    font-weight: 700;
+}}
+QLabel#conflictProblemDetailsContext {{
+    color: {MUTED_TEXT};
+    font-size: 9pt;
+}}
+QPlainTextEdit#conflictProblemDetailsText {{
+    min-height: 0;
+    padding: 7px 9px;
+    color: {TEXT};
+    background: #F8FAFC;
+    border: 1px solid #E2E8F0;
+    border-radius: 6px;
+}}
+QToolButton#conflictProblemDetailsCloseButton {{
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0;
+    color: {MUTED_TEXT};
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    font-size: 14pt;
+}}
+QToolButton#conflictProblemDetailsCloseButton:hover {{
+    color: {PRIMARY_DARK};
+    background: {PRIMARY_LIGHT};
+    border: none;
+}}
 QFrame[card="true"], QGroupBox {{
     background: {SURFACE};
     border: 1px solid {BORDER};

@@ -63,6 +63,15 @@ class ExcelDraftRepository:
 
     get_unfinished = get_latest
 
+    def delete(self, source_file_key: str) -> bool:
+        """Xóa đúng checkpoint lựa chọn của một file/nghiệp vụ."""
+
+        changed = self.database.execute(
+            "DELETE FROM excel_resolution_latest WHERE source_file_key = ?",
+            (source_file_key,),
+        )
+        return bool(changed)
+
     def save(
         self,
         *,

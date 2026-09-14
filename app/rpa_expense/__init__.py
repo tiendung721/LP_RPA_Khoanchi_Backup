@@ -15,6 +15,7 @@ from .launcher import (
     RpaExpenseBatLauncher,
     RpaExpenseLaunchError,
 )
+from .choices import RpaChoiceRestore, RpaChoiceService
 from .service import (
     RpaExpenseError,
     RpaExpenseService,
@@ -30,6 +31,8 @@ __all__ = [
     "RPA_STATUS_IMPORTED",
     "RPA_STATUS_NOT_IMPORTED",
     "RpaExpenseAmounts",
+    "RpaChoiceRestore",
+    "RpaChoiceService",
     "RpaExpenseBatLauncher",
     "RpaExpenseError",
     "RpaExpenseLaunchError",

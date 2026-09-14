@@ -10,7 +10,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QComboBox,
-    QDialog,
     QDialogButtonBox,
     QFormLayout,
     QLabel,
@@ -23,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from app.services.carrier_policy import carrier_is_managed_by_daily_sync
 
+from .app_dialog import AppDialog
 from .review_table_model import (
     FEE_CATALOG,
     RULE_CATALOG,
@@ -99,7 +99,7 @@ def format_amount(value: int | None) -> str:
     return "" if value is None else f"{value:,}".replace(",", ".")
 
 
-class EditRowDialog(QDialog):
+class EditRowDialog(AppDialog):
     """Dialog chỉnh sửa có chuẩn hóa, parser 64-bit và validation realtime."""
 
     rowAccepted = Signal(object)

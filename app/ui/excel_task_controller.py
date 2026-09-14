@@ -343,6 +343,8 @@ class ExcelTaskController(QObject):
                 "saved_choice_count": restored.saved_choice_count,
                 "restored_count": restored.restored_count,
                 "target_compatible": restored.target_compatible,
+                "target_changed": bool(getattr(restored, "target_changed", False)),
+                "skipped_count": int(getattr(restored, "skipped_count", 0) or 0),
                 "last_error": restored.last_error,
             }
             return dict(restored.resolutions)
@@ -385,6 +387,29 @@ class ExcelTaskController(QObject):
                 plan, normalized, resolutions
             )
         self._draft_saved_this_run = True
+
+    def clear_saved_choices(
+        self,
+        plan: Any,
+        *,
+        operation: Any | None = None,
+    ) -> bool:
+        if self.draft_service is None:
+            return False
+        normalized = (
+            self.normalize_operation(operation)
+            if operation is not None
+            else self._operation_for_plan(plan)
+        )
+        clearer = getattr(self.draft_service, "clear", None)
+        if not callable(clearer):
+            return False
+        cleared = bool(clearer(plan, normalized))
+        if cleared:
+            self._saved_resolution_info = {}
+            self._draft_context_key = None
+            self._draft_saved_this_run = False
+        return cleared
 
     def refine_plan(
         self,

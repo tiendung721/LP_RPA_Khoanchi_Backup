@@ -795,6 +795,168 @@ class SeaFreightRepository:
             for row in rows
         }
 
+    def current_source_links(
+        self,
+        batch_id: int,
+        source_item_indices: set[int] | None = None,
+    ) -> list[tuple[InvoiceContribution, ReconciliationGroup]]:
+        """Các liên kết hiện hành của những dòng nguồn trong một batch."""
+
+        parameters: list[Any] = [int(batch_id)]
+        index_filter = ""
+        if source_item_indices is not None:
+            indices = sorted({int(value) for value in source_item_indices})
+            if not indices:
+                return []
+            placeholders = ",".join("?" for _ in indices)
+            index_filter = f"AND c.source_item_index IN ({placeholders})"
+            parameters.extend(indices)
+        rows = self.database.query_all(
+            f"""
+            SELECT c.id AS contribution_id, g.id AS group_id
+            FROM sea_freight_invoice_contributions AS c
+            JOIN sea_freight_reconciliation_groups AS g ON g.id = c.group_id
+            WHERE c.source_batch_id = ?
+              AND c.status IN ('ACTIVE','DUPLICATE')
+              AND g.is_current = 1
+              AND g.status != 'CANCELLED'
+              {index_filter}
+            ORDER BY g.id, c.id
+            """,
+            tuple(parameters),
+        )
+        result: list[tuple[InvoiceContribution, ReconciliationGroup]] = []
+        for row in rows:
+            contribution = self.get_contribution(int(row["contribution_id"]))
+            group = self.get_group(int(row["group_id"]))
+            if contribution is not None and group is not None:
+                result.append((contribution, group))
+        return result
+
+    def remove_source_link(self, contribution_id: int) -> ReconciliationGroup:
+        """Loại một HĐ/tham chiếu hiện hành và giữ lại lịch sử truy vết."""
+
+        timestamp = _now()
+        with self.database.transaction(immediate=True) as connection:
+            row = connection.execute(
+                """
+                SELECT group_id, status
+                FROM sea_freight_invoice_contributions
+                WHERE id = ? AND status IN ('ACTIVE','DUPLICATE')
+                """,
+                (int(contribution_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError("Không tìm thấy liên kết hóa đơn đang hoạt động.")
+            group_id = int(row["group_id"])
+            status = str(row["status"])
+            connection.execute(
+                """
+                UPDATE sea_freight_invoice_contributions
+                SET status = 'REMOVED', removed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, timestamp, int(contribution_id)),
+            )
+            if status == "ACTIVE":
+                connection.execute(
+                    """
+                    UPDATE sea_freight_reconciliation_groups
+                    SET invoice_conflict_accepted = 0
+                    WHERE id = ?
+                    """,
+                    (group_id,),
+                )
+                self._recalculate(connection, group_id, timestamp)
+            self._event(
+                connection,
+                group_id,
+                "SOURCE_ROW_REMOVED",
+                {"contribution_id": int(contribution_id), "link_status": status},
+                timestamp,
+            )
+        group = self.get_group(group_id)
+        assert group is not None
+        return group
+
+    def reindex_source_batch(
+        self,
+        batch_id: int,
+        source_index_map: dict[int, int],
+    ) -> None:
+        """Cập nhật vị trí nguồn sau khi người dùng xóa dòng khỏi batch."""
+
+        normalized = {
+            int(old_index): int(new_index)
+            for old_index, new_index in source_index_map.items()
+        }
+        timestamp = _now()
+        with self.database.transaction(immediate=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT c.id, c.source_item_index
+                FROM sea_freight_invoice_contributions AS c
+                JOIN sea_freight_reconciliation_groups AS g ON g.id = c.group_id
+                WHERE c.source_batch_id = ?
+                  AND c.status IN ('ACTIVE','DUPLICATE')
+                  AND g.is_current = 1
+                  AND g.status != 'CANCELLED'
+                """,
+                (int(batch_id),),
+            ).fetchall()
+            for row in rows:
+                old_index = int(row["source_item_index"])
+                if old_index not in normalized:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE sea_freight_invoice_contributions
+                    SET source_item_index = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (normalized[old_index], timestamp, int(row["id"])),
+                )
+
+            owned_groups = connection.execute(
+                """
+                SELECT id
+                FROM sea_freight_reconciliation_groups
+                WHERE primary_source_batch_id = ? AND is_current = 1
+                """,
+                (int(batch_id),),
+            ).fetchall()
+            for row in owned_groups:
+                group_id = int(row["id"])
+                primary = connection.execute(
+                    """
+                    SELECT source_batch_id, source_item_index
+                    FROM sea_freight_invoice_contributions
+                    WHERE group_id = ?
+                      AND status IN ('ACTIVE','DUPLICATE')
+                      AND source_batch_id IS NOT NULL
+                    ORDER BY CASE WHEN source_batch_id = ? THEN 0 ELSE 1 END,
+                             source_item_index, id
+                    LIMIT 1
+                    """,
+                    (group_id, int(batch_id)),
+                ).fetchone()
+                if primary is None:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE sea_freight_reconciliation_groups
+                    SET primary_source_batch_id = ?, primary_source_item_index = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        int(primary["source_batch_id"]),
+                        int(primary["source_item_index"]),
+                        timestamp,
+                        group_id,
+                    ),
+                )
+
     def posting_groups_for_source_batch(self, batch_id: int) -> list[ReconciliationGroup]:
         """Các hồ sơ hiện hành được batch sở hữu hoặc liên kết để ghi BK."""
 

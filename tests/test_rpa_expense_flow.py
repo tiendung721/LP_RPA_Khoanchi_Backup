@@ -5,16 +5,21 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QPushButton
 
 from app.config import AppSettings
+from app.database import Database
+from app.repositories.excel_draft_repository import ExcelDraftRepository
 from app.rpa_expense import (
     RPA_STATUS_IMPORTED,
     RPA_STATUS_NOT_IMPORTED,
     RpaExpenseService,
     RpaExpenseStatusService,
+    RpaChoiceService,
 )
 from app.rpa_expense.launcher import RpaExpenseBatLauncher
 from app.rpa_expense.service import STATUS_HEADER, SUMMARY_HEADERS
+from app.ui.rpa_expense_controller import RpaExpenseController
 from app.ui.rpa_expense_dialog import RpaLatestDataDialog, RpaSqtSelectionDialog
 
 
@@ -159,6 +164,62 @@ def test_dialog_keeps_imported_sqt_selectable(qtbot, tmp_path: Path) -> None:
     assert dialog.selected_sqt == ["102"]
 
 
+def test_dialog_filters_groups_and_preserves_hidden_choices(
+    qtbot, tmp_path: Path
+) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    plan = RpaExpenseService(_settings(tmp_path, bk)).analyze_sheet("T07 26")
+    dialog = RpaSqtSelectionDialog(plan, initial_selected_sqt=["102"])
+    qtbot.addWidget(dialog)
+
+    assert dialog.filter_buttons[None].text() == "Tất cả (2)"
+    assert (
+        dialog.filter_buttons[RPA_STATUS_NOT_IMPORTED].text()
+        == "Chưa nhập (1)"
+    )
+    assert dialog.filter_buttons[RPA_STATUS_IMPORTED].text() == "Đã nhập (1)"
+    assert dialog.table.item(0, 2).text() == "● Chưa nhập"
+    assert dialog.table.item(1, 2).text() == "✓ Đã nhập"
+    assert "1 nhập lại" in dialog.selection_summary.text()
+
+    dialog.filter_buttons[RPA_STATUS_NOT_IMPORTED].click()
+    visible_sqt = [
+        dialog.table.item(row, 1).text()
+        for row in range(dialog.table.rowCount())
+        if not dialog.table.isRowHidden(row)
+    ]
+    assert visible_sqt == ["101"]
+
+    dialog.findChild(QPushButton, "selectVisibleRpaSqtButton").click()
+    assert dialog.selected_sqt == ["101", "102"]
+    assert "1 chưa nhập, 1 nhập lại" in dialog.selection_summary.text()
+
+    dialog.findChild(QPushButton, "clearVisibleRpaSqtButton").click()
+    assert dialog.selected_sqt == ["102"]
+    assert "0 chưa nhập, 1 nhập lại" in dialog.selection_summary.text()
+
+
+def test_dialog_sorts_money_and_sqt_by_numeric_value(qtbot, tmp_path: Path) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    plan = RpaExpenseService(_settings(tmp_path, bk)).analyze_sheet("T07 26")
+    dialog = RpaSqtSelectionDialog(plan)
+    qtbot.addWidget(dialog)
+
+    dialog.sort_combo.setCurrentIndex(dialog.sort_combo.findData("total_asc"))
+    assert [
+        dialog.table.item(row, 1).text()
+        for row in range(dialog.table.rowCount())
+    ] == ["102", "101"]
+
+    dialog.sort_combo.setCurrentIndex(dialog.sort_combo.findData("sqt_desc"))
+    assert [
+        dialog.table.item(row, 1).text()
+        for row in range(dialog.table.rowCount())
+    ] == ["102", "101"]
+
+
 def test_zero_amount_sqt_can_be_selected_singly_or_in_bulk(
     qtbot,
     tmp_path: Path,
@@ -288,3 +349,104 @@ def test_latest_rpa_dialog_displays_every_sent_sqt(qtbot) -> None:
     assert dialog.table.rowCount() == 2
     assert dialog.table.item(0, 0).text() == "101"
     assert dialog.table.item(1, 0).text() == "102"
+
+
+def test_rpa_choices_restore_imported_sqt_and_reject_changed_amounts(
+    tmp_path: Path,
+) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    service = RpaExpenseService(_settings(tmp_path, bk))
+    database = Database(tmp_path / "app.db")
+    choices = RpaChoiceService(ExcelDraftRepository(database))
+    plan = service.analyze_sheet("T07 26")
+
+    choices.save_selection(plan, ["101", "102"])
+    restored = choices.restore_selection(plan)
+    assert restored.selected_sqt == ("101", "102")
+    assert restored.restored_count == 2
+
+    workbook = load_workbook(bk, data_only=False)
+    try:
+        workbook["T07 26"].cell(2, 4).value = 999
+        workbook.save(bk)
+    finally:
+        workbook.close()
+    changed = choices.restore_selection(service.analyze_sheet("T07 26"))
+    assert changed.selected_sqt == ("102",)
+    assert changed.skipped_sqt == ("101",)
+    database.close()
+
+
+def test_rpa_choice_dialog_prefills_and_clears_remembered_selection(
+    qtbot, tmp_path: Path
+) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    plan = RpaExpenseService(_settings(tmp_path, bk)).analyze_sheet("T07 26")
+    cleared: list[bool] = []
+    dialog = RpaSqtSelectionDialog(
+        plan,
+        initial_selected_sqt=["101", "102"],
+        restore_info={"found": True, "saved_count": 2, "restored_count": 2},
+        clear_saved_callback=lambda: cleared.append(True) or True,
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.selected_sqt == ["101", "102"]
+    dialog.findChild(QPushButton, "clearRememberedRpaSelectionButton").click()
+    assert cleared == [True]
+    assert dialog.selected_sqt == []
+
+
+def test_rpa_choices_are_isolated_by_workbook_and_sheet(tmp_path: Path) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    service = RpaExpenseService(_settings(tmp_path, bk))
+    database = Database(tmp_path / "app.db")
+    choices = RpaChoiceService(ExcelDraftRepository(database))
+    plan = service.analyze_sheet("T07 26")
+    other_sheet_plan = type(plan)(
+        bk_path=plan.bk_path,
+        sheet_name="T08 26",
+        fingerprint=plan.fingerprint,
+        items=plan.items,
+    )
+
+    choices.save_sheet(bk, "T07 26")
+    choices.save_selection(plan, ["101"])
+    choices.save_selection(other_sheet_plan, ["102"])
+
+    candidates = service.sheet_candidates()
+    assert choices.restore_sheet(bk, candidates) == "T07 26"
+    assert choices.restore_selection(plan).selected_sqt == ("101",)
+    assert choices.restore_selection(other_sheet_plan).selected_sqt == ("102",)
+    database.close()
+
+
+def test_rpa_controller_keeps_choices_when_launch_fails(qtbot, tmp_path: Path) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    service = RpaExpenseService(_settings(tmp_path, bk))
+    database = Database(tmp_path / "app.db")
+    choices = RpaChoiceService(ExcelDraftRepository(database))
+    plan = service.analyze_sheet("T07 26")
+
+    class FailingLauncher:
+        @staticmethod
+        def launch(_prepared):
+            raise RuntimeError("BAT không khởi chạy")
+
+    controller = RpaExpenseController(service, FailingLauncher(), choices)
+    failures: list[Exception] = []
+    controller.failed.connect(failures.append)
+    try:
+        controller.launch(plan, ["102"])
+        qtbot.waitUntil(lambda: len(failures) == 1)
+
+        restored = choices.restore_selection(plan)
+        assert restored.selected_sqt == ("102",)
+        assert restored.status == "FAILED"
+    finally:
+        controller.shutdown()
+        database.close()

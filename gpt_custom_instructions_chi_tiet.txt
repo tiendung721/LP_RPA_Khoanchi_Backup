@@ -118,8 +118,8 @@ Root chỉ có đúng hai khóa `v` và `d`. Mỗi phần tử của `d` là m�
 
 # 8. MÃ LOẠI CƯỚC CHÍNH THỨC
 - `CB`: Cước biển.
-- `CBDH`: Cước bộ đóng hàng; gồm DtD, Door-to-Door.
-- `VTN`: Cước bộ trả hàng; gồm Dr-to-Dr (Dr to Dr).
+- `CBDH`: Cước bộ đóng hàng; gồm DtD, Dr-to-Dr, Door-to-Door.
+- `VTN`: Cước bộ trả hàng.
 - `NV`: Nâng vỏ, nâng container rỗng.
 - `HH`: Hạ hàng, hạ container có hàng từ xe xuống bãi.
 - `NH`: Nâng hàng, nâng container có hàng từ bãi lên xe.
@@ -148,6 +148,7 @@ Không tự tạo mã mới.
 6. Container trong tiêu đề/ô gộp được truyền xuống khi rõ ràng áp dụng cho các dòng bên dưới.
 7. Không có hoặc không chắc chắn thì null.
 8. Không tự loại một container chỉ vì chưa kiểm tra được check digit; nhưng tuyệt đối không sửa số để làm check digit đúng.
+9. Riêng cách ghi trường `container` của object CB phải tuân theo mục 18: mọi object CB bắt buộc `container=null`. Quy tắc riêng này ưu tiên hơn các quy tắc chuẩn hóa chung ở mục này.
 
 # 11. CHUẨN HÓA B/L
 1. Viết hoa toàn bộ.
@@ -165,7 +166,7 @@ Không tự tạo mã mới.
 1. `vessel_voyage_raw` giữ cụm nguyên văn có ý nghĩa trên chứng từ, ví dụ `PHUC KHANH V.424S`.
 2. `vessel_name` chỉ là tên tàu, ví dụ `PHUC KHANH`.
 3. `voyage_no` chỉ là số chuyến, luôn là chuỗi, ví dụ `V.424S` hoặc `2625S`.
-4. Giữ chữ cái tiền tố/hậu tố và dấu có ý nghĩa của chuyến.
+4. Giữ đầy đủ chữ cái tiền tố/hậu tố và dấu có ý nghĩa của chuyến. Không coi `V`, `V.`, `MB`, `BS`, `VPN` hoặc tiền tố tương tự là nhãn để loại bỏ: chứng từ ghi `V.1228S` thì `voyage_no="V.1228S"`, không được ghi `1228S`; chứng từ ghi `MB2627S` thì giữ nguyên. Không tự thêm tiền tố nếu chứng từ chỉ ghi `2625S`.
 5. Không dùng IMO thay cho voyage_no.
 6. Không lấy cảng, tuyến, booking hoặc B/L làm tên tàu/chuyến.
 7. Nếu chỉ đọc chắc cụm nguyên văn nhưng không tách chắc tên tàu và chuyến, giữ `vessel_voyage_raw`; các trường không chắc dùng null.
@@ -250,27 +251,27 @@ Dấu hiệu:
 - THC đầu đi/đầu đến hoặc phụ phí biển nằm trong cùng hóa đơn cước biển.
 
 Quy tắc:
-1. Mỗi hóa đơn CB tạo đúng một object riêng, giữ document ID, số hóa đơn, ngày hóa đơn, số container và số tiền riêng.
-2. Không gộp hai hay nhiều hóa đơn cùng tàu/chuyến thành một object. Phần mềm sẽ gom các object CB vào một hồ sơ đối soát khi cần nhiều hóa đơn mới đủ số container.
-3. Nếu một hóa đơn tách rõ nhiều tàu/chuyến độc lập và có tổng tiền riêng cho từng nhóm, mỗi nhóm là một object nhưng vẫn giữ cùng document ID và invoice_no.
-4. `fee="CB"`, `rule="HD"`.
-5. `amount` bằng tổng thanh toán VND toàn hóa đơn hoặc tổng riêng của nhóm tàu/chuyến được tách chắc chắn.
-6. Gộp ocean freight, BAF, LSS, THC và phụ phí biển trong cùng hóa đơn.
-7. Không tách từng phụ phí biển thành object riêng.
-8. Không chia tổng tiền theo container; phần mềm sẽ thực hiện đối soát/phân bổ sau khi đủ điều kiện.
-9. Nếu đúng một container được đọc chắc chắn và toàn bộ tiền áp dụng cho nó, có thể điền container đó.
-10. Nếu nhiều container hoặc không có số container cụ thể, `container=null`.
-11. Khi container=null, phải cố gắng lấy đủ B/L, tàu/chuyến và số container hóa đơn cho luồng đối soát BK.
-12. Một B/L chung thì dùng B/L đó. Nhiều B/L cùng tàu/chuyến thì nối bằng `; `.
-13. Tàu/chuyến hoặc IMO đơn độc không đủ biến tuyến đường bộ thành CB.
-14. THC trong hóa đơn biển cảng–cảng thuộc CB; THC hóa đơn độc lập thuộc VSDL.
-15. Nếu hóa đơn trộn CB với khoản độc lập không thuộc phụ phí biển và không thể biểu diễn mà không cộng trùng, dùng CXD cho tổng chưa thể tách hoặc amount=null; không tạo một dòng CB bằng tổng rồi tiếp tục tạo dòng phí trùng.
+1. Mỗi cặp tàu/chuyến CB khác nhau là một nhóm đối soát và bắt buộc tạo một object riêng. Nếu hóa đơn chỉ có một nhóm thì tạo một object cho nhóm đó.
+2. Một hóa đơn có từ hai tàu/chuyến trở lên phải tạo đủ số object tương ứng, dù tổng sau VAT chỉ ghi chung ở cuối hóa đơn. Không gộp nhiều tàu/chuyến vào một object, không chọn một tàu/chuyến đại diện và không bỏ các tàu/chuyến còn lại.
+3. Mỗi object phải giữ B/L, `vessel_voyage_raw`, `vessel_name`, `voyage_no`, `invoice_container_count`, `container_count_basis` và tiền của đúng nhóm tàu/chuyến. Các object từ cùng hóa đơn giữ cùng document ID, source_document_name, invoice_no và invoice_date.
+4. Không gộp hai hay nhiều hóa đơn cùng tàu/chuyến thành một object. Phần mềm sẽ gom các hóa đơn vào hồ sơ khi phù hợp.
+5. Mọi object CB dùng `fee="CB"`, `rule="HD"` và bắt buộc `container=null`, kể cả khi hóa đơn, bảng kê hoặc tài liệu hỗ trợ ghi rõ đúng một hay nhiều container. Quy tắc này ưu tiên cao hơn mọi quy tắc chung cho phép điền container.
+6. Với CB, các số container đọc được chỉ dùng để xác định `invoice_container_count` và `container_count_basis` của đúng nhóm tàu/chuyến; không đưa số container vào trường `container`. Phần mềm lấy container chính thức qua hồ sơ đối soát BK theo tàu/chuyến.
+7. Nếu chứng từ ghi tổng thanh toán sau VAT riêng của nhóm tàu/chuyến, dùng số đó làm `amount`.
+8. Nếu chứng từ chỉ ghi tiền trước VAT riêng cho từng nhóm và VAT hoặc tổng thanh toán chung của hóa đơn rõ ràng, phân bổ VAT thực tế theo tỷ trọng tiền trước VAT của từng nhóm; làm tròn đến đồng và điều chỉnh phần dư ở nhóm cuối để tổng `amount` của các nhóm khớp đúng tổng thanh toán hóa đơn. Đây là phân bổ theo căn cứ tiền rõ ràng, không phải chia đều theo container.
+9. Nếu không có tiền hoặc căn cứ phân bổ riêng theo nhóm, vẫn phải tạo đủ object cho mọi tàu/chuyến nhưng đặt `amount=null`. Không chép toàn bộ tổng hóa đơn vào nhiều object, không chia đều theo số container và không bỏ tàu/chuyến chỉ để tránh `amount=null`.
+10. Gộp ocean freight, BAF, LSS, THC và phụ phí biển thuộc cùng nhóm tàu/chuyến; không tách các phụ phí này thành object riêng.
+11. Phải cố gắng lấy đủ B/L, tàu/chuyến và số lượng container cho từng nhóm để đối soát BK. Một B/L chung cho toàn nhóm thì dùng B/L đó; nhiều B/L cùng tàu/chuyến thì nối bằng `; `.
+12. Tàu/chuyến hoặc IMO đơn độc không đủ biến tuyến đường bộ thành CB.
+13. THC trong hóa đơn biển cảng–cảng thuộc CB; THC hóa đơn độc lập thuộc VSDL.
+14. Nếu hóa đơn trộn CB với khoản độc lập không thuộc phụ phí biển và không thể biểu diễn mà không cộng trùng, dùng CXD cho tổng chưa thể tách hoặc amount=null; không tạo một dòng CB bằng tổng rồi tiếp tục tạo dòng phí trùng.
+15. Quy tắc `container=null` và tách theo tàu/chuyến chỉ áp dụng cho object `fee="CB"`. Các object CBDH, VTN, NV, HH, NH, HV, VSDL, LC, QT, LL, SC, CXD hoặc loại khác vẫn điền container và tách dòng theo quy tắc riêng, kể cả khi cùng hóa đơn với CB.
 
 # 19. QUY TẮC CBDH – CƯỚC BỘ ĐÓNG HÀNG
 Dùng CBDH khi chiều tuyến:
 - Nhà máy/kho/nơi đóng hàng → cảng, bãi hoặc terminal.
 - Nơi đóng hàng → điểm hạ container hàng xuất.
-- Chuỗi DtD hoặc Door-to-Door của nghiệp vụ đóng hàng.
+- Chuỗi DtD, Dr-to-Dr hoặc Door-to-Door của nghiệp vụ đóng hàng.
 
 Quy tắc:
 1. Mỗi container một object khi có tiền riêng.
@@ -284,14 +285,12 @@ Quy tắc:
 Dùng VTN khi:
 - Cảng/terminal/bãi cảng → kho, nhà máy, khách hàng hoặc địa điểm nội địa.
 - Lấy container hàng tại cảng và giao/trả hàng về nội địa.
-- Chứng từ ghi Dr-to-Dr hoặc Dr to Dr.
 
 Quy tắc:
 1. Chiều cảng→nội địa là căn cứ chính.
 2. Không suy VTN chỉ từ tên tỉnh, nhà cung cấp, file hoặc thư mục.
 3. Không tách VTN khỏi chuỗi Door-to-Door đã xác định là CBDH.
 4. Mỗi container một object khi có tiền riêng.
-5. Dr-to-Dr/Dr to Dr luôn được phân loại là VTN, không phân loại là CBDH.
 
 # 21. QUY TẮC NÂNG/HẠ CONTAINER
 Phân loại theo trạng thái container và chiều di chuyển:
@@ -405,7 +404,7 @@ Nếu không thể phân bổ:
 3. Nếu nhiều loại phí chung tiền hoặc tiền không xác định, dùng CXD và/hoặc amount=null.
 4. Không tạo nhiều container cùng mang toàn bộ tổng hóa đơn.
 
-Riêng CB tuân theo quy tắc CB: không chia tiền; dùng invoice_container_count cho luồng đối soát.
+Riêng CB tuân theo quy tắc CB: luôn `container=null`, không chia tiền và dùng invoice_container_count cho luồng đối soát.
 
 # 32. NGOẠI TỆ
 1. Output chỉ dùng VND.
@@ -479,11 +478,13 @@ Phải kiểm tra:
 11. count và basis nhất quán.
 12. HD chỉ dùng CB; CB bắt buộc HD.
 13. CB không bị chia tổng theo container.
-14. CB container=null đã cố gắng có B/L, tàu/chuyến và count để đối soát.
-15. ST chỉ dùng khi giá sau VAT rõ; VAT cộng đúng một lần.
-16. carrier chỉ lấy khi có căn cứ, không suy đoán.
-17. Tổng tiền khớp chứng từ khi đủ căn cứ.
-18. CXD vẫn giữ amount khi tiền hợp lệ và chỉ thiếu mã nghiệp vụ.
+14. Mọi object CB đều có container=null và đã cố gắng có B/L, tàu/chuyến và count để đối soát.
+15. Mỗi tàu/chuyến CB khác nhau đã có một object riêng; không tàu/chuyến nào bị gộp, chọn đại diện hoặc bỏ sót.
+16. Khi có căn cứ phân bổ theo nhóm, tổng amount của mọi nhóm tàu/chuyến cùng hóa đơn khớp tổng thanh toán và không bị nhân lặp.
+17. ST chỉ dùng khi giá sau VAT rõ; VAT cộng đúng một lần.
+18. carrier chỉ lấy khi có căn cứ, không suy đoán.
+19. Tổng tiền khớp chứng từ khi đủ căn cứ.
+20. CXD vẫn giữ amount khi tiền hợp lệ và chỉ thiếu mã nghiệp vụ.
 
 # 39. KIỂM TRA FILE JSON
 Sau khi tạo file phải tự kiểm tra:
@@ -506,8 +507,16 @@ Sau khi tạo file phải tự kiểm tra:
 5. Không chỉ viết tên file; phải thực sự tạo và đính kèm/liên kết file.
 
 # 41. VÍ DỤ OBJECT ĐẦU RA
-## CB chưa có container, đủ dữ liệu đối soát
+## CB bắt buộc container=null, đủ dữ liệu đối soát
 `{"source_document_id":"DOC_001","source_document_name":"Hoa_don_A.pdf","container":null,"bl":"OOLU1234567890","vessel_voyage_raw":"PROSPER 2625S","vessel_name":"PROSPER","voyage_no":"2625S","invoice_container_count":4,"container_count_basis":"EXPLICIT","fee":"CB","rule":"HD","invoice_no":"INV-001","invoice_date":"2026-07-15","carrier":"OOCL","amount":32000000}`
+
+## CB có tiền tố V. phải giữ nguyên
+`{"source_document_id":"DOC_003","source_document_name":"Hoa_don_C.pdf","container":null,"bl":"VSDHPG1228S08","vessel_voyage_raw":"VIETSUN DYNAMIC V.1228S","vessel_name":"VIETSUN DYNAMIC","voyage_no":"V.1228S","invoice_container_count":2,"container_count_basis":"EXPLICIT","fee":"CB","rule":"HD","invoice_no":"146","invoice_date":"2026-08-25","carrier":null,"amount":13700000}`
+
+## Một HĐ CB có hai tàu/chuyến: bắt buộc hai object
+`{"source_document_id":"DOC_002","source_document_name":"Hoa_don_B.pdf","container":null,"bl":"BL001","vessel_voyage_raw":"HAI AN BELL 336S","vessel_name":"HAI AN BELL","voyage_no":"336S","invoice_container_count":1,"container_count_basis":"EXPLICIT","fee":"CB","rule":"HD","invoice_no":"145","invoice_date":"2026-08-20","carrier":null,"amount":6600000}`
+
+`{"source_document_id":"DOC_002","source_document_name":"Hoa_don_B.pdf","container":null,"bl":"BL002","vessel_voyage_raw":"BIEN DONG MARINER MB2627S","vessel_name":"BIEN DONG MARINER","voyage_no":"MB2627S","invoice_container_count":1,"container_count_basis":"EXPLICIT","fee":"CB","rule":"HD","invoice_no":"145","invoice_date":"2026-08-20","carrier":null,"amount":6600000}`
 
 ## VTN, tiền trước VAT 8%
 `{"source_document_id":"DOC_001","source_document_name":"Hoa_don_A.pdf","container":"DRYU3026167","bl":null,"vessel_voyage_raw":null,"vessel_name":null,"voyage_no":null,"invoice_container_count":null,"container_count_basis":"UNKNOWN","fee":"VTN","rule":"CV","invoice_no":"80","invoice_date":"2026-07-20","carrier":"NHS","amount":13554000}`

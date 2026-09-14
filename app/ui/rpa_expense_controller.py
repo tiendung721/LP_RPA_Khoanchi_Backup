@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import RLock
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from PySide6.QtCore import QObject, Signal
 
-from app.rpa_expense import RpaExpenseBatLauncher, RpaExpenseService
+from app.rpa_expense import (
+    RpaChoiceService,
+    RpaExpenseBatLauncher,
+    RpaExpenseService,
+)
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RpaExpenseController(QObject):
@@ -24,17 +32,20 @@ class RpaExpenseController(QObject):
         self,
         service: RpaExpenseService,
         launcher: RpaExpenseBatLauncher,
+        choice_service: RpaChoiceService | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.service = service
         self.launcher = launcher
+        self.choice_service = choice_service
         self._executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="rpa-expense",
         )
         self._lock = RLock()
         self._phase: str | None = None
+        self._launch_plan: Any | None = None
 
     @property
     def is_busy(self) -> bool:
@@ -85,18 +96,65 @@ class RpaExpenseController(QObject):
             record_launched = getattr(self.service, "record_launched", None)
             if callable(record_launched):
                 record_launched(prepared)
+            if self.choice_service is not None:
+                try:
+                    self.choice_service.mark_launched(plan)
+                except Exception:
+                    LOGGER.exception(
+                        "Không cập nhật được trạng thái lựa chọn RPA đã khởi chạy."
+                    )
             return result
 
-        self._submit("launch", worker, self.launched)
+        def remember_choices() -> None:
+            if self.choice_service is not None:
+                self.choice_service.save_selection(plan, values)
+            self._launch_plan = plan
+
+        self._submit(
+            "launch",
+            worker,
+            self.launched,
+            before_submit=remember_choices,
+        )
 
     def load_latest_launched(self) -> dict[str, Any] | None:
         loader = getattr(self.service, "load_latest_launched", None)
         return loader() if callable(loader) else None
 
-    def _submit(self, phase: str, worker: Any, success_signal: Signal) -> None:
+    def remembered_sheet(self, candidates: Iterable[Any]) -> str | None:
+        if self.choice_service is None:
+            return None
+        return self.choice_service.restore_sheet(
+            self.service.bk_path, tuple(candidates)
+        )
+
+    def remember_sheet(self, sheet_name: str) -> None:
+        if self.choice_service is not None:
+            self.choice_service.save_sheet(self.service.bk_path, sheet_name)
+
+    def remembered_selection(self, plan: Any) -> Any | None:
+        if self.choice_service is None:
+            return None
+        return self.choice_service.restore_selection(plan)
+
+    def clear_remembered_selection(self, plan: Any) -> bool:
+        if self.choice_service is None:
+            return False
+        return self.choice_service.clear_selection(plan)
+
+    def _submit(
+        self,
+        phase: str,
+        worker: Any,
+        success_signal: Signal,
+        *,
+        before_submit: Callable[[], None] | None = None,
+    ) -> None:
         with self._lock:
             if self._phase is not None:
                 raise RuntimeError("Một tác vụ RPA khác đang được xử lý.")
+            if before_submit is not None:
+                before_submit()
             self._phase = phase
         self.started.emit(phase)
         try:
@@ -119,6 +177,17 @@ class RpaExpenseController(QObject):
         try:
             result = future.result()
         except Exception as exc:
+            if (
+                phase == "launch"
+                and self.choice_service is not None
+                and self._launch_plan is not None
+            ):
+                try:
+                    self.choice_service.mark_failed(self._launch_plan, exc)
+                except Exception:
+                    LOGGER.exception(
+                        "Không cập nhật được trạng thái lỗi cho lựa chọn RPA."
+                    )
             self._release(phase)
             self.failed.emit(exc)
             self.finished.emit(phase)
@@ -133,6 +202,8 @@ class RpaExpenseController(QObject):
         with self._lock:
             if self._phase == phase:
                 self._phase = None
+                if phase == "launch":
+                    self._launch_plan = None
 
     def shutdown(self, *, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait, cancel_futures=True)

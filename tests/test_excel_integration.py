@@ -974,15 +974,13 @@ def test_daily_sync_aborts_before_backup_when_bk_changed_after_analyze(
     assert not (runtime_dir / "Backup").exists()
 
 
-def test_posting_carries_previous_month_plan_once_and_reuses_target_row(
+def test_posting_writes_to_previous_month_match_without_carrying_a_new_row(
     tmp_path: Path,
 ) -> None:
-    first_ready = tmp_path / "first.json"
-    second_ready = tmp_path / "second.json"
+    ready = tmp_path / "ready.json"
     target = tmp_path / "BK 2026.xlsx"
     container = "DRYU3026167"
-    _save_ready(first_ready, [[container, None, "VTN", "ST", "INV-1", None, 100]])
-    _save_ready(second_ready, [[container, None, "HH", "ST", "INV-2", None, 250]])
+    _save_ready(ready, [[container, None, "VTN", "ST", "INV-1", None, 100]])
 
     workbook = Workbook()
     july = _new_full_posting_sheet(workbook, "T07 26")
@@ -994,75 +992,37 @@ def test_posting_carries_previous_month_plan_once_and_reuses_target_row(
         closing_date="2026-07-10",
     )
     june = _new_full_posting_sheet(workbook, "T06 26")
-    source_values = _add_full_plan_row(
+    _add_full_plan_row(
         june,
         2,
         sqt=619,
         container=container,
         closing_date="2026-06-10",
     )
-    june.cell(2, FULL_POSTING_LAYOUT["CB"][0]).value = 999
-    april = _new_full_posting_sheet(workbook, "T04 26")
-    _add_full_plan_row(
-        april,
-        2,
-        sqt=401,
-        container=container,
-        closing_date="2026-04-10",
-    )
     workbook.save(target)
     workbook.close()
 
-    database = Database(tmp_path / "app_state.db")
-    postings = ExpensePostingRepository(database)
-    first_service = _posting_service(
-        first_ready,
-        target,
-        tmp_path / "First",
-        posting_repository=postings,
+    service = _posting_service(ready, target, tmp_path / "Runtime")
+    plan = service.analyze(
+        sheet_name="T07 26"
     )
-    first_plan = first_service.analyze(sheet_name="T07 26")
 
-    assert not first_plan.conflicts
-    assert first_plan.items[0].selected_source_sheet == "T06 26"
-    assert first_plan.items[0].carry_forward_required
-    assert first_plan.items[0].target_row == 3
-    first_result = first_service.apply(first_plan, {})
-    assert first_result.backup_path is not None
+    assert not plan.conflicts
+    assert plan.items[0].sheet_name == "T06 26"
+    assert plan.items[0].selected_source_sheet == "T06 26"
+    assert plan.items[0].source_sqt == 619
+    assert plan.items[0].target_row == 2
+    assert not plan.items[0].carry_forward_required
+    service.apply(plan, {})
 
     workbook = load_workbook(target, data_only=False)
     try:
-        july = workbook["T07 26"]
-        copied = [july.cell(3, column).value for column in range(1, 12)]
-        assert copied == source_values[:11]
-        assert july.cell(3, 16).value == source_values[11]
-        assert july.cell(3, FULL_POSTING_LAYOUT["CB"][0]).value is None
-        assert july.cell(3, FULL_POSTING_LAYOUT["VTN"][0]).value == 100
+        assert workbook["T06 26"].cell(
+            2, FULL_POSTING_LAYOUT["VTN"][0]
+        ).value == 100
+        assert workbook["T07 26"].cell(3, 1).value is None
     finally:
         workbook.close()
-
-    second_service = _posting_service(
-        second_ready,
-        target,
-        tmp_path / "Second",
-        posting_repository=postings,
-    )
-    second_plan = second_service.analyze(sheet_name="T07 26")
-    assert not second_plan.conflicts
-    assert second_plan.items[0].selected_source_sheet == "T06 26"
-    assert not second_plan.items[0].carry_forward_required
-    assert second_plan.items[0].target_row == 3
-    second_service.apply(second_plan, {})
-
-    workbook = load_workbook(target, data_only=False)
-    try:
-        july = workbook["T07 26"]
-        assert july.cell(3, FULL_POSTING_LAYOUT["VTN"][0]).value == 100
-        assert july.cell(3, FULL_POSTING_LAYOUT["HH"][0]).value == 250
-        assert july.cell(4, 1).value is None
-    finally:
-        workbook.close()
-        database.close()
 
 
 def test_posting_allocates_two_documents_to_two_months_in_one_atomic_apply(
@@ -1166,6 +1126,112 @@ def test_posting_allocates_two_documents_to_two_months_in_one_atomic_apply(
     finally:
         workbook.close()
 
+
+def test_posting_detects_same_target_cell_reached_from_different_lookup_months(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready-v3.json"
+    target = tmp_path / "BK 2026.xlsx"
+    container = "DRYU3026167"
+    base = {
+        "container": container,
+        "bl": None,
+        "vessel_voyage_raw": None,
+        "vessel_name": None,
+        "voyage_no": None,
+        "invoice_container_count": None,
+        "container_count_basis": "UNKNOWN",
+        "fee": "VTN",
+        "rule": "ST",
+        "carrier": None,
+    }
+    rows = [
+        base
+        | {
+            "source_document_id": "DOC_001",
+            "source_document_name": "July.pdf",
+            "invoice_no": "INV-JULY",
+            "invoice_date": "2026-07-15",
+            "amount": 100,
+        },
+        base
+        | {
+            "source_document_id": "DOC_002",
+            "source_document_name": "June.pdf",
+            "invoice_no": "INV-JUNE",
+            "invoice_date": "2026-06-15",
+            "amount": 200,
+        },
+    ]
+    ready.write_text(
+        json.dumps({"v": 3, "d": rows}, ensure_ascii=False), encoding="utf-8"
+    )
+    workbook = Workbook()
+    july = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(
+        july,
+        2,
+        sqt=701,
+        container="MSCU1234567",
+        closing_date="2026-07-10",
+    )
+    june = _new_full_posting_sheet(workbook, "T06 26")
+    _add_full_plan_row(
+        june,
+        2,
+        sqt=619,
+        container=container,
+        closing_date="2026-06-10",
+    )
+    workbook.save(target)
+    workbook.close()
+    service = _posting_service(ready, target, tmp_path / "Runtime")
+
+    unassigned = service.analyze()
+    assignments = {
+        group.group_id: group.suggested_sheet
+        for group in unassigned.source_groups
+        if group.suggested_sheet is not None
+    }
+    plan = service.analyze(group_target_sheets=assignments)
+
+    conflict = next(
+        conflict
+        for conflict in plan.conflicts
+        if conflict.conflict_type is ConflictType.MULTIPLE_EXPENSE_SAME_CELL
+    )
+    assert conflict.sheet_name == "T06 26"
+    assert conflict.target_row == 2
+    assert sorted(conflict.details["item_indexes"]) == [0, 1]
+
+    refined = service.refine(
+        plan,
+        {
+            conflict.conflict_id: {
+                "action": "SELECT_SOURCE_ITEM",
+                "selected_source_item_index": 0,
+            }
+        },
+    )
+    assert not refined.conflicts
+
+    result = service.apply(refined, {})
+
+    assert result.posted_source_items == 1
+    assert result.skipped_source_items == 1
+    assert result.written_cells == 1
+    workbook = load_workbook(target, data_only=False)
+    try:
+        assert workbook["T06 26"].cell(
+            2, FULL_POSTING_LAYOUT["VTN"][0]
+        ).value == 100
+        assert workbook["T07 26"].cell(
+            2, FULL_POSTING_LAYOUT["VTN"][0]
+        ).value is None
+    finally:
+        workbook.close()
+
+
 def test_posting_can_split_one_same_month_document_by_invoice(tmp_path: Path) -> None:
     ready = tmp_path / "same-month.json"
     target = tmp_path / "BK.xlsx"
@@ -1214,7 +1280,7 @@ def test_posting_can_split_one_same_month_document_by_invoice(tmp_path: Path) ->
     service.cancel(split)
 
 
-def test_posting_three_month_window_handles_year_boundary(
+def test_posting_three_month_lookup_writes_to_match_across_year_boundary(
     tmp_path: Path,
 ) -> None:
     ready = tmp_path / "ready.json"
@@ -1255,11 +1321,13 @@ def test_posting_three_month_window_handles_year_boundary(
     )
 
     assert not plan.conflicts
+    assert plan.items[0].sheet_name == "T11 26"
     assert plan.items[0].selected_source_sheet == "T11 26"
     assert plan.items[0].source_sqt == 1101
+    assert not plan.items[0].carry_forward_required
 
 
-def test_posting_duplicate_container_across_months_requires_source_sheet(
+def test_posting_duplicate_container_across_lookup_months_requires_source_row(
     tmp_path: Path,
 ) -> None:
     ready = tmp_path / "ready.json"
@@ -1301,6 +1369,10 @@ def test_posting_duplicate_container_across_months_requires_source_sheet(
         "Kho A",
         "Kho A",
     ]
+    assert [candidate.departure_date for candidate in conflict.row_candidates] == [
+        "2026-07-30",
+        "2026-07-30",
+    ]
     refined = service.refine(
         plan,
         {
@@ -1312,9 +1384,25 @@ def test_posting_duplicate_container_across_months_requires_source_sheet(
         },
     )
     assert not refined.conflicts
+    assert refined.items[0].sheet_name == "T06 26"
     assert refined.items[0].selected_source_sheet == "T06 26"
     assert refined.items[0].source_sqt == 619
-    assert refined.items[0].carry_forward_required
+    assert refined.items[0].target_row == 2
+    assert not refined.items[0].carry_forward_required
+    result = service.apply(refined, {})
+    assert result.backup_path is not None
+
+    workbook = load_workbook(target, data_only=False)
+    try:
+        assert workbook["T06 26"].cell(
+            2, FULL_POSTING_LAYOUT["VTN"][0]
+        ).value == 100
+        assert workbook["T07 26"].cell(3, 1).value is None
+        assert workbook["T07 26"].cell(
+            2, FULL_POSTING_LAYOUT["VTN"][0]
+        ).value is None
+    finally:
+        workbook.close()
 
 
 def test_posting_keeps_normalized_duplicate_expenses_separate(

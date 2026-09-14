@@ -9,7 +9,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QDialog,
     QDialogButtonBox,
     QFrame,
     QGridLayout,
@@ -27,6 +26,8 @@ from PySide6.QtWidgets import (
 
 from app.sea_freight.contracts import GroupStatus, group_status_text
 
+from .app_dialog import AppDialog
+
 
 def _money(value: object) -> str:
     try:
@@ -40,7 +41,7 @@ def _parse_int(value: str) -> int:
     return int(text)
 
 
-class ReconciliationPeriodDialog(QDialog):
+class ReconciliationPeriodDialog(AppDialog):
     def __init__(
         self,
         *,
@@ -143,7 +144,7 @@ class ReconciliationPeriodDialog(QDialog):
         return int(candidate[1]), int(candidate[2])
 
 
-class SeaFreightReconciliationDialog(QDialog):
+class SeaFreightReconciliationDialog(AppDialog):
     changed = Signal()
     confirmed = Signal(object)
 

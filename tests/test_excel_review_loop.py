@@ -109,6 +109,88 @@ def test_conflict_dialog_reuses_choices_and_marks_only_latest_issues(qtbot) -> N
     assert "#fff7d6" in marked_widget.styleSheet()
 
 
+def test_conflict_problem_cell_opens_full_details_and_can_be_collapsed(qtbot) -> None:
+    full_reason = (
+        "Ô đích đang có số tiền khác với dữ liệu nguồn; hãy kiểm tra giá trị "
+        "hiện tại trước khi quyết định giữ nguyên hoặc ghi đè."
+    )
+    dialog = ConflictResolutionDialog(
+        [
+            {
+                **_conflict("amount", message=full_reason),
+                "container": "CONT700",
+                "bl": "BL-700",
+                "sheet_name": "T08 26",
+                "target_row": 35,
+                "target_cell": "Q35",
+            }
+        ]
+    )
+    qtbot.addWidget(dialog)
+    problem_column = dialog.COLUMNS.index("Vấn đề")
+
+    assert dialog.problem_detail_panel.isHidden()
+    dialog.table.cellClicked.emit(0, 0)
+    assert dialog.problem_detail_panel.isHidden()
+
+    dialog.table.cellClicked.emit(0, problem_column)
+
+    assert not dialog.problem_detail_panel.isHidden()
+    assert dialog._problem_detail_conflict_id == "amount"
+    assert full_reason in dialog.problem_detail_text.toPlainText()
+    assert "Container: CONT700" in dialog.problem_detail_context.text()
+    assert "Sheet: T08 26" in dialog.problem_detail_context.text()
+    assert "Ô: Q35" in dialog.problem_detail_context.text()
+
+    dialog.problem_detail_close_button.click()
+    assert dialog.problem_detail_panel.isHidden()
+
+
+def test_conflict_details_follow_id_after_sort_and_keep_original_reason(qtbot) -> None:
+    dialog = ConflictResolutionDialog(
+        [
+            {
+                **_conflict("b", message="Lý do ban đầu của B."),
+                "container": "ZZZ",
+            },
+            {
+                **_conflict("a", message="Lý do ban đầu của A."),
+                "container": "AAA",
+            },
+        ]
+    )
+    qtbot.addWidget(dialog)
+    dialog.show_issues(
+        [
+            CorrectionIssue(
+                issue_id="invalid:b",
+                message="Chưa chọn cách xử lý cho B.",
+                conflict_ids=("b",),
+            )
+        ]
+    )
+    dialog.table.sortItems(0, Qt.SortOrder.AscendingOrder)
+    problem_column = dialog.COLUMNS.index("Vấn đề")
+    row_b = next(
+        row
+        for row in range(dialog.table.rowCount())
+        if dialog.table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1) == "b"
+    )
+
+    dialog.table.cellClicked.emit(row_b, problem_column)
+    detail = dialog.problem_detail_text.toPlainText()
+
+    assert dialog._problem_detail_conflict_id == "b"
+    assert "Cần xử lý lại" in detail
+    assert "Chưa chọn cách xử lý cho B." in detail
+    assert "Lý do xung đột ban đầu" in detail
+    assert "Lý do ban đầu của B." in detail
+
+    dialog.set_review([_conflict("c")])
+    assert dialog.problem_detail_panel.isHidden()
+    assert dialog._problem_detail_conflict_id is None
+
+
 def test_controller_shows_only_new_conflicts_after_json_row_selection(qtbot) -> None:
     source_choice = {
         "conflict_id": "source-choice",

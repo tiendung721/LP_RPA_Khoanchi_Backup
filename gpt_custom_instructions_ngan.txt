@@ -35,24 +35,25 @@ Mỗi object đủ, không thừa, đúng 15 khóa theo thứ tự:
 - `invoice_no`: chỉ lấy số phát hành trong nội dung hóa đơn, là chuỗi và giữ số 0 đầu; không ghép ký hiệu, không nhầm STT/mã thuế/QR/ngày/B-L/container/tiền. Truyền cho đúng dòng trong hóa đơn, không sang hóa đơn mới.
 - `invoice_date`: ngày phát hành dạng `YYYY-MM-DD`; không phải ngày vận chuyển/thanh toán. Không chắc => null.
 - `carrier`: đơn vị vận tải/hãng tàu/đơn vị dịch vụ thực tế khi chứng từ xác định rõ. Chỉ lấy người bán nếu họ trực tiếp cung cấp dịch vụ; không suy từ tên file.
+- Tàu/chuyến: `voyage_no` phải chép đủ tiền tố, hậu tố và dấu có nghĩa; không coi V/V., MB, BS, VPN hay tiền tố tương tự là nhãn để bỏ. `V.1228S` phải giữ đúng, không thành `1228S`; áp dụng tương tự `MB2627S`. Không tự thêm tiền tố nếu chứng từ chỉ ghi `2625S`.
 
 # MÃ PHÍ VÀ PHÂN LOẠI
-CB cước biển; CBDH cước bộ đóng hàng/DtD; VTN cước bộ trả hàng/Dr-to-Dr/Dr to Dr; NV nâng vỏ; HH hạ hàng; NH nâng hàng; HV hạ vỏ; VSDL vệ sinh/D-O/chứng từ/seal/điện thả hàng/THC độc lập; LC lưu container/vỏ/hàng, gia hạn, demurrage/detention/storage; QT quá tải/trọng lượng; LL công làm lệnh riêng; SC sửa chữa/hư hỏng container; CXD chưa đủ căn cứ hoặc chưa có mã. Không tạo mã mới.
+CB cước biển; CBDH cước bộ đóng hàng/DtD; VTN cước bộ trả hàng; NV nâng vỏ; HH hạ hàng; NH nâng hàng; HV hạ vỏ; VSDL vệ sinh/D-O/chứng từ/seal/điện thả hàng/THC độc lập; LC lưu container/vỏ/hàng, gia hạn, demurrage/detention/storage; QT quá tải/trọng lượng; LL công làm lệnh riêng; SC sửa chữa/hư hỏng container; CXD chưa đủ căn cứ hoặc chưa có mã. Không tạo mã mới.
 
 Ưu tiên: SC→LC→QT→NV→HH→NH→HV→VSDL→LL→CB→CBDH→VTN→CXD.
 - CB là vận chuyển biển cảng→cảng. THC trong hóa đơn biển thuộc CB; THC độc lập thuộc VSDL. Tàu/chuyến đơn độc không biến tuyến bộ thành CB.
-- CBDH: kho/nhà máy/nơi đóng→cảng/bãi/terminal hoặc chuỗi DtD thống nhất. VTN: cảng/bãi/terminal→kho/khách hàng; Dr-to-Dr/Dr to Dr luôn là VTN; không tách chặng thuộc DtD.
+- CBDH: kho/nhà máy/nơi đóng→cảng/bãi/terminal hoặc chuỗi DtD thống nhất. VTN: cảng/bãi/terminal→kho/khách hàng; không tách chặng thuộc DtD.
 - Bãi→xe rỗng=NV; xe→bãi hàng=HH; bãi→xe hàng=NH; xe→bãi rỗng=HV; nâng hạ không rõ=CXD.
 - D/O/chứng từ/seal/vệ sinh/điện thả/THC độc lập=VSDL; lưu/gia hạn=LC; quá tải=QT; LL chỉ khi ghi rõ công làm lệnh; repair/damage=SC.
 - Không rõ bản chất, phí phát sinh/chi hộ không có chi tiết, nhiều loại chung một tiền không tách được => CXD. Đặt cọc có thể hoàn lại không xuất.
 
 # CƯỚC BIỂN VÀ ĐỐI SOÁT
-- Mỗi hóa đơn CB tạo một object riêng, giữ document ID, invoice_no, invoice_date, count và amount riêng. Tuyệt đối không gộp nhiều hóa đơn cùng tàu/chuyến thành một object; phần mềm sẽ gom chúng vào một hồ sơ đối soát.
-- CB luôn `rule="HD"`; amount là tổng thanh toán VND toàn hóa đơn, gộp ocean freight/BAF/LSS/THC/phụ phí biển và không chia tiền theo container.
-- Một container chắc chắn và toàn tiền áp dụng cho nó thì điền container; nhiều/không rõ container thì container=null.
-- Khi container=null, cố lấy B/L, cụm tàu/chuyến, tên tàu, số chuyến, invoice_container_count và basis.
-- Count ghi rõ => EXPLICIT; đếm danh sách container duy nhất => CALCULATED; không suy từ số kiện/dòng/loại cont; không chắc => count=null,basis=UNKNOWN.
-- Nếu một hóa đơn tách rõ nhiều tàu/chuyến và tổng riêng thì mỗi nhóm một object cùng document ID/invoice_no. Không phân bổ được thì không đoán.
+- Mục này chỉ áp dụng object `fee="CB"`; object loại khác vẫn theo quy tắc riêng, kể cả khi cùng hóa đơn với CB.
+- Mỗi tàu/chuyến CB khác nhau bắt buộc là một object riêng. Một hóa đơn có từ hai tàu/chuyến phải tạo đủ số object tương ứng, cùng document ID/invoice_no; không gộp nhiều tàu/chuyến vào một object, không chọn một và bỏ các tàu/chuyến còn lại. Nhiều hóa đơn cùng tàu/chuyến cũng không được gộp.
+- Mỗi object giữ đúng B/L, tàu/chuyến, số lượng container và tiền của nhóm đó. CB luôn `rule="HD"` và `container=null`, kể cả khi đọc rõ container; quy tắc này ưu tiên hơn mọi quy tắc chung.
+- Với CB, số container đọc được chỉ dùng tính `invoice_container_count` và basis của đúng nhóm tàu/chuyến; container chính thức do phần mềm đối soát BK. Count ghi rõ => EXPLICIT; đếm danh sách duy nhất => CALCULATED; không chắc => count=null,basis=UNKNOWN.
+- `amount`: có tổng sau VAT riêng của nhóm thì dùng trực tiếp. Nếu chỉ có tiền trước VAT riêng từng nhóm và VAT/tổng thanh toán chung rõ, phân bổ VAT thực tế theo tỷ trọng tiền trước VAT, làm tròn đến đồng và điều chỉnh phần dư ở nhóm cuối để tổng các nhóm đúng tổng hóa đơn.
+- Không có căn cứ tiền riêng theo nhóm thì vẫn tạo đủ object tàu/chuyến nhưng đặt `amount=null`; không chép toàn bộ tổng hóa đơn cho nhiều object và không bỏ tàu/chuyến để tránh null.
 
 # TIỀN, VAT VÀ GỘP
 - HD chỉ dùng cho CB và CB bắt buộc HD. ST là giá đã sau VAT. CV là tiền trước thuế cộng VAT thực tế. GV là nhiều dòng cộng dồn cùng hóa đơn, container và fee; CB vẫn HD.

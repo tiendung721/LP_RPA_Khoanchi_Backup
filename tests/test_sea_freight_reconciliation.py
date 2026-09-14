@@ -19,6 +19,7 @@ from app.sea_freight import (
     GroupStatus,
     SeaFreightReconciliationService,
     SeaFreightRepository,
+    VesselVoyageResolutionKind,
     VesselVoyageNotFoundError,
     iso6346_check_digit,
     normalize_match_key,
@@ -166,9 +167,246 @@ def test_matcher_normalizes_exact_text_and_ranks_bk_suggestions(tmp_path: Path) 
     )
 
     assert exact.container_count == 1
-    assert exact.vessel_voyage_raw == "phuc khanh V 424S"
+    assert exact.vessel_voyage_raw == "PHÚC KHANH / V.424S"
+    assert exact.canonical_vessel_name == "PHÚC KHANH"
+    assert exact.canonical_voyage_no == "V.424S"
     assert suggestions[0].vessel_voyage == "NEW VISION 2610S"
     assert suggestions[0].container_count == 2
+
+
+@pytest.mark.parametrize(
+    ("bk_value", "input_voyage", "canonical_voyage"),
+    [
+        ("VIETSUN DYNAMIC V.1228S", "1228S", "V.1228S"),
+        ("BIEN DONG MARINER MB2627S", "2627S", "MB2627S"),
+        ("BIEN DONG STAR BS2627S", "2627S", "BS2627S"),
+        ("VIMC PIONEER VPN2619S", "2619S", "VPN2619S"),
+        ("TEST SHIP ZX123S", "123S", "ZX123S"),
+        ("VIETSUN DYNAMIC 1228S", "V.1228S", "1228S"),
+    ],
+)
+def test_matcher_auto_resolves_unique_missing_voyage_prefix(
+    tmp_path: Path,
+    bk_value: str,
+    input_voyage: str,
+    canonical_voyage: str,
+) -> None:
+    vessel_name = bk_value[: -len(canonical_voyage)].strip()
+    path = _write_vessel_bk(tmp_path, [(bk_value, _container(1))])
+
+    snapshot = BkVesselMatcher().snapshot(
+        path,
+        "T08 26",
+        vessel_voyage_raw=f"{vessel_name} {input_voyage}",
+        vessel_name=vessel_name,
+        voyage_no=input_voyage,
+    )
+
+    assert snapshot.resolution_kind is VesselVoyageResolutionKind.AUTO_ALIAS
+    assert snapshot.canonical_voyage_no == canonical_voyage
+    assert snapshot.vessel_voyage_raw == bk_value
+    assert snapshot.container_count == 1
+
+
+def test_exact_voyage_wins_when_prefixed_alias_also_exists(tmp_path: Path) -> None:
+    path = _write_vessel_bk(
+        tmp_path,
+        [
+            ("VIETSUN DYNAMIC 1228S", _container(1)),
+            ("VIETSUN DYNAMIC V.1228S", _container(2)),
+        ],
+    )
+
+    snapshot = BkVesselMatcher().snapshot(
+        path,
+        "T08 26",
+        vessel_voyage_raw="VIETSUN DYNAMIC 1228S",
+        vessel_name="VIETSUN DYNAMIC",
+        voyage_no="1228S",
+    )
+
+    assert snapshot.resolution_kind is VesselVoyageResolutionKind.EXACT
+    assert snapshot.vessel_voyage_raw == "VIETSUN DYNAMIC 1228S"
+    assert [item.container for item in snapshot.containers] == [_container(1)]
+
+
+def test_matcher_does_not_guess_when_prefix_alias_is_ambiguous(tmp_path: Path) -> None:
+    path = _write_vessel_bk(
+        tmp_path,
+        [
+            ("VIETSUN DYNAMIC V.1228S", _container(1)),
+            ("VIETSUN DYNAMIC MB1228S", _container(2)),
+        ],
+    )
+
+    snapshot = BkVesselMatcher().snapshot(
+        path,
+        "T08 26",
+        vessel_voyage_raw="VIETSUN DYNAMIC 1228S",
+        vessel_name="VIETSUN DYNAMIC",
+        voyage_no="1228S",
+    )
+
+    assert snapshot.resolution_kind is VesselVoyageResolutionKind.AMBIGUOUS
+    assert snapshot.container_count == 0
+    assert {item.voyage_no for item in snapshot.alias_candidates} == {
+        "V.1228S",
+        "MB1228S",
+    }
+    assert all(item.selectable for item in snapshot.alias_candidates)
+
+
+def test_service_returns_selectable_candidates_for_ambiguous_alias(
+    tmp_path: Path,
+) -> None:
+    path = _write_vessel_bk(
+        tmp_path,
+        [
+            ("VIETSUN DYNAMIC V.1228S", _container(1)),
+            ("VIETSUN DYNAMIC MB1228S", _container(2)),
+        ],
+    )
+    database = Database(tmp_path / "ambiguous-state.db")
+    repository = SeaFreightRepository(database)
+    row = _row(1, 6_850_000, "INV-AMBIGUOUS").copy_with(
+        vessel_voyage_raw="VIETSUN DYNAMIC 1228S",
+        vessel_name="VIETSUN DYNAMIC",
+        voyage_no="1228S",
+    )
+
+    with pytest.raises(VesselVoyageNotFoundError) as caught:
+        SeaFreightReconciliationService(repository).open_or_create(
+            row,
+            bk_path=path,
+            month=8,
+            year=2026,
+            source_batch_id=None,
+            source_item_index=0,
+            source_sha256="ambiguous-source",
+        )
+
+    assert caught.value.ambiguous is True
+    assert {item.voyage_no for item in caught.value.suggestions} == {
+        "V.1228S",
+        "MB1228S",
+    }
+    assert repository.list_groups(include_closed=True) == []
+    database.close()
+
+
+@pytest.mark.parametrize(
+    ("vessel_name", "voyage_no"),
+    [
+        ("VIETSUN DYNAMC", "1228S"),
+        ("VIETSUN DYNAMIC", "1228N"),
+        ("VIETSUN DYNAMIC", "MB1228S"),
+    ],
+)
+def test_matcher_never_auto_aliases_typo_suffix_or_different_prefix(
+    tmp_path: Path,
+    vessel_name: str,
+    voyage_no: str,
+) -> None:
+    path = _write_vessel_bk(
+        tmp_path, [("VIETSUN DYNAMIC V.1228S", _container(1))]
+    )
+
+    snapshot = BkVesselMatcher().snapshot(
+        path,
+        "T08 26",
+        vessel_voyage_raw=f"{vessel_name} {voyage_no}",
+        vessel_name=vessel_name,
+        voyage_no=voyage_no,
+    )
+
+    assert snapshot.resolution_kind is VesselVoyageResolutionKind.NOT_FOUND
+    assert snapshot.container_count == 0
+
+
+def test_alias_candidate_without_valid_container_is_not_applied(tmp_path: Path) -> None:
+    path = _write_vessel_bk(
+        tmp_path, [("VIETSUN DYNAMIC V.1228S", "NOT-A-CONTAINER")]
+    )
+
+    snapshot = BkVesselMatcher().snapshot(
+        path,
+        "T08 26",
+        vessel_voyage_raw="VIETSUN DYNAMIC 1228S",
+        vessel_name="VIETSUN DYNAMIC",
+        voyage_no="1228S",
+    )
+
+    assert snapshot.resolution_kind is VesselVoyageResolutionKind.NOT_FOUND
+    assert snapshot.alias_candidates == ()
+
+
+def test_service_persists_canonical_identity_and_keeps_ai_raw(tmp_path: Path) -> None:
+    path = _write_vessel_bk(
+        tmp_path,
+        [
+            ("VIETSUN DYNAMIC V.1228S", _container(1)),
+            ("VIETSUN DYNAMIC V.1228S", _container(2)),
+        ],
+    )
+    database = Database(tmp_path / "alias-state.db")
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(repository)
+    first = _row(1, 6_850_000, "INV-ALIAS-1").copy_with(
+        vessel_voyage_raw="VIETSUN DYNAMIC 1228S",
+        vessel_name="VIETSUN DYNAMIC",
+        voyage_no="1228S",
+    )
+    second = _row(1, 6_850_000, "INV-ALIAS-2").copy_with(
+        vessel_voyage_raw="VIETSUN DYNAMIC V.1228S",
+        vessel_name="VIETSUN DYNAMIC",
+        voyage_no="V.1228S",
+    )
+
+    outcome = service.open_or_create_many(
+        [(0, first), (1, second)],
+        bk_path=path,
+        month=8,
+        year=2026,
+        source_batch_id=None,
+        source_sha256="alias-source",
+    )
+
+    assert outcome.resolution_kind is VesselVoyageResolutionKind.AUTO_ALIAS
+    assert outcome.canonical_voyage_no == "V.1228S"
+    assert outcome.group.voyage_key == "V1228S"
+    contributions = repository.list_contributions(outcome.group.id)
+    assert {item.voyage_no for item in contributions} == {"V.1228S"}
+    assert contributions[0].vessel_voyage_raw == "VIETSUN DYNAMIC 1228S"
+
+    supplement = _row(1, 6_850_000, "INV-ALIAS-3").copy_with(
+        vessel_voyage_raw="VIETSUN DYNAMIC 1228S",
+        vessel_name="VIETSUN DYNAMIC",
+        voyage_no="1228S",
+    )
+    imported = service.import_supplement(
+        outcome.group.id,
+        [supplement],
+        source_batch_id=None,
+        source_sha256="alias-supplement",
+    )
+    assert imported.added_count == 1
+    assert repository.list_contributions(outcome.group.id)[-1].voyage_no == "V.1228S"
+    database.close()
+
+
+def test_custom_gpt_prompts_require_complete_voyage_prefixes() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for filename in (
+        "gpt_custom_instructions_chi_tiet.txt",
+        "gpt_custom_instructions_ngan.txt",
+    ):
+        instructions = (root / filename).read_text(encoding="utf-8")
+        assert "V.1228S" in instructions
+        assert "MB2627S" in instructions
+        assert "Không tự thêm tiền tố" in instructions
+
+    short = (root / "gpt_custom_instructions_ngan.txt").read_text(encoding="utf-8")
+    assert len(short) < 8_000
 
 
 def test_accumulates_pending_then_ready_and_allocates_exact_total(tmp_path: Path) -> None:
@@ -249,6 +487,34 @@ def test_cross_batch_duplicate_links_existing_posted_group_without_changing_tota
         working_path=tmp_path / "old.json",
         sha256="a" * 64,
     )
+
+
+def _write_vessel_bk(tmp_path: Path, vessels: list[tuple[str, str]]) -> Path:
+    path = tmp_path / "BK-alias.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "T08 26"
+    sheet.append(
+        [
+            "SQT PM",
+            "Ngày Đóng",
+            "Số Container",
+            "Số tấn",
+            "Loại hàng",
+            "Nơi đóng",
+            "Tên tàu",
+            "Ngày chạy",
+            "Dự kiến giao",
+            "Người nhận",
+            "VT biển",
+            "Vận chuyển",
+        ]
+    )
+    for index, (vessel, container) in enumerate(vessels, start=1):
+        sheet.append([index, None, container, None, None, None, vessel])
+    workbook.save(path)
+    workbook.close()
+    return path
     new_batch = batch_repository.create_batch(
         source_filename="new.json",
         source_output_path=tmp_path / "new.json",
@@ -791,6 +1057,149 @@ def test_invoice_fingerprint_includes_vessel_voyage_and_container_count() -> Non
     assert SeaFreightReconciliationService.contribution_fingerprint(
         different_voyage, source_sha256="same-source"
     ) != fingerprint
+
+
+def test_deleting_batch_row_removes_invoice_and_reindexes_remaining_source(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "state.db")
+    batch = BatchRepository(database).create_batch(
+        source_filename="source.json",
+        source_output_path=tmp_path / "source.json",
+        original_archive_path=tmp_path / "source.json",
+        working_path=tmp_path / "source.json",
+        sha256="e" * 64,
+    )
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=3))
+    )
+    outcome = service.open_or_create_many(
+        [(1, _row(1, 6_000_000, "INV-REMOVE")), (2, _row(2, 12_000_000, "INV-KEEP"))],
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=batch.id,
+        source_sha256=batch.sha256,
+    )
+
+    service.apply_batch_row_deletions(
+        source_batch_id=batch.id,
+        deleted_source_indices={0, 1},
+        remaining_source_indices={2: 1},
+    )
+
+    remaining = repository.list_contributions(outcome.group.id)
+    assert [(item.invoice_no, item.source_item_index) for item in remaining] == [
+        ("INV-KEEP", 1)
+    ]
+    assert repository.get_group(outcome.group.id).status is GroupStatus.PENDING
+    assert [
+        item.status for item in repository.list_contribution_history(outcome.group.id)
+    ] == ["REMOVED", "ACTIVE"]
+    database.close()
+
+
+def test_deleting_last_invoice_cancels_profile_and_allows_reconciliation_again(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "state.db")
+    batch_repository = BatchRepository(database)
+    first_batch = batch_repository.create_batch(
+        source_filename="first.json",
+        source_output_path=tmp_path / "first.json",
+        original_archive_path=tmp_path / "first.json",
+        working_path=tmp_path / "first.json",
+        sha256="f" * 64,
+    )
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=1))
+    )
+    invoice = _row(1, 6_500_000, "INV-REUSE")
+    original = service.open_or_create(
+        invoice,
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=first_batch.id,
+        source_item_index=0,
+        source_sha256=first_batch.sha256,
+    )
+
+    service.apply_batch_row_deletions(
+        source_batch_id=first_batch.id,
+        deleted_source_indices={0},
+        remaining_source_indices={},
+    )
+
+    assert repository.get_group(original.id).status is GroupStatus.CANCELLED
+    assert repository.list_contributions(original.id) == []
+    second_batch = batch_repository.create_batch(
+        source_filename="second.json",
+        source_output_path=tmp_path / "second.json",
+        original_archive_path=tmp_path / "second.json",
+        working_path=tmp_path / "second.json",
+        sha256="1" * 64,
+    )
+    repeated = service.open_or_create(
+        invoice,
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=second_batch.id,
+        source_item_index=0,
+        source_sha256=second_batch.sha256,
+    )
+    assert repeated.id != original.id
+    assert repeated.status is GroupStatus.READY
+    database.close()
+
+
+def test_deleting_invoice_from_completed_profile_preserves_old_revision(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "state.db")
+    batch = BatchRepository(database).create_batch(
+        source_filename="posted.json",
+        source_output_path=tmp_path / "posted.json",
+        original_archive_path=tmp_path / "posted.json",
+        working_path=tmp_path / "posted.json",
+        sha256="2" * 64,
+    )
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=1))
+    )
+    original = service.open_or_create(
+        _row(1, 7_000_000, "INV-COMPLETE"),
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=batch.id,
+        source_item_index=0,
+        source_sha256=batch.sha256,
+    )
+    repository.mark_allocated(original.id)
+    repository.mark_posted(original.id, None)
+
+    service.apply_batch_row_deletions(
+        source_batch_id=batch.id,
+        deleted_source_indices={0},
+        remaining_source_indices={},
+    )
+
+    revisions = repository.list_revisions(original.id)
+    assert len(revisions) == 2
+    current = next(item for item in revisions if item.is_current)
+    old = next(item for item in revisions if not item.is_current)
+    assert current.status is GroupStatus.CANCELLED
+    assert old.id == original.id
+    assert old.status is GroupStatus.POSTED
+    assert [item.status for item in repository.list_contribution_history(old.id)] == [
+        "ACTIVE"
+    ]
+    database.close()
 
 
 def test_completed_group_can_create_immutable_revision(tmp_path: Path) -> None:

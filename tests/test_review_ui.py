@@ -15,7 +15,11 @@ from PySide6.QtWidgets import (
 
 from app.ui.edit_row_dialog import EditRowDialog
 from app.ui.review_window import ReviewWindow, VesselVoyageNotFoundDialog
-from app.ui.review_table_model import ReviewRow, ReviewTableModel
+from app.ui.review_table_model import (
+    ContainerLoadPresentation,
+    ReviewRow,
+    ReviewTableModel,
+)
 from app.ui.sea_freight_center import ReconciliationPeriodDialog
 from app.database import Database
 from app.repositories.batch_repository import BatchRepository
@@ -349,6 +353,76 @@ def test_delete_multiple_selected_rows_respects_proxy_sort(qtbot, monkeypatch) -
         window.close()
 
 
+def test_delete_other_fee_is_allowed_when_batch_has_sea_freight_profile(
+    qtbot, monkeypatch
+) -> None:
+    window = ReviewWindow(_review_payload())
+    qtbot.addWidget(window)
+    sea_runtime_id = window.model.runtime_id_at(1)
+    window.model.replace_lookup_presentations(
+        {
+            sea_runtime_id: ContainerLoadPresentation(
+                status="READY",
+                message="Đã có hồ sơ",
+                session_id="12",
+            )
+        }
+    )
+    window.show()
+    window._select_source_row(0)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    try:
+        window.delete_selected_row()
+
+        assert window.model.rowCount() == 1
+        assert window.model.row_at(0).fee == "CB"
+        assert window._pending_deleted_source_indices == {0}
+    finally:
+        window.model.mark_clean()
+
+
+def test_deleted_rows_sync_with_reconciliation_only_when_saved(
+    qtbot, monkeypatch
+) -> None:
+    sync_calls: list[dict[str, Any]] = []
+    sea_service = SimpleNamespace(
+        apply_batch_row_deletions=lambda **kwargs: sync_calls.append(kwargs),
+        sync_batch_history=lambda *_args, **_kwargs: {},
+        repository=SimpleNamespace(groups_for_source_batch=lambda _batch_id: {}),
+    )
+    window = ReviewWindow(
+        _review_payload(),
+        sea_freight_service=sea_service,
+        save_handler=lambda *_args: None,
+    )
+    qtbot.addWidget(window)
+    window.show()
+    window._select_source_row(0)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    window.delete_selected_row()
+
+    assert sync_calls == []
+    assert window.save_working()
+    assert sync_calls == [
+        {
+            "source_batch_id": 7,
+            "deleted_source_indices": {0},
+            "remaining_source_indices": {1: 0},
+        }
+    ]
+    assert not window.model.dirty
+
+
 def test_ctrl_s_saves_once_and_clears_dirty(qtbot, monkeypatch) -> None:
     calls: list[tuple[int, Any]] = []
 
@@ -578,6 +652,47 @@ def test_vessel_not_found_dialog_lists_read_only_suggestions(qtbot) -> None:
     assert suggestion_text is not None
     assert "NEW VISION 2610S — 2 container" in suggestion_text.text()
     assert dialog.edit_button.text() == "Sửa dòng"
+
+
+def test_ambiguous_vessel_dialog_exposes_selectable_canonical_candidate(qtbot) -> None:
+    first = VesselVoyageSuggestion(
+        "VIETSUN DYNAMIC V.1228S",
+        2,
+        1.0,
+        vessel_name="VIETSUN DYNAMIC",
+        voyage_no="V.1228S",
+        vessel_key="VIETSUNDYNAMIC",
+        voyage_key="V1228S",
+        combined_key="VIETSUNDYNAMICV1228S",
+        selectable=True,
+    )
+    second = VesselVoyageSuggestion(
+        "VIETSUN DYNAMIC MB1228S",
+        1,
+        1.0,
+        vessel_name="VIETSUN DYNAMIC",
+        voyage_no="MB1228S",
+        vessel_key="VIETSUNDYNAMIC",
+        voyage_key="MB1228S",
+        combined_key="VIETSUNDYNAMICMB1228S",
+        selectable=True,
+    )
+    dialog = VesselVoyageNotFoundDialog(
+        VesselVoyageNotFoundError(
+            vessel_voyage="VIETSUN DYNAMIC 1228S",
+            bk_sheet="T08 26",
+            suggestions=(first, second),
+            ambiguous=True,
+        )
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.candidate_combo is not None
+    assert dialog.candidate_combo.count() == 2
+    dialog.candidate_combo.setCurrentIndex(1)
+    assert dialog.selected_suggestion == second
+    assert dialog.use_button is not None
+    assert dialog.use_button.text() == "Dùng tàu/chuyến đã chọn"
 
 
 def test_add_dialog_keeps_rule_selector(qtbot) -> None:

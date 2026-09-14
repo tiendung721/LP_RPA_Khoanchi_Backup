@@ -309,7 +309,7 @@ def test_cancel_action_is_not_replayed(tmp_path: Path) -> None:
     database.close()
 
 
-def test_dynamic_conflict_snapshot_is_saved_and_requires_same_fingerprint(
+def test_dynamic_conflict_snapshot_restores_per_row_after_fingerprint_changes(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "app.db")
@@ -334,5 +334,66 @@ def test_dynamic_conflict_snapshot_is_saved_and_requires_same_fingerprint(
 
     changed = _plan(tmp_path, _occupied_conflict(current=100))
     changed.target_fingerprint = WorkbookFingerprint(10, 20, "c" * 64)
-    assert drafts.restore_for_conflicts(changed, "posting", [dynamic]) == {}
+    restored = drafts.restore_with_info(changed, "posting")
+    assert restored.target_changed
+    assert drafts.restore_for_conflicts(changed, "posting", [dynamic]) == resolution
+
+    changed_dynamic = _occupied_conflict(current=999)
+    changed_dynamic.conflict_id = "dynamic-invoice"
+    assert drafts.restore_for_conflicts(
+        changed, "posting", [changed_dynamic]
+    ) == {}
+    database.close()
+
+
+def test_clear_removes_only_the_current_file_choices(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    drafts = ExcelDraftService(ExcelDraftRepository(database))
+    first = _plan(tmp_path, _occupied_conflict(), batch_id=42)
+    second = _plan(tmp_path, _occupied_conflict(), batch_id=43)
+    choice = {"occupied-1": {"conflict_id": "occupied-1", "action": "SKIP"}}
+    drafts.save(first, "posting", choice)
+    drafts.save(second, "posting", choice)
+
+    assert drafts.clear(first, "posting")
+    assert drafts.restore(first, "posting")[1] == {}
+    assert drafts.restore(second, "posting")[1] == choice
+    database.close()
+
+
+def test_intermediate_choices_round_trip_with_item_validation(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    drafts = ExcelDraftService(ExcelDraftRepository(database))
+    plan = _plan(tmp_path, _occupied_conflict())
+    plan.month_candidates = [SimpleNamespace(target_sheet="T01 26")]
+    plan.source_target_sheets = {"Tháng 1": None}
+    plan.previously_posted_items = [
+        SimpleNamespace(source_item_index=7, container="CONT1", amount=100)
+    ]
+    plan.new_rows = [
+        SimpleNamespace(
+            item_id="new-1", sqt=1, container="CONT1", values={"fee": 100}
+        )
+    ]
+    drafts.save(
+        plan,
+        "posting",
+        {
+            "selected_sheet": "T01 26",
+            "selected_month": 1,
+            "source_target_sheets": {"Tháng 1": "T01 26"},
+            "repost_source_indices": [7],
+            "selected_new_rows": ["new-1"],
+        },
+    )
+
+    restored = drafts.restore(plan, "posting")[1]
+    assert restored["selected_sheet"] == "T01 26"
+    assert restored["selected_month"] == 1
+    assert restored["source_target_sheets"] == {"Tháng 1": "T01 26"}
+    assert restored["repost_source_indices"] == [7]
+    assert restored["selected_new_rows"] == ["new-1"]
+
+    plan.new_rows[0].values = {"fee": 999}
+    assert drafts.restore(plan, "posting")[1]["selected_new_rows"] == []
     database.close()

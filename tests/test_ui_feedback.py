@@ -1,10 +1,54 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QLabel, QScrollArea
+from inspect import isclass
 
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QDialog, QLabel, QScrollArea
+
+from app.ui import (
+    edit_row_dialog,
+    excel_dialogs,
+    excel_summary_dialogs,
+    review_window,
+    rpa_expense_dialog,
+    sea_freight_center,
+)
+from app.ui.app_dialog import AppDialog
 from app.ui.settings_page import SettingsPage
 from app.ui.theme import APP_STYLESHEET
 from app.ui.workflow_page import WorkflowPage
+
+
+def test_app_dialog_has_minimize_and_maximize_buttons(qtbot) -> None:
+    dialog = AppDialog()
+    qtbot.addWidget(dialog)
+
+    flags = dialog.windowFlags()
+
+    assert flags & Qt.WindowType.WindowMinimizeButtonHint
+    assert flags & Qt.WindowType.WindowMaximizeButtonHint
+
+
+def test_all_business_dialogs_use_shared_app_dialog() -> None:
+    modules = (
+        edit_row_dialog,
+        excel_dialogs,
+        excel_summary_dialogs,
+        review_window,
+        rpa_expense_dialog,
+        sea_freight_center,
+    )
+    dialog_classes = {
+        value
+        for module in modules
+        for value in vars(module).values()
+        if isclass(value)
+        and value.__module__ == module.__name__
+        and issubclass(value, QDialog)
+    }
+
+    assert dialog_classes
+    assert all(issubclass(dialog, AppDialog) for dialog in dialog_classes)
 
 
 def test_excel_loading_feedback_tracks_running_state(qtbot) -> None:

@@ -16,6 +16,13 @@ class GroupStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class VesselVoyageResolutionKind(str, Enum):
+    EXACT = "EXACT"
+    AUTO_ALIAS = "AUTO_ALIAS"
+    AMBIGUOUS = "AMBIGUOUS"
+    NOT_FOUND = "NOT_FOUND"
+
+
 @dataclass(frozen=True, slots=True)
 class ContainerRecord:
     container: str
@@ -30,6 +37,26 @@ class VesselVoyageSuggestion:
     vessel_voyage: str
     container_count: int
     score: float
+    vessel_name: str = ""
+    voyage_no: str = ""
+    vessel_key: str = ""
+    voyage_key: str = ""
+    combined_key: str = ""
+    selectable: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class VesselVoyageResolution:
+    kind: VesselVoyageResolutionKind
+    input_vessel_name: str
+    input_voyage_no: str
+    canonical_vessel_name: str = ""
+    canonical_voyage_no: str = ""
+    canonical_vessel_voyage: str = ""
+    vessel_key: str = ""
+    voyage_key: str = ""
+    combined_key: str = ""
+    candidates: tuple[VesselVoyageSuggestion, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +72,10 @@ class BkContainerSnapshot:
     containers: tuple[ContainerRecord, ...]
     invalid_container_count: int = 0
     duplicate_container_count: int = 0
+    resolution_kind: VesselVoyageResolutionKind = VesselVoyageResolutionKind.EXACT
+    canonical_vessel_name: str = ""
+    canonical_voyage_no: str = ""
+    alias_candidates: tuple[VesselVoyageSuggestion, ...] = ()
 
     @property
     def container_count(self) -> int:
@@ -136,6 +167,9 @@ class ReconciliationOpenResult:
     added_source_indices: tuple[int, ...] = ()
     duplicate_source_indices: tuple[int, ...] = ()
     requires_revision: bool = False
+    resolution_kind: VesselVoyageResolutionKind = VesselVoyageResolutionKind.EXACT
+    canonical_vessel_name: str = ""
+    canonical_voyage_no: str = ""
 
 
 @dataclass(frozen=True, slots=True)

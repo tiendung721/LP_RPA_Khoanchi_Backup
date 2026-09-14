@@ -30,7 +30,11 @@ from app.repositories.expense_posting_repository import ExpensePostingRepository
 from app.services.batch_service import BatchService
 from app.services.assistant_bat_launcher import AssistantBatLauncher
 from app.sea_freight import SeaFreightReconciliationService, SeaFreightRepository
-from app.rpa_expense import RpaExpenseBatLauncher, RpaExpenseService
+from app.rpa_expense import (
+    RpaChoiceService,
+    RpaExpenseBatLauncher,
+    RpaExpenseService,
+)
 from app.services.excel import (
     DailySyncService,
     ExcelConfigurationService,
@@ -117,10 +121,12 @@ class ApplicationRuntime:
             draft_service=self.excel_draft_service,
         )
         self.rpa_expense_service = RpaExpenseService(self.settings)
+        self.rpa_choice_service = RpaChoiceService(self.excel_draft_repository)
         self.rpa_expense_launcher = RpaExpenseBatLauncher(self.settings)
         self.rpa_expense_controller = RpaExpenseController(
             self.rpa_expense_service,
             self.rpa_expense_launcher,
+            self.rpa_choice_service,
         )
         self.assistant_launcher = AssistantBatLauncher(self.settings)
         self.launcher = self.assistant_launcher

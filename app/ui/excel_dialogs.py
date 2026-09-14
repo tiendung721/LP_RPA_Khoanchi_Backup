@@ -3,26 +3,32 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime
-from typing import Any
+from datetime import date, datetime
+from typing import Any, Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QHeaderView,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QRadioButton,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
+
+from .app_dialog import AppDialog
 
 
 VALID_FEE_CODES = (
@@ -99,6 +105,18 @@ def _display(value: Any) -> str:
     return str(raw)
 
 
+def _format_date(value: Any) -> str:
+    if value in (None, ""):
+        return "—"
+    raw = getattr(value, "value", value)
+    if isinstance(raw, (date, datetime)):
+        return raw.strftime("%d/%m/%Y")
+    try:
+        return datetime.fromisoformat(str(raw).strip()).strftime("%d/%m/%Y")
+    except (TypeError, ValueError):
+        return str(raw)
+
+
 def _format_amount(value: Any) -> str:
     if isinstance(value, bool):
         return str(value)
@@ -160,7 +178,7 @@ def _enable_user_sorting(table: QTableWidget) -> None:
     table.setSortingEnabled(True)
 
 
-class MonthSelectionDialog(QDialog):
+class MonthSelectionDialog(AppDialog):
     """Chọn đúng một sheet khi analyze tìm thấy nhiều tháng phù hợp."""
 
     def __init__(
@@ -172,6 +190,8 @@ class MonthSelectionDialog(QDialog):
         preselect_first: bool = True,
         show_recommendations: bool = True,
         multi_select: bool = False,
+        initial_sheet_name: str | None = None,
+        clear_saved_callback: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("monthSelectionDialog")
@@ -188,6 +208,8 @@ class MonthSelectionDialog(QDialog):
         self.preselect_first = preselect_first
         self.show_recommendations = show_recommendations
         self.multi_select = multi_select
+        self.initial_sheet_name = initial_sheet_name
+        self.clear_saved_callback = clear_saved_callback
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -198,6 +220,17 @@ class MonthSelectionDialog(QDialog):
         )
         note.setWordWrap(True)
         layout.addWidget(note)
+        if self.initial_sheet_name and self.clear_saved_callback is not None:
+            restore_row = QHBoxLayout()
+            self.restore_label = QLabel(
+                "Đã chọn sẵn sheet từ lần xử lý gần nhất."
+            )
+            restore_row.addWidget(self.restore_label, 1)
+            clear_saved = QPushButton("Xóa lựa chọn đã nhớ cho file này")
+            clear_saved.setObjectName("clearRememberedMonthButton")
+            clear_saved.clicked.connect(self._clear_remembered)
+            restore_row.addWidget(clear_saved)
+            layout.addLayout(restore_row)
 
         self.table = QTableWidget(0, 5)
         self.table.setObjectName("monthCandidateTable")
@@ -284,8 +317,32 @@ class MonthSelectionDialog(QDialog):
         layout.addWidget(self.buttons)
         self.table.itemSelectionChanged.connect(self._update_action)
         self.table.itemDoubleClicked.connect(lambda _item: self.accept())
+        selected_row = next(
+            (
+                row
+                for row, candidate in enumerate(self.candidates)
+                if _sheet_name(candidate) == self.initial_sheet_name
+            ),
+            None,
+        )
+        if selected_row is not None:
+            self.table.selectRow(selected_row)
+        elif self.candidates and self.preselect_first:
+            self.table.selectRow(0)
+        self._update_action()
+
+    def _clear_remembered(self) -> None:
+        if self.clear_saved_callback is None:
+            return
+        self.clear_saved_callback()
+        self.initial_sheet_name = None
+        self.table.clearSelection()
         if self.candidates and self.preselect_first:
             self.table.selectRow(0)
+        if hasattr(self, "restore_label"):
+            self.restore_label.setText(
+                "Đã xóa lựa chọn ghi nhớ; danh sách đã trở về mặc định."
+            )
         self._update_action()
 
     def _update_action(self) -> None:
@@ -333,17 +390,28 @@ class MonthSelectionDialog(QDialog):
     resolution = selection
 
 
-class PostingAllocationDialog(QDialog):
-    """Phân bổ từng chứng từ/nhóm hóa đơn vào các sheet BK đã tồn tại."""
+class PostingAllocationDialog(AppDialog):
+    """Chọn tháng làm mốc dò cho từng chứng từ/nhóm hóa đơn."""
 
-    def __init__(self, plan: Any, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        plan: Any,
+        parent: QWidget | None = None,
+        *,
+        default_group_target_sheets: Mapping[str, str | None] | None = None,
+        restored: bool = False,
+        clear_saved_callback: Callable[[], bool] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("postingAllocationDialog")
-        self.setWindowTitle("Phân bổ chứng từ vào sheet BK")
+        self.setWindowTitle("Chọn tháng dò khoản chi")
         self.resize(980, 520)
         self.groups = list(_sequence(_value(plan, "source_groups", default=())))
         candidates = list(_sequence(_value(plan, "sheet_candidates", default=())))
         self.sheet_names = [name for item in candidates if (name := _sheet_name(item))]
+        self.default_group_target_sheets = dict(default_group_target_sheets or {})
+        self.restored = restored
+        self.clear_saved_callback = clear_saved_callback
         self._combos: dict[str, QComboBox] = {}
         self._split_document_ids: set[str] = set()
         self._build_ui()
@@ -351,14 +419,26 @@ class PostingAllocationDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         note = QLabel(
-            "Ngày hóa đơn chỉ dùng để gợi ý. Hãy chọn sheet đích cho mọi chứng từ; "
-            "hồ sơ cước biển đã đối soát sẽ bị khóa sheet."
+            "Ngày hóa đơn chỉ dùng để gợi ý. Phần mềm dò sheet được chọn và hai "
+            "tháng trước, rồi ghi khoản chi vào đúng sheet chứa dòng đã tìm thấy; "
+            "hồ sơ cước biển đã đối soát sẽ bị khóa tháng dò."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
+        if self.restored and self.clear_saved_callback is not None:
+            restore_row = QHBoxLayout()
+            self.restore_label = QLabel(
+                "Đã điền sẵn phân bổ chứng từ từ lần xử lý gần nhất."
+            )
+            restore_row.addWidget(self.restore_label, 1)
+            clear_saved = QPushButton("Xóa lựa chọn đã nhớ cho file này")
+            clear_saved.setObjectName("clearRememberedPostingAllocationButton")
+            clear_saved.clicked.connect(self._clear_remembered)
+            restore_row.addWidget(clear_saved)
+            layout.addLayout(restore_row)
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ["Chứng từ / nhóm HĐ", "Số khoản", "Ngày HĐ", "Gợi ý", "Sheet đích"]
+            ["Chứng từ / nhóm HĐ", "Số khoản", "Ngày HĐ", "Gợi ý", "Tháng dò"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -450,6 +530,26 @@ class PostingAllocationDialog(QDialog):
             self._split_document_ids.add(document_id)
             self.accept()
 
+    def _clear_remembered(self) -> None:
+        if self.clear_saved_callback is None:
+            return
+        self.clear_saved_callback()
+        self._split_document_ids.clear()
+        for group in self.groups:
+            group_id = str(_value(group, "group_id"))
+            combo = self._combos[group_id]
+            default_target = self.default_group_target_sheets.get(group_id)
+            if default_target in (None, ""):
+                default_target = _value(group, "suggested_sheet")
+            combo.setCurrentIndex(
+                max(0, combo.findData(str(default_target or "")))
+            )
+        if hasattr(self, "restore_label"):
+            self.restore_label.setText(
+                "Đã xóa lựa chọn ghi nhớ; phân bổ đã trở về mặc định."
+            )
+        self._update_summary()
+
     def _update_summary(self, *_args: Any) -> None:
         totals: dict[str, tuple[int, int]] = {}
         for group in self.groups:
@@ -487,19 +587,46 @@ class PostingAllocationDialog(QDialog):
         return set(self._split_document_ids)
 
 
-class DailySyncAllocationDialog(QDialog):
+class DailySyncAllocationDialog(AppDialog):
     """Ánh xạ riêng từng sheet Hàng ngày sang sheet BK đúng năm."""
 
-    def __init__(self, plan: Any, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        plan: Any,
+        parent: QWidget | None = None,
+        *,
+        default_source_target_sheets: Mapping[str, str | None] | None = None,
+        restored: bool = False,
+        clear_saved_callback: Callable[[], bool] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Ánh xạ các tháng Hàng ngày vào BK")
         self.resize(700, 430)
         self.plan = plan
+        self.default_source_target_sheets = dict(
+            default_source_target_sheets or {}
+        )
+        self.restored = restored
+        self.clear_saved_callback = clear_saved_callback
         self._combos: dict[str, QComboBox] = {}
         layout = QVBoxLayout(self)
-        note = QLabel("Chọn sheet BK đích cho từng sheet nguồn. Mỗi nguồn chỉ được xử lý một lần.")
+        note = QLabel(
+            "Chọn sheet BK đích cho từng sheet nguồn. "
+            "Mỗi nguồn chỉ được xử lý một lần."
+        )
         note.setWordWrap(True)
         layout.addWidget(note)
+        if self.restored and self.clear_saved_callback is not None:
+            restore_row = QHBoxLayout()
+            self.restore_label = QLabel(
+                "Đã điền sẵn ánh xạ sheet từ lần xử lý gần nhất."
+            )
+            restore_row.addWidget(self.restore_label, 1)
+            clear_saved = QPushButton("Xóa lựa chọn đã nhớ cho file này")
+            clear_saved.setObjectName("clearRememberedDailyAllocationButton")
+            clear_saved.clicked.connect(self._clear_remembered)
+            restore_row.addWidget(clear_saved)
+            layout.addLayout(restore_row)
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["Sheet Hàng ngày", "Sheet BK đích"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -532,6 +659,21 @@ class DailySyncAllocationDialog(QDialog):
         layout.addWidget(self.buttons)
         self._update_action()
 
+    def _clear_remembered(self) -> None:
+        if self.clear_saved_callback is None:
+            return
+        self.clear_saved_callback()
+        for source, combo in self._combos.items():
+            default_target = self.default_source_target_sheets.get(source)
+            combo.setCurrentIndex(
+                max(0, combo.findData(str(default_target or "")))
+            )
+        if hasattr(self, "restore_label"):
+            self.restore_label.setText(
+                "Đã xóa lựa chọn ghi nhớ; ánh xạ đã trở về mặc định."
+            )
+        self._update_action()
+
     def _update_action(self, *_args: Any) -> None:
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
             bool(self._combos)
@@ -547,8 +689,8 @@ class DailySyncAllocationDialog(QDialog):
         }
 
 
-class ManualRowPickerDialog(QDialog):
-    """Chọn một dòng BK trong cửa sổ ba tháng, không cho phép chọn cột."""
+class ManualRowPickerDialog(AppDialog):
+    """Chọn một dòng BK trong phạm vi ba tháng, không cho phép chọn cột."""
 
     def __init__(
         self,
@@ -569,23 +711,24 @@ class ManualRowPickerDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         note = QLabel(
-            "Chọn đúng sheet nguồn và dòng kế hoạch. "
+            "Chọn đúng sheet, dòng và SQT trong phạm vi dò. "
             "Cột khoản chi vẫn do tiêu đề workbook quyết định."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
 
-        self.table = QTableWidget(0, 9)
+        self.table = QTableWidget(0, 10)
         self.table.setObjectName("manualRowCandidateTable")
         self.table.setHorizontalHeaderLabels(
             [
-                "Sheet nguồn",
+                "Sheet tìm thấy",
                 "SQT",
                 "Container",
                 "Loại hàng",
                 "Ngày đóng",
                 "Nơi đóng hàng",
                 "Tàu",
+                "Ngày tàu chạy",
                 "Người nhận",
                 "Bên vận tải",
             ]
@@ -621,11 +764,23 @@ class ManualRowPickerDialog(QDialog):
                     "noi_dong",
                 ),
                 _value(candidate, "vessel", "ship", "ten_tau"),
+                _value(
+                    candidate,
+                    "departure_date",
+                    "sailing_date",
+                    "ngay_tau_chay",
+                    "ngay_chay",
+                ),
                 _value(candidate, "recipient", "nguoi_nhan"),
                 _value(candidate, "carrier", "transport_provider", "transport"),
             )
             for column, value in enumerate(values):
-                item = QTableWidgetItem(_display(value))
+                display = (
+                    _format_date(value)
+                    if column in {4, 7}
+                    else _display(value)
+                )
+                item = QTableWidgetItem(display)
                 if column == 0:
                     item.setData(Qt.ItemDataRole.UserRole, candidate)
                 self.table.setItem(row, column, item)
@@ -835,7 +990,7 @@ EXPLICIT_ACTION_CONFLICT_TYPES = (
 )
 
 
-class RepostSelectionDialog(QDialog):
+class RepostSelectionDialog(AppDialog):
     """Chọn các khoản đã nhập trước đây cần được nhập lại."""
 
     COLUMNS = (
@@ -853,9 +1008,19 @@ class RepostSelectionDialog(QDialog):
         self,
         items: Sequence[Any],
         parent: QWidget | None = None,
+        *,
+        initial_source_indices: Sequence[int] | None = None,
+        restore_info: Mapping[str, Any] | None = None,
+        clear_saved_callback: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self.items = list(items)
+        self._has_restored_selection = initial_source_indices is not None
+        self._initial_source_indices = {
+            int(value) for value in (initial_source_indices or ())
+        }
+        self.restore_info = dict(restore_info or {})
+        self.clear_saved_callback = clear_saved_callback
         self.setObjectName("repostSelectionDialog")
         self.setWindowTitle("Chọn khoản nhập lại")
         self.resize(920, 520)
@@ -870,6 +1035,17 @@ class RepostSelectionDialog(QDialog):
         )
         note.setWordWrap(True)
         layout.addWidget(note)
+        if self._has_restored_selection and self.clear_saved_callback is not None:
+            restore_row = QHBoxLayout()
+            self.restore_label = QLabel(
+                f"Đã khôi phục {len(self._initial_source_indices)} khoản chọn nhập lại."
+            )
+            restore_row.addWidget(self.restore_label, 1)
+            clear_saved = QPushButton("Xóa lựa chọn đã nhớ cho file này")
+            clear_saved.setObjectName("clearRememberedRepostButton")
+            clear_saved.clicked.connect(self._clear_remembered)
+            restore_row.addWidget(clear_saved)
+            layout.addLayout(restore_row)
 
         self.unposted_only = QRadioButton("Chỉ nhập khoản chưa nhập")
         self.choose_reposts = QRadioButton("Chọn khoản nhập lại")
@@ -902,7 +1078,12 @@ class RepostSelectionDialog(QDialog):
                 | Qt.ItemFlag.ItemIsUserCheckable
                 | Qt.ItemFlag.ItemIsSelectable
             )
-            checkbox.setCheckState(Qt.CheckState.Unchecked)
+            source_index = int(_value(source, "source_item_index", default=0))
+            checkbox.setCheckState(
+                Qt.CheckState.Checked
+                if source_index in self._initial_source_indices
+                else Qt.CheckState.Unchecked
+            )
             checkbox.setData(
                 Qt.ItemDataRole.UserRole,
                 _value(source, "source_item_index"),
@@ -945,7 +1126,23 @@ class RepostSelectionDialog(QDialog):
         self.choose_reposts.toggled.connect(self._update_enabled)
         self.select_all.stateChanged.connect(self._set_all_checked)
         self.table.itemChanged.connect(self._sync_select_all_state)
-        self._update_enabled(False)
+        if self._initial_source_indices:
+            self.choose_reposts.setChecked(True)
+        self._update_enabled(self.choose_reposts.isChecked())
+        if self._checkbox_items:
+            self._sync_select_all_state(self._checkbox_items[0])
+
+    def _clear_remembered(self) -> None:
+        if self.clear_saved_callback is None:
+            return
+        self.clear_saved_callback()
+        self.unposted_only.setChecked(True)
+        for item in self._checkbox_items:
+            item.setCheckState(Qt.CheckState.Unchecked)
+        if hasattr(self, "restore_label"):
+            self.restore_label.setText(
+                "Đã xóa lựa chọn ghi nhớ; mặc định chỉ nhập khoản chưa nhập."
+            )
 
     def _update_enabled(self, enabled: bool) -> None:
         self.table.setEnabled(enabled)
@@ -997,8 +1194,11 @@ class RepostSelectionDialog(QDialog):
         ]
 
 
-class ConflictResolutionDialog(QDialog):
+class ConflictResolutionDialog(AppDialog):
     """Một bảng duy nhất để giải quyết toàn bộ xung đột của một plan."""
+
+    ORIGINAL_PROBLEM_ROLE = Qt.ItemDataRole.UserRole + 2
+    VALIDATION_MESSAGES_ROLE = Qt.ItemDataRole.UserRole + 3
 
     COLUMNS = (
         "Container",
@@ -1028,6 +1228,7 @@ class ConflictResolutionDialog(QDialog):
         restore_info: Mapping[str, Any] | None = None,
         issues: Sequence[Any] | None = None,
         operation: Any | None = None,
+        clear_saved_callback: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self.plan = plan_or_conflicts
@@ -1042,6 +1243,7 @@ class ConflictResolutionDialog(QDialog):
         self.initial_resolutions = dict(initial_resolutions or {})
         self.restore_info = dict(restore_info or {})
         self.issues = list(issues or ())
+        self._clear_saved_callback = clear_saved_callback
         raw_operation = operation
         if raw_operation is None and not isinstance(plan_or_conflicts, Sequence):
             raw_operation = _value(plan_or_conflicts, "operation", "operation_type")
@@ -1068,6 +1270,7 @@ class ConflictResolutionDialog(QDialog):
         self._selector_buttons: dict[str, QPushButton] = {}
         self._conflicts_by_id: dict[str, Any] = {}
         self._inactive_conflict_ids: set[str] = set()
+        self._problem_detail_conflict_id: str | None = None
         self.setObjectName("excelConflictResolutionDialog")
         self.setWindowTitle("Xử lý xung đột Excel")
         self.resize(1320, 660)
@@ -1082,6 +1285,7 @@ class ConflictResolutionDialog(QDialog):
         layout.addWidget(self.title_label)
         note = QLabel(
             "Kiểm tra giá trị hiện tại và chọn cách xử lý cho từng mục. "
+            "Bấm vào nội dung ở cột Vấn đề để xem toàn bộ lý do. "
             "Workbook chỉ được ghi sau khi toàn bộ lựa chọn hợp lệ."
         )
         note.setWordWrap(True)
@@ -1105,22 +1309,36 @@ class ConflictResolutionDialog(QDialog):
                 self._conflict_id(conflict, row) in self.initial_resolutions
                 for row, conflict in enumerate(self.conflicts)
             )
-            if bool(self.restore_info.get("target_compatible", True)):
+            if not bool(self.restore_info.get("target_compatible", True)):
+                message = (
+                    f"Đã tìm thấy lần xử lý lúc {display_time} "
+                    f"(kết quả: {status}), nhưng đây là workbook đích khác; "
+                    "không khôi phục lựa chọn."
+                )
+            elif bool(self.restore_info.get("target_changed", False)):
+                message = (
+                    f"Đã khôi phục {restored_here}/{len(self.conflicts)} lựa chọn "
+                    f"còn hợp lệ từ lần xử lý lúc {display_time} "
+                    f"(kết quả: {status}). Workbook đã thay đổi nên các dòng còn lại "
+                    "cần kiểm tra lại."
+                )
+            else:
                 message = (
                     f"Đã khôi phục {restored_here}/{len(self.conflicts)} lựa chọn "
                     f"từ lần xử lý lúc {display_time} (kết quả: {status})."
                 )
-            else:
-                message = (
-                    f"Đã tìm thấy lần xử lý lúc {display_time} "
-                    f"(kết quả: {status}), nhưng workbook đích đã thay đổi; "
-                    "cần chọn lại toàn bộ."
-                )
+            restore_row = QHBoxLayout()
             self.restore_label = QLabel(message)
             self.restore_label.setObjectName("conflictRestoreStatusLabel")
             self.restore_label.setWordWrap(True)
             self.restore_label.setProperty("status", "info")
-            layout.addWidget(self.restore_label)
+            restore_row.addWidget(self.restore_label, 1)
+            if self._clear_saved_callback is not None:
+                clear_saved = QPushButton("Xóa lựa chọn đã nhớ cho file này")
+                clear_saved.setObjectName("clearRememberedExcelChoicesButton")
+                clear_saved.clicked.connect(self._clear_remembered)
+                restore_row.addWidget(clear_saved)
+            layout.addLayout(restore_row)
 
         bulk_layout = QHBoxLayout()
         bulk_label = QLabel("Xử lý hàng loạt:")
@@ -1158,6 +1376,8 @@ class ConflictResolutionDialog(QDialog):
         self.table.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
@@ -1170,6 +1390,42 @@ class ConflictResolutionDialog(QDialog):
             not self._show_vessel_voyage,
         )
         layout.addWidget(self.table, 1)
+
+        self.problem_detail_panel = QFrame()
+        self.problem_detail_panel.setObjectName("conflictProblemDetails")
+        self.problem_detail_panel.setMaximumHeight(190)
+        detail_layout = QVBoxLayout(self.problem_detail_panel)
+        detail_layout.setContentsMargins(12, 9, 12, 10)
+        detail_layout.setSpacing(6)
+
+        detail_header = QHBoxLayout()
+        self.problem_detail_title = QLabel("Chi tiết vấn đề")
+        self.problem_detail_title.setObjectName("conflictProblemDetailsTitle")
+        detail_header.addWidget(self.problem_detail_title, 1)
+        self.problem_detail_close_button = QToolButton()
+        self.problem_detail_close_button.setObjectName(
+            "conflictProblemDetailsCloseButton"
+        )
+        self.problem_detail_close_button.setText("×")
+        self.problem_detail_close_button.setToolTip("Thu gọn chi tiết")
+        self.problem_detail_close_button.setAccessibleName("Thu gọn chi tiết vấn đề")
+        self.problem_detail_close_button.setFixedSize(28, 28)
+        detail_header.addWidget(self.problem_detail_close_button)
+        detail_layout.addLayout(detail_header)
+
+        self.problem_detail_context = QLabel()
+        self.problem_detail_context.setObjectName("conflictProblemDetailsContext")
+        self.problem_detail_context.setWordWrap(True)
+        detail_layout.addWidget(self.problem_detail_context)
+
+        self.problem_detail_text = QPlainTextEdit()
+        self.problem_detail_text.setObjectName("conflictProblemDetailsText")
+        self.problem_detail_text.setReadOnly(True)
+        self.problem_detail_text.setMinimumHeight(72)
+        self.problem_detail_text.setMaximumHeight(112)
+        detail_layout.addWidget(self.problem_detail_text, 1)
+        self.problem_detail_panel.hide()
+        layout.addWidget(self.problem_detail_panel)
 
         for index, conflict in enumerate(self.conflicts):
             self._add_conflict(index, conflict)
@@ -1185,6 +1441,11 @@ class ConflictResolutionDialog(QDialog):
             self._apply_bulk_action_to_selected
         )
         self.table.itemSelectionChanged.connect(self._update_bulk_apply_enabled)
+        self.table.cellClicked.connect(self._show_problem_details)
+        self.table.cellActivated.connect(self._show_problem_details)
+        self.problem_detail_close_button.clicked.connect(
+            self._hide_problem_details
+        )
 
         self.validation_label = QLabel()
         self.validation_label.setObjectName("conflictValidationLabel")
@@ -1211,10 +1472,15 @@ class ConflictResolutionDialog(QDialog):
         *,
         issues: Sequence[Any] = (),
         initial_resolutions: Mapping[str, Any] | None = None,
+        carry_current: bool = True,
     ) -> None:
         """Reuse this dialog for the next correction round."""
 
-        carried = self.resolution_map() if self._action_combos else {}
+        carried = (
+            self.resolution_map()
+            if carry_current and self._action_combos
+            else {}
+        )
         carried.update(dict(initial_resolutions or {}))
         self.conflicts = list(conflicts)
         self.initial_resolutions = carried
@@ -1234,6 +1500,7 @@ class ConflictResolutionDialog(QDialog):
         self._selector_buttons.clear()
         self._conflicts_by_id.clear()
         self._inactive_conflict_ids.clear()
+        self._hide_problem_details()
         for index, conflict in enumerate(self.conflicts):
             self._add_conflict(index, conflict)
         self._wire_action_dependencies()
@@ -1243,6 +1510,20 @@ class ConflictResolutionDialog(QDialog):
         self.table.setSortingEnabled(True)
         self.setResult(0)
         self.show_issues(self.issues)
+
+    def _clear_remembered(self) -> None:
+        if self._clear_saved_callback is None or not self._clear_saved_callback():
+            return
+        self.initial_resolutions = {}
+        self.restore_info = {}
+        self.set_review(
+            self.conflicts,
+            issues=self.issues,
+            initial_resolutions={},
+            carry_current=False,
+        )
+        if hasattr(self, "restore_label"):
+            self.restore_label.setText("Đã xóa lựa chọn ghi nhớ của file này.")
 
     @staticmethod
     def _issue_conflict_ids(issue: Any) -> tuple[str, ...]:
@@ -1277,22 +1558,41 @@ class ConflictResolutionDialog(QDialog):
                 else ""
             )
             row_messages = messages.get(conflict_id, [])
+            needs_recheck = bool(row_messages) or (
+                bool(self.restore_info.get("found"))
+                and bool(self.restore_info.get("target_changed"))
+                and conflict_id not in self.initial_resolutions
+            )
             for column in range(self.table.columnCount()):
                 widget = self.table.cellWidget(row, column)
                 if widget is not None:
                     widget.setStyleSheet(
-                        problem_widget_style if row_messages else ""
+                        problem_widget_style if needs_recheck else ""
                     )
             if row_messages:
                 if first_problem_row is None:
                     first_problem_row = row
-                issue_item = self.table.item(row, problem_column)
-                if issue_item is not None:
-                    original = issue_item.toolTip() or issue_item.text()
-                    latest = " • ".join(dict.fromkeys(row_messages))
+            issue_item = self.table.item(row, problem_column)
+            if issue_item is not None:
+                original = str(
+                    issue_item.data(self.ORIGINAL_PROBLEM_ROLE)
+                    or issue_item.text()
+                )
+                unique_messages = tuple(dict.fromkeys(row_messages))
+                issue_item.setData(
+                    self.VALIDATION_MESSAGES_ROLE, unique_messages
+                )
+                if unique_messages:
+                    latest = " • ".join(unique_messages)
                     issue_item.setText(latest)
                     issue_item.setToolTip(
                         f"{latest}\n\nXung đột ban đầu: {original}"
+                        "\n\nBấm để xem đầy đủ."
+                    )
+                else:
+                    issue_item.setText(original)
+                    issue_item.setToolTip(
+                        f"{original}\n\nBấm để xem đầy đủ."
                     )
 
         if messages:
@@ -1315,6 +1615,98 @@ class ConflictResolutionDialog(QDialog):
                 self.table.scrollToItem(
                     item, QAbstractItemView.ScrollHint.PositionAtCenter
                 )
+        if self._problem_detail_conflict_id is not None:
+            self._show_problem_details_by_id(self._problem_detail_conflict_id)
+
+    def _show_problem_details(self, row: int, column: int) -> None:
+        if column != self.COLUMNS.index("Vấn đề"):
+            return
+        identity_item = self.table.item(row, 0)
+        issue_item = self.table.item(row, column)
+        if identity_item is None or issue_item is None:
+            return
+        conflict_id = str(
+            identity_item.data(Qt.ItemDataRole.UserRole + 1) or ""
+        )
+        conflict = self._conflicts_by_id.get(conflict_id)
+        if not conflict_id or conflict is None:
+            return
+        self._render_problem_details(conflict_id, conflict, issue_item)
+
+    def _show_problem_details_by_id(self, conflict_id: str) -> None:
+        problem_column = self.COLUMNS.index("Vấn đề")
+        for row in range(self.table.rowCount()):
+            identity_item = self.table.item(row, 0)
+            if identity_item is None:
+                continue
+            current_id = str(
+                identity_item.data(Qt.ItemDataRole.UserRole + 1) or ""
+            )
+            if current_id != conflict_id:
+                continue
+            issue_item = self.table.item(row, problem_column)
+            conflict = self._conflicts_by_id.get(conflict_id)
+            if issue_item is not None and conflict is not None:
+                self._render_problem_details(
+                    conflict_id, conflict, issue_item
+                )
+            return
+        self._hide_problem_details()
+
+    def _render_problem_details(
+        self,
+        conflict_id: str,
+        conflict: Any,
+        issue_item: QTableWidgetItem,
+    ) -> None:
+        context_fields = (
+            ("Container", _value(conflict, "container", "container_number")),
+            ("B/L", _value(conflict, "bl", "bill_of_lading")),
+            ("Sheet", _value(conflict, "sheet_name", "sheet", "target_sheet")),
+            ("Dòng", _value(conflict, "target_row", "row", "row_number")),
+            ("Ô", _value(conflict, "target_cell", "cell", "cell_address")),
+        )
+        context = "   •   ".join(
+            f"{label}: {value}"
+            for label, value in context_fields
+            if value not in (None, "")
+        )
+        self.problem_detail_context.setText(
+            context or "Thông tin chi tiết của dòng đang chọn"
+        )
+
+        original = str(
+            issue_item.data(self.ORIGINAL_PROBLEM_ROLE)
+            or issue_item.text()
+        )
+        validation_messages = tuple(
+            str(message)
+            for message in (
+                issue_item.data(self.VALIDATION_MESSAGES_ROLE) or ()
+            )
+            if str(message)
+        )
+        if validation_messages:
+            validation_text = "\n".join(
+                f"• {message}" for message in validation_messages
+            )
+            detail_text = (
+                f"Cần xử lý lại\n{validation_text}\n\n"
+                f"Lý do xung đột ban đầu\n{original}"
+            )
+        else:
+            detail_text = f"Lý do\n{original}"
+        self.problem_detail_text.setPlainText(detail_text)
+        self.problem_detail_text.verticalScrollBar().setValue(0)
+        self._problem_detail_conflict_id = conflict_id
+        self.problem_detail_panel.show()
+
+    def _hide_problem_details(self) -> None:
+        self._problem_detail_conflict_id = None
+        if hasattr(self, "problem_detail_context"):
+            self.problem_detail_context.clear()
+            self.problem_detail_text.clear()
+            self.problem_detail_panel.hide()
 
     def _refresh_bulk_actions(self) -> None:
         """Liệt kê các cách xử lý có thể áp dụng cho ít nhất một dòng."""
@@ -1541,12 +1933,22 @@ class ConflictResolutionDialog(QDialog):
                 default=conflict_type,
             ),
         )
+        problem_column = self.COLUMNS.index("Vấn đề")
         for column, value in enumerate(values):
-            item = QTableWidgetItem(_display(value))
-            item.setToolTip(_display(value))
+            display = _display(value)
+            item = QTableWidgetItem(display)
+            item.setToolTip(display)
             if column == 0:
                 item.setData(Qt.ItemDataRole.UserRole, conflict)
                 item.setData(Qt.ItemDataRole.UserRole + 1, conflict_id)
+            elif column == problem_column:
+                item.setData(self.ORIGINAL_PROBLEM_ROLE, display)
+                item.setData(self.VALIDATION_MESSAGES_ROLE, ())
+                item.setData(
+                    Qt.ItemDataRole.AccessibleTextRole,
+                    f"Vấn đề: {display}. Bấm để xem đầy đủ.",
+                )
+                item.setForeground(QColor("#1D4ED8"))
             self.table.setItem(row, column, item)
 
         action_combo = QComboBox()
@@ -1602,6 +2004,18 @@ class ConflictResolutionDialog(QDialog):
                 QTableWidgetItem("—"),
             )
         self._apply_initial_resolution(conflict_id, action_combo)
+        if (
+            bool(self.restore_info.get("found"))
+            and bool(self.restore_info.get("target_changed"))
+            and conflict_id not in self.initial_resolutions
+        ):
+            for column in range(self.table.columnCount()):
+                cell = self.table.item(row, column)
+                if cell is not None:
+                    cell.setBackground(QColor("#FFF4CC"))
+            action_combo.setStyleSheet(
+                "QComboBox { background-color: #FFF4CC; border: 1px solid #D6A700; }"
+            )
 
     def _apply_initial_resolution(
         self, conflict_id: str, action_combo: QComboBox
@@ -2148,7 +2562,7 @@ class ConflictResolutionDialog(QDialog):
         self.accept()
 
 
-class PaymentNewRowsDialog(QDialog):
+class PaymentNewRowsDialog(AppDialog):
     """Cho phép chọn các dòng BK mới sẽ được thêm vào file Thanh toán."""
 
     COLUMNS = (
@@ -2165,9 +2579,20 @@ class PaymentNewRowsDialog(QDialog):
         self,
         items: Sequence[Any],
         parent: QWidget | None = None,
+        *,
+        initial_selected_item_ids: Sequence[str] | None = None,
+        restore_info: Mapping[str, Any] | None = None,
+        clear_saved_callback: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self.items = list(items)
+        self._initial_selected_item_ids = (
+            None
+            if initial_selected_item_ids is None
+            else {str(value) for value in initial_selected_item_ids}
+        )
+        self.restore_info = dict(restore_info or {})
+        self.clear_saved_callback = clear_saved_callback
         self._checkbox_items: list[QTableWidgetItem] = []
         self.setObjectName("paymentNewRowsDialog")
         self.setWindowTitle("Quản lý dòng mới BK → Thanh toán")
@@ -2182,6 +2607,14 @@ class PaymentNewRowsDialog(QDialog):
         )
         note.setWordWrap(True)
         layout.addWidget(note)
+        self.restore_label = QLabel("")
+        self.restore_label.setWordWrap(True)
+        if self.restore_info.get("found"):
+            restored_count = len(self._initial_selected_item_ids or ())
+            self.restore_label.setText(
+                f"Đã khôi phục {restored_count} dòng được chọn từ lần gần nhất."
+            )
+        layout.addWidget(self.restore_label)
 
         selection = QHBoxLayout()
         select_all = QPushButton("Chọn tất cả")
@@ -2194,6 +2627,11 @@ class PaymentNewRowsDialog(QDialog):
         )
         selection.addWidget(select_all)
         selection.addWidget(select_none)
+        if self.clear_saved_callback is not None:
+            clear_saved = QPushButton("Xóa lựa chọn đã nhớ cho file này")
+            clear_saved.setObjectName("clearRememberedPaymentRowsButton")
+            clear_saved.clicked.connect(self._clear_remembered)
+            selection.addWidget(clear_saved)
         selection.addStretch()
         layout.addLayout(selection)
 
@@ -2223,10 +2661,18 @@ class PaymentNewRowsDialog(QDialog):
                 | Qt.ItemFlag.ItemIsUserCheckable
                 | Qt.ItemFlag.ItemIsSelectable
             )
-            checkbox.setCheckState(Qt.CheckState.Checked)
+            item_id = str(_value(source, "item_id", "id", default=""))
+            checked = (
+                True
+                if self._initial_selected_item_ids is None
+                else item_id in self._initial_selected_item_ids
+            )
+            checkbox.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            )
             checkbox.setData(
                 Qt.ItemDataRole.UserRole,
-                str(_value(source, "item_id", "id", default="")),
+                item_id,
             )
             self._checkbox_items.append(checkbox)
             self.table.setItem(row, 0, checkbox)
@@ -2271,6 +2717,16 @@ class PaymentNewRowsDialog(QDialog):
         for item in self._checkbox_items:
             item.setCheckState(state)
 
+    def _clear_remembered(self) -> None:
+        if self.clear_saved_callback is None:
+            return
+        self.clear_saved_callback()
+        self._initial_selected_item_ids = None
+        self._set_all(Qt.CheckState.Checked)
+        self.restore_label.setText(
+            "Đã xóa lựa chọn ghi nhớ; danh sách đã trở về mặc định."
+        )
+
     @property
     def selected_item_ids(self) -> list[str]:
         return [
@@ -2280,7 +2736,7 @@ class PaymentNewRowsDialog(QDialog):
         ]
 
 
-class ExcelOutcomeDialog(QDialog):
+class ExcelOutcomeDialog(AppDialog):
     """Chi tiết phẳng được dựng từ execution manifest thực tế."""
 
     _STATUS_LABELS = {

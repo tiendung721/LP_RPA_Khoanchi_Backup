@@ -36,8 +36,6 @@ from .carrier import (
 from .daily_sync import (
     SOURCE_HEADER_ALIASES,
     SYNC_FIELDS,
-    TARGET_EXPECTED_COLUMNS,
-    DailySyncService,
 )
 from .models import (
     ConflictType,
@@ -81,6 +79,7 @@ BASE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "cargo_type": ("Loại hàng", "Tên hàng"),
     "closing_place": SOURCE_HEADER_ALIASES["closing_place"],
     "vessel": ("Tên tàu", "Tàu"),
+    "departure_date": SOURCE_HEADER_ALIASES["departure_date"],
     "recipient": ("Người nhận", "Khách hàng"),
     "notes": ("Ghi chú", "Ghi Chú"),
     "carrier_sea": BK_CARRIER_HEADER_ALIASES["SEA"],
@@ -572,9 +571,6 @@ class ExpensePostingService:
                 write_book = self.gateway.load(working_path, read_only=False)
                 try:
                     worksheet = write_book[selected_sheet]
-                    carried_plan_rows = self._write_carried_plan_rows(
-                        worksheet, write_actions
-                    )
                     base = self._resolve_base_headers(worksheet)
                     fee_columns = self._resolve_fee_columns(worksheet, base)
                     invoice_columns = self._resolve_invoice_columns(
@@ -622,14 +618,6 @@ class ExpensePostingService:
                         update_cell = worksheet.cell(target_row, update_column)
                         update_cell.value = update_timestamp
                         update_cell.number_format = UPDATE_NUMBER_FORMAT
-                    if carried_plan_rows:
-                        from .payment_sync import (
-                            find_summary_start,
-                            refresh_bk_summary_formulas,
-                        )
-
-                        if find_summary_start(worksheet) is not None:
-                            refresh_bk_summary_formulas(worksheet)
                     detail_rows = detail_rows_from_actions(
                         detail_actions,
                         batch_id=plan.batch_id,
@@ -657,7 +645,6 @@ class ExpensePostingService:
                 )
                 working_path = None
                 workbook_replaced = True
-                self._record_carry_forwards(plan, write_actions)
 
             self._record_history(plan, history)
             self._mark_completed_reconciliations(plan)
@@ -1567,7 +1554,6 @@ class ExpensePostingService:
                             f"Đang ghi {sheet_name} ({len(update_meta) + 1}/{len(grouped)})…",
                         )
                         worksheet = write_book[sheet_name]
-                        carried = self._write_carried_plan_rows(worksheet, sheet_actions)
                         base = self._resolve_base_headers(worksheet)
                         fee_columns = self._resolve_fee_columns(worksheet, base)
                         invoice_columns = self._resolve_invoice_columns(
@@ -1612,11 +1598,6 @@ class ExpensePostingService:
                             cell = worksheet.cell(row, update_column)
                             cell.value = timestamp
                             cell.number_format = UPDATE_NUMBER_FORMAT
-                        if carried:
-                            from .payment_sync import find_summary_start, refresh_bk_summary_formulas
-
-                            if find_summary_start(worksheet) is not None:
-                                refresh_bk_summary_formulas(worksheet)
                     for sheet_name, sheet_detail_actions in grouped_details.items():
                         timestamp = update_meta.get(
                             sheet_name,
@@ -1661,7 +1642,6 @@ class ExpensePostingService:
                 )
                 working_path = None
                 replaced = True
-                self._record_carry_forwards(plan, write_actions)
 
             self._record_history(plan, history)
             self._mark_completed_reconciliations(plan)
@@ -2279,7 +2259,91 @@ class ExpensePostingService:
             analyzed.extend(sheet_items)
             conflicts.extend(sheet_conflicts)
         analyzed.extend(unassigned)
+        conflicts.extend(
+            self._cross_assignment_same_cell_conflicts(
+                analyzed,
+                conflicts,
+                batch_hash=batch_hash,
+            )
+        )
         return analyzed, conflicts
+
+    def _cross_assignment_same_cell_conflicts(
+        self,
+        items: Sequence[PostingItem],
+        existing_conflicts: Sequence[PostingConflict],
+        *,
+        batch_hash: str,
+    ) -> list[PostingConflict]:
+        """Chặn hai nhóm tháng dò khác nhau cùng ghi vào một ô BK thực tế."""
+
+        existing_cells = {
+            (conflict.sheet_name, conflict.target_row, conflict.target_column)
+            for conflict in existing_conflicts
+            if conflict.conflict_type is ConflictType.MULTIPLE_EXPENSE_SAME_CELL
+        }
+        grouped: dict[tuple[str, int, int], list[int]] = defaultdict(list)
+        for index, item in enumerate(items):
+            if (
+                item.sheet_name is None
+                or item.target_row is None
+                or item.target_column is None
+                or item.status
+                in {
+                    PostingItemStatus.USER_SKIPPED,
+                    PostingItemStatus.NOT_MATCHED,
+                    PostingItemStatus.UNRESOLVED,
+                }
+            ):
+                continue
+            grouped[
+                (str(item.sheet_name), int(item.target_row), int(item.target_column))
+            ].append(index)
+
+        result: list[PostingConflict] = []
+        for (sheet_name, row, column), indexes in grouped.items():
+            if len(indexes) < 2 or (sheet_name, row, column) in existing_cells:
+                continue
+            first_index = indexes[0]
+            first = items[first_index]
+            first.target_cell = f"{get_column_letter(column)}{row}"
+            result.append(
+                self._item_conflict(
+                    batch_hash,
+                    first_index,
+                    first,
+                    ConflictType.MULTIPLE_EXPENSE_SAME_CELL,
+                    "Nhiều dòng JSON cùng trỏ tới một ô phí; hãy chọn đúng một dòng để ghi.",
+                    (ResolutionAction.SELECT_SOURCE_ITEM,),
+                    default=ResolutionAction.SELECT_SOURCE_ITEM,
+                    details={
+                        "item_indexes": list(indexes),
+                        "invoice_candidates": _unique_invoice_values(
+                            invoice
+                            for index in indexes
+                            for invoice in items[index].invoice_candidates
+                        ),
+                        "carrier_candidates": unique_carriers(
+                            carrier
+                            for index in indexes
+                            for carrier in items[index].carrier_candidates
+                        ),
+                        "source_item_options": [
+                            {
+                                "source_item_index": items[index].source_indices[0],
+                                "amount": items[index].amount,
+                                "invoice_no": (
+                                    items[index].invoice_candidates[0]
+                                    if len(items[index].invoice_candidates) == 1
+                                    else None
+                                ),
+                            }
+                            for index in indexes
+                        ],
+                    },
+                )
+            )
+        return result
 
     @staticmethod
     def _items_from_groups(
@@ -2715,6 +2779,11 @@ class ExpensePostingService:
                         if "vessel" in columns
                         else None
                     ),
+                    departure_date=(
+                        worksheet.cell(row, columns["departure_date"]).value
+                        if "departure_date" in columns
+                        else None
+                    ),
                     recipient=(
                         worksheet.cell(row, columns["recipient"]).value
                         if "recipient" in columns
@@ -2743,7 +2812,11 @@ class ExpensePostingService:
             required=SYNC_FIELDS,
         )
 
-    def _source_window_names(self, workbook: Any, target_sheet: str) -> list[str]:
+    def _source_window_index(
+        self,
+        workbook: Any,
+        target_sheet: str,
+    ) -> tuple[dict[str, list[RowCandidate]], list[RowCandidate], list[str]]:
         parsed_target = self.months.parse_target_sheet(target_sheet)
         if parsed_target is None:
             raise ExpensePostingError(f"Sheet {target_sheet!r} không có dạng TMM YY.")
@@ -2758,48 +2831,14 @@ class ExpensePostingService:
                     f"Có nhiều sheet BK cho tháng {parsed[0]:02d}/{parsed[1]}."
                 )
             by_period[parsed] = name
-        return [
+        window_names = [
             by_period[period]
             for offset in range(3)
             if (period := _period_offset(month, year, offset)) in by_period
         ]
 
-    def _carry_forward_record(
-        self,
-        candidate: RowCandidate,
-        target_sheet: str,
-    ) -> Any | None:
-        getter = getattr(self.posting_repository, "get_carry_forward", None)
-        if not callable(getter) or candidate.sqt is None or not candidate.container:
-            return None
-        return getter(
-            workbook_path=self.bk_path,
-            source_sheet=candidate.source_sheet,
-            source_row=int(candidate.source_row or candidate.row),
-            source_sqt=candidate.sqt,
-            container=candidate.container,
-            target_sheet=target_sheet,
-        )
-
-    @staticmethod
-    def _row_plan_values(
-        worksheet: Any,
-        header: HeaderResolution,
-        row: int,
-    ) -> tuple[Any, ...]:
-        return tuple(
-            worksheet.cell(row, header.columns[field]).value
-            for field in SYNC_FIELDS
-        )
-
-    def _window_index(
-        self,
-        workbook: Any,
-        target_sheet: str,
-    ) -> tuple[dict[str, list[RowCandidate]], list[RowCandidate], HeaderResolution | None]:
-        window_names = self._source_window_names(workbook, target_sheet)
-        indexes: dict[str, dict[str, list[RowCandidate]]] = {}
-        plan_headers: dict[str, HeaderResolution | None] = {}
+        combined: dict[str, list[RowCandidate]] = defaultdict(list)
+        all_candidates: list[RowCandidate] = []
         for name in window_names:
             worksheet = workbook[name]
             base = self._resolve_base_headers(worksheet)
@@ -2807,76 +2846,15 @@ class ExpensePostingService:
                 plan_header = self._plan_header(worksheet)
             except HeaderResolutionError:
                 plan_header = None
-                if name != target_sheet:
-                    raise ExpensePostingError(
-                        f"Sheet nguồn {name} không đủ 12 cột thông tin kế hoạch."
-                    )
-            plan_headers[name] = plan_header
-            indexes[name] = self._container_index(
+            sheet_index = self._container_index(
                 worksheet,
                 base,
                 plan_header=plan_header,
             )
-
-        target_worksheet = workbook[target_sheet]
-        target_plan_header = plan_headers.get(target_sheet)
-        target_candidates = [
-            candidate
-            for candidates in indexes[target_sheet].values()
-            for candidate in candidates
-        ]
-        carried_target_rows: set[int] = set()
-        for name in window_names[1:]:
-            for candidates in indexes[name].values():
-                for candidate in candidates:
-                    record = self._carry_forward_record(candidate, target_sheet)
-                    if record is None:
-                        continue
-                    if str(getattr(record, "source_signature", "")) != candidate.source_signature:
-                        candidate.mapping_invalid = True
-                        continue
-                    target_row = int(getattr(record, "target_row"))
-                    matches_recorded_row = (
-                        target_plan_header is not None
-                        and self._row_plan_values(
-                            target_worksheet, target_plan_header, target_row
-                        )
-                        == candidate.plan_values
-                    )
-                    if matches_recorded_row:
-                        candidate.carried_target_row = target_row
-                        carried_target_rows.add(target_row)
-                        continue
-                    signature_matches = [
-                        item.row
-                        for item in target_candidates
-                        if item.source_signature == candidate.source_signature
-                    ]
-                    if len(signature_matches) == 1:
-                        candidate.carried_target_row = signature_matches[0]
-                        carried_target_rows.add(signature_matches[0])
-                    else:
-                        candidate.mapping_invalid = True
-
-        combined: dict[str, list[RowCandidate]] = defaultdict(list)
-        all_candidates: list[RowCandidate] = []
-        for name in window_names:
-            for container, candidates in indexes[name].items():
-                for candidate in candidates:
-                    if name == target_sheet and candidate.row in carried_target_rows:
-                        continue
-                    combined[container].append(candidate)
-                    all_candidates.append(candidate)
-        return dict(combined), all_candidates, target_plan_header
-
-    @staticmethod
-    def _origin_key(candidate: RowCandidate) -> tuple[str, int, int | None, str | None]:
-        return (
-            candidate.source_sheet,
-            int(candidate.source_row or candidate.row),
-            candidate.sqt,
-            candidate.container,
-        )
+            for container, candidates in sheet_index.items():
+                combined[container].extend(candidates)
+                all_candidates.extend(candidates)
+        return dict(combined), all_candidates, window_names
 
     def _sheet_candidates(
         self,
@@ -2931,31 +2909,40 @@ class ExpensePostingService:
         *,
         batch_hash: str,
     ) -> tuple[list[PostingItem], list[PostingConflict]]:
-        worksheet = workbook[target_sheet]
-        base = self._resolve_base_headers(worksheet)
-        fee_columns = self._resolve_fee_columns(worksheet, base)
-        invoice_columns = self._resolve_invoice_columns(
-            worksheet, base, fee_columns
-        )
-        carrier_columns = self._resolve_carrier_columns(base)
-        index, manual_candidates, target_plan_header = self._window_index(
+        index, manual_candidates, window_names = self._source_window_index(
             workbook, target_sheet
         )
+        window_order = {name: position for position, name in enumerate(window_names)}
         manual_candidates = sorted(
             manual_candidates,
             key=lambda candidate: (
-                self._source_window_names(workbook, target_sheet).index(
-                    candidate.source_sheet
-                ),
+                window_order[candidate.source_sheet],
                 candidate.row,
             ),
         )
-        next_target_row = (
-            DailySyncService._last_data_row(worksheet, target_plan_header) + 1
-            if target_plan_header is not None
-            else base.row_end + 1
-        )
-        allocated_rows: dict[tuple[str, int, int | None, str | None], int] = {}
+        layouts: dict[
+            str,
+            tuple[Any, dict[str, int], dict[str, int], dict[str, int]],
+        ] = {}
+
+        def sheet_layout(
+            sheet_name: str,
+        ) -> tuple[Any, dict[str, int], dict[str, int], dict[str, int]]:
+            cached = layouts.get(sheet_name)
+            if cached is not None:
+                return cached
+            sheet = workbook[sheet_name]
+            base = self._resolve_base_headers(sheet)
+            fee_columns = self._resolve_fee_columns(sheet, base)
+            layout = (
+                sheet,
+                fee_columns,
+                self._resolve_invoice_columns(sheet, base, fee_columns),
+                self._resolve_carrier_columns(base),
+            )
+            layouts[sheet_name] = layout
+            return layout
+
         analyzed_items: list[PostingItem] = []
         conflicts: list[PostingConflict] = []
         target_groups: dict[tuple[str, int, int], list[int]] = defaultdict(list)
@@ -3053,7 +3040,8 @@ class ExpensePostingService:
                         item_index,
                         item,
                         ConflictType.CONTAINER_NOT_FOUND,
-                        f"Không tìm thấy container {item.container} trong tháng đích và hai tháng trước.",
+                        f"Không tìm thấy container {item.container} trong "
+                        f"{', '.join(window_names)}.",
                         (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
                         row_candidates=manual_candidates,
                     )
@@ -3068,7 +3056,8 @@ class ExpensePostingService:
                         item_index,
                         item,
                         ConflictType.MULTIPLE_CONTAINER_MATCH,
-                        f"Container {item.container} có nhiều dòng kế hoạch; hãy chọn đúng tháng và SQT.",
+                        f"Container {item.container} có nhiều dòng trong phạm vi "
+                        f"{', '.join(window_names)}; hãy chọn đúng sheet, dòng và SQT.",
                         (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
                         row_candidates=candidates,
                     )
@@ -3080,39 +3069,12 @@ class ExpensePostingService:
             item.source_sqt = selected.sqt
             item.plan_values = tuple(selected.plan_values)
             item.source_signature = selected.source_signature
-            if selected.mapping_invalid:
-                item_index = len(analyzed_items)
-                analyzed_items.append(item)
-                conflicts.append(
-                    self._item_conflict(
-                        batch_hash,
-                        item_index,
-                        item,
-                        ConflictType.CARRY_FORWARD_MAPPING_INVALID,
-                        "Ánh xạ dòng đã mang sang không còn khớp; cần kiểm tra BK trước khi tiếp tục.",
-                        (ResolutionAction.SKIP, ResolutionAction.CANCEL_ALL),
-                        default=ResolutionAction.SKIP,
-                    )
-                )
-                continue
+            item.sheet_name = selected.source_sheet
+            item.target_row = selected.row
 
-            if selected.source_sheet == target_sheet:
-                item.target_row = selected.row
-            elif selected.carried_target_row is not None:
-                item.target_row = selected.carried_target_row
-            else:
-                if target_plan_header is None or not selected.plan_values:
-                    raise ExpensePostingError(
-                        f"Không thể mang dòng {selected.source_sheet}!{selected.row}: "
-                        "sheet đích không đủ 12 cột kế hoạch."
-                    )
-                origin_key = self._origin_key(selected)
-                if origin_key not in allocated_rows:
-                    allocated_rows[origin_key] = next_target_row
-                    next_target_row += 1
-                item.target_row = allocated_rows[origin_key]
-                item.carry_forward_required = True
-
+            _sheet, fee_columns, _invoice_columns, _carrier_columns = sheet_layout(
+                selected.source_sheet
+            )
             item.target_column = fee_columns.get(item.selected_fee)
             if item.target_column is None:
                 item_index = len(analyzed_items)
@@ -3132,11 +3094,11 @@ class ExpensePostingService:
 
             item_index = len(analyzed_items)
             analyzed_items.append(item)
-            target_groups[(target_sheet, item.target_row, item.target_column)].append(
-                item_index
-            )
+            target_groups[
+                (str(item.sheet_name), item.target_row, item.target_column)
+            ].append(item_index)
 
-        for (_sheet, _row, _column), item_indexes in target_groups.items():
+        for (sheet_name, _row, _column), item_indexes in target_groups.items():
             if len(item_indexes) > 1:
                 first_index = item_indexes[0]
                 first = analyzed_items[first_index]
@@ -3181,6 +3143,9 @@ class ExpensePostingService:
 
             item_index = item_indexes[0]
             item = analyzed_items[item_index]
+            worksheet, _fee_columns, invoice_columns, _carrier_columns = sheet_layout(
+                sheet_name
+            )
             self._set_cell_state(worksheet, item)
             cell_conflict = self._cell_conflict(batch_hash, item_index, item)
             if cell_conflict is not None:
@@ -3194,14 +3159,24 @@ class ExpensePostingService:
             )
             if invoice_conflict is not None:
                 conflicts.append(invoice_conflict)
-        conflicts.extend(
-            self._analyze_carrier_groups(
-                worksheet,
-                analyzed_items,
-                batch_hash=batch_hash,
-                carrier_columns=carrier_columns,
+        for sheet_name in sorted(
+            {
+                str(item.sheet_name)
+                for item in analyzed_items
+                if item.target_row is not None and item.sheet_name is not None
+            },
+            key=lambda name: window_order.get(name, len(window_order)),
+        ):
+            worksheet, _fees, _invoices, carrier_columns = sheet_layout(sheet_name)
+            conflicts.extend(
+                self._analyze_carrier_groups(
+                    worksheet,
+                    analyzed_items,
+                    batch_hash=batch_hash,
+                    carrier_columns=carrier_columns,
+                    sheet_name=sheet_name,
+                )
             )
-        )
         return analyzed_items, conflicts
 
     def _analyze_carrier_groups(
@@ -3211,6 +3186,7 @@ class ExpensePostingService:
         *,
         batch_hash: str,
         carrier_columns: Mapping[str, int],
+        sheet_name: str,
     ) -> list[PostingConflict]:
         grouped: dict[tuple[int, str], list[int]] = defaultdict(list)
         conflicts: list[PostingConflict] = []
@@ -3219,6 +3195,7 @@ class ExpensePostingService:
             item.carrier_group = group
             if (
                 group is None
+                or item.sheet_name != sheet_name
                 or item.target_row is None
                 or item.status not in {PostingItemStatus.PLANNED, PostingItemStatus.ALREADY_EXISTS}
             ):
@@ -4211,93 +4188,6 @@ class ExpensePostingService:
             )
         return result
 
-    def _write_carried_plan_rows(
-        self,
-        worksheet: Any,
-        actions: Sequence[Mapping[str, Any]],
-    ) -> list[Mapping[str, Any]]:
-        unique: dict[tuple[str, int, int | None, str | None], Mapping[str, Any]] = {}
-        for action in actions:
-            if not action.get("carry_forward_required"):
-                continue
-            key = (
-                str(action.get("selected_source_sheet") or ""),
-                int(action.get("selected_source_row") or 0),
-                action.get("source_sqt"),
-                action.get("container"),
-            )
-            unique.setdefault(key, action)
-        carried = sorted(unique.values(), key=lambda value: int(value["target_row"]))
-        if not carried:
-            return []
-
-        target_header = self._plan_header(worksheet)
-        last_data_row = DailySyncService._last_data_row(worksheet, target_header)
-        expected_rows = list(
-            range(last_data_row + 1, last_data_row + len(carried) + 1)
-        )
-        actual_rows = [int(action["target_row"]) for action in carried]
-        if actual_rows != expected_rows:
-            raise ExpensePostingError(
-                "Vị trí dòng kế hoạch cần mang sang đã thay đổi; hãy phân tích lại."
-            )
-        template_row = max(target_header.row_end + 1, last_data_row)
-        max_column = DailySyncService._actual_max_column(worksheet)
-        for action in carried:
-            target_row = int(action["target_row"])
-            values = tuple(action.get("plan_values") or ())
-            if len(values) != len(SYNC_FIELDS):
-                raise ExpensePostingError("Dòng nguồn không đủ 12 trường kế hoạch.")
-            DailySyncService._copy_row_style(
-                worksheet,
-                template_row,
-                target_row,
-                max_column=max_column,
-            )
-            for index, field in enumerate(SYNC_FIELDS):
-                worksheet.cell(
-                    target_row, TARGET_EXPECTED_COLUMNS[field]
-                ).value = values[index]
-        return carried
-
-    def _record_carry_forwards(
-        self,
-        plan: PostingPlan,
-        actions: Sequence[Mapping[str, Any]],
-    ) -> None:
-        saver = getattr(self.posting_repository, "save_carry_forward", None)
-        if not callable(saver):
-            return
-        saved: set[tuple[str, int, int | None, str | None]] = set()
-        for action in actions:
-            source_sheet = str(action.get("selected_source_sheet") or "")
-            source_row = int(action.get("selected_source_row") or 0)
-            source_sqt = action.get("source_sqt")
-            container = action.get("container")
-            if (
-                not source_sheet
-                or source_sheet == action.get("sheet_name")
-                or source_row <= 0
-                or not isinstance(source_sqt, int)
-                or source_sqt <= 0
-                or not container
-            ):
-                continue
-            key = (source_sheet, source_row, source_sqt, str(container))
-            if key in saved:
-                continue
-            saver(
-                workbook_path=plan.target_path,
-                source_sheet=source_sheet,
-                source_row=source_row,
-                source_sqt=source_sqt,
-                container=str(container),
-                source_signature=str(action.get("source_signature") or ""),
-                target_sheet=str(action.get("sheet_name") or ""),
-                target_row=int(action["target_row"]),
-            )
-            saved.add(key)
-
     def _verify_posting(
         self,
         path: Path,
@@ -4317,22 +4207,7 @@ class ExpensePostingService:
                 worksheet, base, fee_columns
             )
             carrier_columns = self._resolve_carrier_columns(base)
-            target_plan_header = (
-                self._plan_header(worksheet)
-                if any(action.get("carry_forward_required") for action in actions)
-                else None
-            )
             for action in actions:
-                if action.get("carry_forward_required"):
-                    actual_plan_values = self._row_plan_values(
-                        worksheet,
-                        target_plan_header,
-                        int(action["target_row"]),
-                    )
-                    if actual_plan_values != tuple(action.get("plan_values") or ()):
-                        raise ExpensePostingError(
-                            f"Dòng kế hoạch {action['target_row']} không qua verify."
-                        )
                 fee = action["fee_selected"]
                 column = int(action["target_column"])
                 if fee_columns.get(fee) != column:

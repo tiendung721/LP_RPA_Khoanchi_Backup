@@ -711,12 +711,22 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _rpa_sheets_ready(self, candidates: Any) -> None:
+        candidate_values = list(candidates)
+        remembered_sheet = None
+        loader = getattr(self._rpa_expense, "remembered_sheet", None)
+        if callable(loader):
+            remembered_sheet = loader(candidate_values)
+        rpa_sheet_kwargs: dict[str, Any] = {
+            "title": "Chọn sheet BK chạy RPA nhập quyết toán",
+            "preselect_first": False,
+            "show_recommendations": False,
+        }
+        if remembered_sheet:
+            rpa_sheet_kwargs["initial_sheet_name"] = remembered_sheet
         dialog = MonthSelectionDialog(
-            list(candidates),
+            candidate_values,
             self,
-            title="Chọn sheet BK chạy RPA nhập quyết toán",
-            preselect_first=False,
-            show_recommendations=False,
+            **rpa_sheet_kwargs,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self.workflow_page.set_rpa_result("Đã hủy trước khi chọn sheet.")
@@ -725,13 +735,42 @@ class MainWindow(QMainWindow):
         if not sheet_name:
             return
         try:
+            remember = getattr(self._rpa_expense, "remember_sheet", None)
+            if callable(remember):
+                remember(sheet_name)
             self._rpa_expense.analyze_sheet(sheet_name)
         except Exception as exc:
             self._rpa_failed(exc)
 
     @Slot(object)
     def _rpa_plan_ready(self, plan: Any) -> None:
-        dialog = RpaSqtSelectionDialog(plan, self)
+        restore = None
+        loader = getattr(self._rpa_expense, "remembered_selection", None)
+        if callable(loader):
+            restore = loader(plan)
+        selected_sqt = tuple(
+            _attribute(restore, "selected_sqt", default=()) or ()
+        )
+        restore_info = {
+            "found": bool(_attribute(restore, "found", default=False)),
+            "saved_count": int(_attribute(restore, "saved_count", default=0) or 0),
+            "restored_count": int(
+                _attribute(restore, "restored_count", default=0) or 0
+            ),
+            "skipped_sqt": tuple(
+                _attribute(restore, "skipped_sqt", default=()) or ()
+            ),
+        }
+        clearer = getattr(self._rpa_expense, "clear_remembered_selection", None)
+        dialog = RpaSqtSelectionDialog(
+            plan,
+            self,
+            initial_selected_sqt=selected_sqt,
+            restore_info=restore_info,
+            clear_saved_callback=(
+                (lambda: bool(clearer(plan))) if callable(clearer) else None
+            ),
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self.workflow_page.set_rpa_result("Đã hủy trước khi chạy PAD.")
             return
@@ -816,6 +855,27 @@ class MainWindow(QMainWindow):
         if callable(saver):
             saver(plan, resolutions, operation=operation)
 
+    def _clear_excel_saved_choices(
+        self,
+        plan: Any,
+        operation: str,
+        local_resolutions: dict[str, Any] | None = None,
+    ) -> bool:
+        clearer = getattr(self._excel_tasks, "clear_saved_choices", None)
+        cleared = (
+            bool(clearer(plan, operation=operation))
+            if callable(clearer)
+            else False
+        )
+        if local_resolutions is not None:
+            local_resolutions.clear()
+        if hasattr(self, "_excel_review_resolutions"):
+            setattr(self, "_excel_review_resolutions", {})
+        if hasattr(self, "_excel_review_confirmed"):
+            setattr(self, "_excel_review_confirmed", False)
+        setattr(self, "_excel_restore_info", {})
+        return cleared
+
     @Slot(object)
     def _excel_analysis_ready(self, plan: Any) -> None:
         if self._excel_tasks is None:
@@ -844,15 +904,62 @@ class MainWindow(QMainWindow):
             source_target_sheets = dict(
                 _attribute(plan, "source_target_sheets", default={}) or {}
             )
+            default_source_target_sheets = dict(source_target_sheets)
+            source_targets_need_choice = any(
+                target in (None, "") for target in source_target_sheets.values()
+            )
+            restored_source_targets = resolutions.pop(
+                "source_target_sheets", {}
+            )
+            if isinstance(restored_source_targets, Mapping):
+                source_target_sheets.update(
+                    {
+                        str(source): str(target)
+                        for source, target in restored_source_targets.items()
+                        if source in source_target_sheets and target not in (None, "")
+                    }
+                )
+                try:
+                    plan.source_target_sheets = dict(source_target_sheets)
+                except AttributeError:
+                    pass
             if (
                 operation == "sync"
                 and source_target_sheets
-                and any(target in (None, "") for target in source_target_sheets.values())
+                and source_targets_need_choice
             ):
-                dialog = DailySyncAllocationDialog(plan, self)
+                daily_dialog_kwargs: dict[str, Any] = {}
+                if restored_source_targets and callable(
+                    getattr(self._excel_tasks, "clear_saved_choices", None)
+                ):
+                    daily_dialog_kwargs = {
+                        "default_source_target_sheets": (
+                            default_source_target_sheets
+                        ),
+                        "restored": True,
+                        "clear_saved_callback": (
+                            lambda current_plan=plan: MainWindow._clear_excel_saved_choices(
+                                self,
+                                current_plan,
+                                operation,
+                                resolutions,
+                            )
+                        ),
+                    }
+                dialog = DailySyncAllocationDialog(
+                    plan,
+                    self,
+                    **daily_dialog_kwargs,
+                )
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     self._excel_tasks.cancel_waiting()
                     return
+                MainWindow._save_excel_draft(
+                    self,
+                    plan,
+                    {"source_target_sheets": dialog.source_target_sheets},
+                    operation,
+                )
                 self._excel_tasks.cancel_waiting()
                 self._excel_context = "workflow"
                 self._excel_tasks.start_sync(
@@ -866,10 +973,28 @@ class MainWindow(QMainWindow):
                 and selected_month is None
                 and month_candidates
             ):
+                month_dialog_kwargs: dict[str, Any] = {
+                    "title": "Chọn tháng cần đồng bộ"
+                }
+                if resolutions.get("selected_sheet"):
+                    month_dialog_kwargs["initial_sheet_name"] = resolutions[
+                        "selected_sheet"
+                    ]
+                    if callable(
+                        getattr(self._excel_tasks, "clear_saved_choices", None)
+                    ):
+                        month_dialog_kwargs["clear_saved_callback"] = (
+                            lambda current_plan=plan: MainWindow._clear_excel_saved_choices(
+                                self,
+                                current_plan,
+                                operation,
+                                resolutions,
+                            )
+                        )
                 dialog = MonthSelectionDialog(
                     month_candidates,
                     self,
-                    title="Chọn tháng cần đồng bộ",
+                    **month_dialog_kwargs,
                 )
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     self._excel_tasks.cancel_waiting()
@@ -897,8 +1022,12 @@ class MainWindow(QMainWindow):
                             **selection,
                         }
                         handled_conflicts.add(conflict_id)
+                resolutions["selected_sheet"] = selected_sync_sheet
+                resolutions["selected_month"] = selection.get("selected_month")
+                MainWindow._save_excel_draft(self, plan, resolutions, operation)
 
             selected_sheet = _attribute(plan, "selected_sheet", "selected_sheet_name")
+            restored_selected_sheet = resolutions.pop("selected_sheet", None)
             raw_source_kind = _attribute(plan, "source_kind", default="ASSISTANT")
             source_kind = str(
                 getattr(raw_source_kind, "value", raw_source_kind) or "ASSISTANT"
@@ -914,6 +1043,16 @@ class MainWindow(QMainWindow):
             )
             source_groups = list(
                 _attribute(plan, "source_groups", default=()) or ()
+            )
+            default_group_target_sheets = {
+                str(_attribute(group, "group_id", default="")): _attribute(
+                    group, "target_sheet", default=None
+                )
+                for group in source_groups
+            }
+            group_targets_need_reanalysis = any(
+                target in (None, "")
+                for target in default_group_target_sheets.values()
             )
             restored_splits = {
                 str(value)
@@ -955,14 +1094,48 @@ class MainWindow(QMainWindow):
                 and source_kind != "BANG_KE"
                 and source_groups
                 and any(
-                    _attribute(group, "target_sheet", default=None) in (None, "")
+                    _attribute(group, "target_sheet", default=None)
+                    in (None, "")
                     for group in source_groups
                 )
             ):
-                dialog = PostingAllocationDialog(plan, self)
+                posting_allocation_kwargs: dict[str, Any] = {}
+                if restored_group_targets and callable(
+                    getattr(self._excel_tasks, "clear_saved_choices", None)
+                ):
+                    posting_allocation_kwargs = {
+                        "default_group_target_sheets": (
+                            default_group_target_sheets
+                        ),
+                        "restored": True,
+                        "clear_saved_callback": (
+                            lambda current_plan=plan: MainWindow._clear_excel_saved_choices(
+                                self,
+                                current_plan,
+                                operation,
+                                resolutions,
+                            )
+                        ),
+                    }
+                dialog = PostingAllocationDialog(
+                    plan,
+                    self,
+                    **posting_allocation_kwargs,
+                )
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     self._excel_tasks.cancel_waiting()
                     return
+                MainWindow._save_excel_draft(
+                    self,
+                    plan,
+                    {
+                        "group_target_sheets": dialog.group_target_sheets,
+                        "split_document_ids": sorted(
+                            current_splits | dialog.split_document_ids
+                        ),
+                    },
+                    operation,
+                )
                 if dialog.split_document_ids:
                     self._excel_tasks.cancel_waiting()
                     self._excel_context = "workflow"
@@ -986,12 +1159,15 @@ class MainWindow(QMainWindow):
                 and source_kind != "BANG_KE"
                 and source_groups
                 and restored_group_targets
+                and group_targets_need_reanalysis
                 and all(
                     _attribute(group, "target_sheet", default=None) not in (None, "")
                     for group in source_groups
                 )
-                and not list(_attribute(plan, "items", default=()) or ())
             ):
+                # Plan hiện tại được tạo trước khi ánh xạ đã nhớ được áp dụng,
+                # nên cần phân tích lại đúng một lần. Ở plan kế tiếp các nhóm
+                # đã có target ngay từ service và nhánh này không chạy lại.
                 self._excel_tasks.cancel_waiting()
                 self._excel_context = "workflow"
                 self._excel_tasks.start_posting(
@@ -1011,12 +1187,30 @@ class MainWindow(QMainWindow):
                 and selected_sheet in (None, "")
                 and sheet_candidates
             ):
+                posting_dialog_kwargs: dict[str, Any] = {
+                    "title": "Chọn sheet nhận khoản chi",
+                    "preselect_first": False,
+                    "show_recommendations": False,
+                }
+                if restored_selected_sheet not in (None, ""):
+                    posting_dialog_kwargs["initial_sheet_name"] = str(
+                        restored_selected_sheet
+                    )
+                    if callable(
+                        getattr(self._excel_tasks, "clear_saved_choices", None)
+                    ):
+                        posting_dialog_kwargs["clear_saved_callback"] = (
+                            lambda current_plan=plan: MainWindow._clear_excel_saved_choices(
+                                self,
+                                current_plan,
+                                operation,
+                                resolutions,
+                            )
+                        )
                 dialog = MonthSelectionDialog(
                     sheet_candidates,
                     self,
-                    title="Chọn sheet nhận khoản chi",
-                    preselect_first=False,
-                    show_recommendations=False,
+                    **posting_dialog_kwargs,
                 )
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     self._excel_tasks.cancel_waiting()
@@ -1025,6 +1219,12 @@ class MainWindow(QMainWindow):
                 # collected before apply; compatible choices are restored after
                 # the selected sheet has been analyzed.
                 sheet_name = dialog.selected_sheet_name
+                MainWindow._save_excel_draft(
+                    self,
+                    plan,
+                    {"selected_sheet": sheet_name},
+                    operation,
+                )
                 self._excel_tasks.cancel_waiting()
                 self._excel_context = "workflow"
                 self._excel_tasks.start_posting(
@@ -1056,11 +1256,42 @@ class MainWindow(QMainWindow):
                 and previously_posted
                 and not repost_selection_done
             ):
-                dialog = RepostSelectionDialog(previously_posted, self)
+                has_restored_reposts = "repost_source_indices" in resolutions
+                restored_reposts = resolutions.pop("repost_source_indices", ())
+                repost_dialog_kwargs: dict[str, Any] = {}
+                if has_restored_reposts:
+                    repost_dialog_kwargs["initial_source_indices"] = (
+                        restored_reposts
+                    )
+                    repost_dialog_kwargs["restore_info"] = getattr(
+                        self, "_excel_restore_info", {}
+                    )
+                    if callable(
+                        getattr(self._excel_tasks, "clear_saved_choices", None)
+                    ):
+                        repost_dialog_kwargs["clear_saved_callback"] = (
+                            lambda current_plan=plan: MainWindow._clear_excel_saved_choices(
+                                self,
+                                current_plan,
+                                operation,
+                                resolutions,
+                            )
+                        )
+                dialog = RepostSelectionDialog(
+                    previously_posted,
+                    self,
+                    **repost_dialog_kwargs,
+                )
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     self._excel_tasks.cancel_waiting()
                     return
                 repost_indices = dialog.selected_source_indices
+                MainWindow._save_excel_draft(
+                    self,
+                    plan,
+                    {"repost_source_indices": repost_indices},
+                    operation,
+                )
                 self._excel_tasks.cancel_waiting()
                 self._excel_context = "workflow"
                 analyze_kwargs: dict[str, Any] = {
@@ -1163,13 +1394,27 @@ class MainWindow(QMainWindow):
                 ]
             if remaining:
                 if getattr(self, "_excel_review_dialog", None) is None:
+                    conflict_dialog_kwargs: dict[str, Any] = {
+                        "operation": operation,
+                        "initial_resolutions": resolutions,
+                        "restore_info": getattr(self, "_excel_restore_info", {}),
+                        "issues": source_reload_issues,
+                    }
+                    if callable(
+                        getattr(self._excel_tasks, "clear_saved_choices", None)
+                    ):
+                        conflict_dialog_kwargs["clear_saved_callback"] = (
+                            lambda current_plan=plan, current_operation=operation: MainWindow._clear_excel_saved_choices(
+                                self,
+                                current_plan,
+                                current_operation,
+                                resolutions,
+                            )
+                        )
                     dialog = ConflictResolutionDialog(
                         remaining,
                         self,
-                        operation=operation,
-                        initial_resolutions=resolutions,
-                        restore_info=getattr(self, "_excel_restore_info", {}),
-                        issues=source_reload_issues,
+                        **conflict_dialog_kwargs,
                     )
                     setattr(self, "_excel_review_dialog", dialog)
                     setattr(self, "_excel_review_plan", plan)
@@ -1335,12 +1580,26 @@ class MainWindow(QMainWindow):
         conflicts = list(_attribute(plan, "conflicts", default=()) or ())
         if conflicts:
             if getattr(self, "_excel_review_dialog", None) is None:
+                conflict_dialog_kwargs: dict[str, Any] = {
+                    "operation": "payment_sync",
+                    "initial_resolutions": resolutions,
+                    "restore_info": getattr(self, "_excel_restore_info", {}),
+                }
+                if callable(
+                    getattr(self._excel_tasks, "clear_saved_choices", None)
+                ):
+                    conflict_dialog_kwargs["clear_saved_callback"] = (
+                        lambda current_plan=plan: MainWindow._clear_excel_saved_choices(
+                            self,
+                            current_plan,
+                            "payment_sync",
+                            resolutions,
+                        )
+                    )
                 conflict_dialog = ConflictResolutionDialog(
                     conflicts,
                     self,
-                    operation="payment_sync",
-                    initial_resolutions=resolutions,
-                    restore_info=getattr(self, "_excel_restore_info", {}),
+                    **conflict_dialog_kwargs,
                 )
                 setattr(self, "_excel_review_dialog", conflict_dialog)
                 setattr(self, "_excel_review_plan", plan)
@@ -1380,8 +1639,31 @@ class MainWindow(QMainWindow):
             return
 
         new_rows = list(_attribute(plan, "new_rows", default=()) or ())
-        if new_rows and "selected_new_rows" not in resolutions:
-            new_dialog = PaymentNewRowsDialog(new_rows, self)
+        if new_rows:
+            payment_rows_kwargs: dict[str, Any] = {}
+            if "selected_new_rows" in resolutions:
+                payment_rows_kwargs["initial_selected_item_ids"] = resolutions[
+                    "selected_new_rows"
+                ]
+                payment_rows_kwargs["restore_info"] = getattr(
+                    self, "_excel_restore_info", {}
+                )
+            if callable(
+                getattr(self._excel_tasks, "clear_saved_choices", None)
+            ):
+                payment_rows_kwargs["clear_saved_callback"] = (
+                    lambda current_plan=plan: MainWindow._clear_excel_saved_choices(
+                        self,
+                        current_plan,
+                        "payment_sync",
+                        resolutions,
+                    )
+                )
+            new_dialog = PaymentNewRowsDialog(
+                new_rows,
+                self,
+                **payment_rows_kwargs,
+            )
             if new_dialog.exec() != QDialog.DialogCode.Accepted:
                 self._excel_tasks.cancel_waiting()
                 return

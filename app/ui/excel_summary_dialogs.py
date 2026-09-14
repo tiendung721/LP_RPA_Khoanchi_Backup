@@ -14,7 +14,6 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -30,6 +29,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from .app_dialog import AppDialog
 
 
 @dataclass(frozen=True, slots=True)
@@ -683,7 +684,7 @@ def payment_completion_summary(result: Any) -> ExcelOperationSummary:
     )
 
 
-class _ExcelSummaryDialog(QDialog):
+class _ExcelSummaryDialog(AppDialog):
     """Khung trình bày chung; footer do lớp con cung cấp."""
 
     _STATE_ICONS = {

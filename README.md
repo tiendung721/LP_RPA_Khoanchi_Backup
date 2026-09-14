@@ -26,12 +26,13 @@ Bước 1 hoặc chọn JSON thủ công.
   chặn toàn bộ tác vụ; các workbook gốc chỉ được thay sau khi mọi tháng đã
   ghi và kiểm tra thành công.
 - Khi nhập khoản chi, ứng dụng phân nhóm theo chứng từ nguồn/hóa đơn, đề xuất
-  sheet từ ngày hóa đơn và để người dùng quyết định sheet đích cuối cùng.
+  sheet từ ngày hóa đơn và để người dùng quyết định tháng làm mốc dò cuối cùng.
   Chỉ các sheet BK đã tồn tại được chọn cho luồng này.
-- Với từng sheet tháng đích, ứng dụng đối chiếu sheet đó và hai
-  tháng liền trước. Dòng kế hoạch tháng cũ được mang sang đúng một lần, chỉ giữ
-  12 trường thông tin lô hàng; phí và hóa đơn mới tiếp tục ghi trên cùng dòng.
-- Container xuất hiện ở nhiều tháng/SQT phải được chọn đúng sheet và dòng nguồn.
+- Với từng chứng từ/hóa đơn, ứng dụng tìm dòng trong sheet tháng được chọn và hai
+  tháng liền trước, rồi ghi khoản chi ngay tại sheet chứa dòng tìm thấy. Ứng dụng
+  không sao chép hoặc tạo dòng kế hoạch mới.
+- Nguồn Bảng kê giữ cơ chế đối chiếu riêng trên toàn bộ các sheet tháng.
+- Container xuất hiện nhiều lần trong phạm vi dò phải được chọn đúng sheet/dòng/SQT.
   Nhiều dòng JSON cùng nhắm một ô phí không được cộng; người dùng chọn đúng một
   dòng để ghi, còn ô đã có giá trị chỉ cho giữ nguyên, ghi đè hoặc bỏ qua.
 - Bước 4 (RPA) vẫn chỉ cho chọn một sheet BK, tổng hợp các dòng theo SQT, chọn nhiều SQT và gọi
@@ -44,15 +45,20 @@ Bước 1 hoặc chọn JSON thủ công.
   **tên tàu + số chuyến**.
 - Màn hình kiểm tra chỉ hiển thị một cột **Tàu/chuyến** ghép từ hai trường trên;
   khi sửa dòng, giá trị AI nguyên văn vẫn được giữ để truy vết.
-- Nếu không tìm thấy tàu/chuyến trong BK, ứng dụng không tạo hồ sơ rỗng mà hiển
-  thị tối đa năm gợi ý gần đúng kèm số cont. Người dùng tự sửa thông tin rồi chủ
-  động đối soát lại; gợi ý không bao giờ được tự áp dụng.
+- Nếu exact match không thấy, ứng dụng đối chiếu tên tàu và phần số/hậu tố chuyến
+  trong đúng sheet BK. Chỉ một kết quả khác do thiếu tiền tố như `V.`, `MB`, `BS`
+  hoặc `VPN` thì tự dùng giá trị canonical của BK; nhiều kết quả thì người dùng
+  chọn một lần. Gợi ý gần đúng do sai tên tàu vẫn chỉ để tham khảo và sửa tay.
 - Khi bắt đầu đối soát, người dùng có thể chọn nhiều hóa đơn cước biển cùng
   tàu/chuyến từ nhiều PDF để đóng góp vào một hồ sơ. Mỗi hóa đơn vẫn giữ tên
   chứng từ, số HĐ, ngày, số cont và số tiền riêng để truy vết.
 - Cửa sổ đối soát hiển thị đồng thời danh sách HĐ, cont tìm được trong BK và
   bảng kết quả dự kiến. HĐ có thể thêm, sửa, xóa và lưu trực tiếp; hồ sơ chưa
   hoàn tất được giữ qua các lần khởi động mà không cần trung tâm chờ riêng.
+- Tại màn hình kiểm tra file bóc tách, người dùng được xóa mọi loại cước dù batch
+  đã có hồ sơ cước biển. Thao tác chỉ có hiệu lực khi bấm **Lưu**; HĐ cước biển
+  bị xóa đồng thời được loại khỏi hồ sơ, hồ sơ rỗng được hủy nhưng vẫn giữ lịch
+  sử, và HĐ vẫn được phép đối soát/nhập lại nếu xuất hiện ở lần sau.
 - Hồ sơ trong cửa sổ đối soát được cố định theo đúng dòng đã chọn ở màn hình
   kiểm tra dữ liệu bóc tách. Muốn xem hoặc đối soát file khác, người dùng phải
   đóng hồ sơ hiện tại rồi bấm **Xem hồ sơ** hoặc **Đối soát** tại dòng tương ứng.

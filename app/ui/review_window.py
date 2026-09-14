@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .app_dialog import AppDialog
 from .edit_row_dialog import EditRowDialog
 from .inline_action_delegate import InlineActionDelegate
 from .review_table_model import (
@@ -53,10 +54,14 @@ from app.services.review_carrier_lookup import ReviewCarrierLookup
 from app.sea_freight.contracts import (
     GroupStatus,
     InvoiceHistoryMatchKind,
+    VesselVoyageResolutionKind,
+    VesselVoyageSuggestion,
     group_status_text,
 )
 from app.sea_freight.service import VesselVoyageNotFoundError
-from app.sea_freight.matching import normalize_match_key
+from app.sea_freight.matching import (
+    vessel_voyage_alias_equivalent,
+)
 from app.ui.sea_freight_center import ReconciliationPeriodDialog
 from app.ui.feedback import LinearLoadingBar, set_button_loading
 
@@ -71,7 +76,7 @@ STATUS_VI = {
 }
 
 
-class SeaFreightContributionSelectionDialog(QDialog):
+class SeaFreightContributionSelectionDialog(AppDialog):
     """Chọn nhiều HĐ cùng tàu/chuyến để đưa vào một hồ sơ đối soát."""
 
     def __init__(
@@ -183,7 +188,7 @@ def _extract_review(batch: Any, explicit_rows: Any | None) -> tuple[Any, list[An
     return metadata, []
 
 
-class RawJsonDialog(QDialog):
+class RawJsonDialog(AppDialog):
     """Preview JSON chỉ đọc, không cho sửa lệch schema."""
 
     def __init__(self, document: dict[str, Any], parent: QWidget | None = None) -> None:
@@ -210,8 +215,9 @@ class RawJsonDialog(QDialog):
         layout.addWidget(buttons)
 
 
-class VesselVoyageNotFoundDialog(QDialog):
+class VesselVoyageNotFoundDialog(AppDialog):
     EDIT_RESULT = 2
+    USE_RESULT = 3
 
     def __init__(
         self,
@@ -222,13 +228,26 @@ class VesselVoyageNotFoundDialog(QDialog):
         self.setWindowTitle("Không tìm thấy tàu/chuyến")
         self.setModal(True)
         self.setMinimumWidth(560)
+        self.candidate_combo: QComboBox | None = None
         layout = QVBoxLayout(self)
-        title = QLabel("Không tìm thấy tàu/chuyến tương ứng trong BK")
+        title = QLabel(
+            "Có nhiều tàu/chuyến có thể tương ứng trong BK"
+            if error.ambiguous
+            else "Không tìm thấy tàu/chuyến tương ứng trong BK"
+        )
         title.setObjectName("dialogTitle")
         layout.addWidget(title)
         message = QLabel(
-            f'Không tìm thấy “{error.vessel_voyage}” trong sheet {error.bk_sheet}.\n'
-            "Hãy kiểm tra, sửa lại tên tàu hoặc số chuyến rồi bấm Đối soát lại."
+            (
+                f'Tìm thấy nhiều kết quả cho “{error.vessel_voyage}” trong '
+                f"sheet {error.bk_sheet}.\nHãy chọn đúng tàu/chuyến để tiếp tục."
+            )
+            if error.ambiguous
+            else (
+                f'Không tìm thấy “{error.vessel_voyage}” trong sheet '
+                f"{error.bk_sheet}.\nHãy kiểm tra, sửa lại tên tàu hoặc số chuyến "
+                "rồi bấm Đối soát lại."
+            )
         )
         message.setWordWrap(True)
         layout.addWidget(message)
@@ -247,6 +266,16 @@ class VesselVoyageNotFoundDialog(QDialog):
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
             layout.addWidget(suggestion_text)
+            selectable = tuple(item for item in error.suggestions if item.selectable)
+            if selectable:
+                self.candidate_combo = QComboBox()
+                self.candidate_combo.setObjectName("vesselVoyageCandidateCombo")
+                for item in selectable:
+                    self.candidate_combo.addItem(
+                        f"{item.vessel_voyage} — {item.container_count} container",
+                        item,
+                    )
+                layout.addWidget(self.candidate_combo)
         buttons = QDialogButtonBox()
         self.close_button = buttons.addButton(
             "Đóng", QDialogButtonBox.ButtonRole.RejectRole
@@ -254,10 +283,26 @@ class VesselVoyageNotFoundDialog(QDialog):
         self.edit_button = buttons.addButton(
             "Sửa dòng", QDialogButtonBox.ButtonRole.AcceptRole
         )
-        self.edit_button.setProperty("primary", True)
+        self.use_button: QPushButton | None = None
+        if self.candidate_combo is not None:
+            self.use_button = buttons.addButton(
+                "Dùng tàu/chuyến đã chọn",
+                QDialogButtonBox.ButtonRole.ActionRole,
+            )
+            self.use_button.setProperty("primary", True)
+            self.use_button.clicked.connect(lambda: self.done(self.USE_RESULT))
+        if self.use_button is None:
+            self.edit_button.setProperty("primary", True)
         self.close_button.clicked.connect(self.reject)
         self.edit_button.clicked.connect(lambda: self.done(self.EDIT_RESULT))
         layout.addWidget(buttons)
+
+    @property
+    def selected_suggestion(self) -> VesselVoyageSuggestion | None:
+        if self.candidate_combo is None:
+            return None
+        value = self.candidate_combo.currentData()
+        return value if isinstance(value, VesselVoyageSuggestion) else None
 
 
 class ReviewWindow(QMainWindow):
@@ -319,6 +364,8 @@ class ReviewWindow(QMainWindow):
             self.model.runtime_id_at(index): index
             for index in range(self.model.rowCount())
         }
+        self._pending_deleted_source_indices: set[int] = set()
+        self._next_source_item_index = self.model.rowCount()
         self.proxy_model = ReviewFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
         self._build_ui()
@@ -819,6 +866,9 @@ class ReviewWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         position = self.model.add_row(dialog.row_data())
+        runtime_id = self.model.runtime_id_at(position)
+        self._source_index_by_runtime[runtime_id] = self._next_source_item_index
+        self._next_source_item_index += 1
         self._select_source_row(position)
 
     def edit_selected_row(self, _index: QModelIndex | None = None) -> None:
@@ -854,21 +904,35 @@ class ReviewWindow(QMainWindow):
         self._select_source_row(source_row)
         return True
 
+    def _apply_canonical_vessel_voyage(
+        self,
+        source_rows: Sequence[int],
+        *,
+        vessel_name: str,
+        voyage_no: str,
+    ) -> None:
+        for source_row in source_rows:
+            current = self.model.row_at(source_row)
+            payload = current.to_object()
+            payload["vessel_name"] = vessel_name
+            payload["voyage_no"] = voyage_no
+            self.model.update_row(
+                source_row,
+                ReviewRow.from_mapping(payload, runtime_id=current.runtime_id),
+            )
+
     def delete_selected_row(self) -> None:
         source_rows = self._selected_source_rows()
         if not source_rows:
             return
-        if any(
-            self.model.lookup_presentation(self.model.runtime_id_at(index)).session_id
-            for index in range(self.model.rowCount())
-        ):
-            QMessageBox.information(
-                self,
-                "Có HĐ đang đối soát",
-                "Không thể xóa dòng vì sẽ làm lệch vị trí nguồn của nhóm chờ. "
-                "Hãy mở hồ sơ đối soát và xóa HĐ tại đó.",
+        linked_count = sum(
+            bool(
+                self.model.lookup_presentation(
+                    self.model.runtime_id_at(index)
+                ).session_id
             )
-            return
+            for index in source_rows
+        )
         if len(source_rows) == 1:
             confirmation = (
                 f"Bạn có chắc muốn xóa dòng số {source_rows[0] + 1}? Dòng sẽ chỉ bị xóa "
@@ -883,6 +947,11 @@ class ReviewWindow(QMainWindow):
                 f"(STT {', '.join(display_numbers)})? Các dòng sẽ chỉ bị xóa "
                 "khỏi bản làm việc sau khi bạn lưu."
             )
+        if linked_count:
+            confirmation += (
+                f"\n\nCó {linked_count} HĐ đang thuộc hồ sơ cước biển. Khi lưu, "
+                "HĐ cũng sẽ được loại khỏi hồ sơ và hồ sơ sẽ được tính lại."
+            )
         selected_proxy_rows = [
             index.row() for index in self.table.selectionModel().selectedRows()
         ]
@@ -896,6 +965,11 @@ class ReviewWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        for source_row in source_rows:
+            runtime_id = self.model.runtime_id_at(source_row)
+            source_index = self._source_index_by_runtime.get(runtime_id)
+            if source_index is not None:
+                self._pending_deleted_source_indices.add(source_index)
         self.model.remove_rows(source_rows)
         if self.proxy_model.rowCount():
             self.table.selectRow(
@@ -934,6 +1008,41 @@ class ReviewWindow(QMainWindow):
         except (ImportError, AttributeError, TypeError):
             return {"v": SCHEMA_VERSION, "d": objects}
 
+    def _sync_pending_batch_deletions(self) -> None:
+        if not self._pending_deleted_source_indices:
+            return
+        remaining_source_indices = {
+            original_index: current_index
+            for current_index in range(self.model.rowCount())
+            if (
+                original_index := self._source_index_by_runtime.get(
+                    self.model.runtime_id_at(current_index)
+                )
+            )
+            is not None
+        }
+        if self._sea_freight_service is not None and self._batch_id is not None:
+            apply_deletions = getattr(
+                self._sea_freight_service,
+                "apply_batch_row_deletions",
+                None,
+            )
+            if callable(apply_deletions):
+                apply_deletions(
+                    source_batch_id=int(self._batch_id),
+                    deleted_source_indices=set(
+                        self._pending_deleted_source_indices
+                    ),
+                    remaining_source_indices=remaining_source_indices,
+                )
+        self._pending_deleted_source_indices.clear()
+        self._source_index_by_runtime = {
+            self.model.runtime_id_at(index): index
+            for index in range(self.model.rowCount())
+        }
+        self._next_source_item_index = self.model.rowCount()
+        self.reconciliationChanged.emit()
+
     def save_working(self) -> bool:
         if self._saving:
             return False
@@ -955,6 +1064,7 @@ class ReviewWindow(QMainWindow):
             result = handler(self._batch_id, document)
             if result is False:
                 raise RuntimeError("Dịch vụ từ chối lưu bản làm việc.")
+            self._sync_pending_batch_deletions()
             self._apply_service_result(result)
             self.model.mark_clean()
             self._last_saved_at = (
@@ -977,6 +1087,13 @@ class ReviewWindow(QMainWindow):
             self._set_saving(False)
 
     def confirm_batch(self) -> bool:
+        deletion_saved = False
+        if self._pending_deleted_source_indices:
+            # Xóa là chỉnh sửa của batch và phải lưu được ngay cả khi những HĐ
+            # cước biển còn lại chưa đủ điều kiện xác nhận hoàn tất.
+            if not self.save_working():
+                return False
+            deletion_saved = True
         stats = self.model.stats
         unmanaged = [
             index
@@ -992,10 +1109,11 @@ class ReviewWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Cước biển chưa được đối soát",
-                f"Còn {len(unmanaged)} dòng cước biển thiếu số cont chưa có hồ sơ đối soát. "
+                ("Các dòng đã xóa đã được lưu. " if deletion_saved else "")
+                + f"Còn {len(unmanaged)} dòng cước biển thiếu số cont chưa có hồ sơ đối soát. "
                 "Hãy bổ sung tàu/chuyến, số cont rồi bấm Đối soát số cont.",
             )
-            return False
+            return deletion_saved
         incomplete = [
             index
             for index in range(self.model.rowCount())
@@ -1013,18 +1131,20 @@ class ReviewWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Hồ sơ đối soát chưa hoàn tất",
-                f"Còn {len(incomplete)} dòng cước biển có hồ sơ nhưng chưa xác nhận kết quả. "
+                ("Các dòng đã xóa đã được lưu. " if deletion_saved else "")
+                + f"Còn {len(incomplete)} dòng cước biển có hồ sơ nhưng chưa xác nhận kết quả. "
                 "Hãy bấm Xem hồ sơ và hoàn tất đối soát trước khi lưu file.",
             )
-            return False
+            return deletion_saved
         if stats.error:
             self._focus_first_error()
             QMessageBox.warning(
                 self,
                 "Còn lỗi chặn",
-                f"Batch còn {stats.error} dòng lỗi. Hãy sửa lỗi trước khi xác nhận hoàn tất.",
+                ("Các dòng đã xóa đã được lưu. " if deletion_saved else "")
+                + f"Batch còn {stats.error} dòng lỗi. Hãy sửa lỗi trước khi xác nhận hoàn tất.",
             )
-            return False
+            return deletion_saved
         if stats.warning:
             answer = QMessageBox.question(
                 self,
@@ -1035,7 +1155,7 @@ class ReviewWindow(QMainWindow):
                 QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
-                return False
+                return deletion_saved
 
         handler = self._confirm_handler or self._service_handler(
             "confirm_batch", "confirm", "mark_ready"
@@ -1055,6 +1175,7 @@ class ReviewWindow(QMainWindow):
             result = handler(self._batch_id, document)
             if result is False:
                 raise RuntimeError("Dịch vụ từ chối xác nhận batch.")
+            self._sync_pending_batch_deletions()
             self._apply_service_result(result)
             self._status = "READY"
             self.status_value.setText(STATUS_VI["READY"])
@@ -1152,6 +1273,8 @@ class ReviewWindow(QMainWindow):
             self.model.runtime_id_at(index): index
             for index in range(self.model.rowCount())
         }
+        self._pending_deleted_source_indices.clear()
+        self._next_source_item_index = self.model.rowCount()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self.model.dirty:
@@ -1347,6 +1470,82 @@ class ReviewWindow(QMainWindow):
         if period_dialog.exec() != QDialog.DialogCode.Accepted:
             return False
         month, year = period_dialog.period()
+        comparison_vessel_name = str(data_row.vessel_name or "")
+        comparison_voyage_no = str(data_row.voyage_no or "")
+        auto_alias_used = False
+        manual_alias_used = False
+        resolve_for_period = getattr(service, "resolve_for_period", None)
+        if callable(resolve_for_period):
+            try:
+                preview = resolve_for_period(
+                    data_row,
+                    bk_path=bk_path,
+                    month=month,
+                    year=year,
+                )
+            except Exception:
+                preview = None
+            if preview is not None and preview.resolution_kind in {
+                VesselVoyageResolutionKind.EXACT,
+                VesselVoyageResolutionKind.AUTO_ALIAS,
+            }:
+                comparison_vessel_name = (
+                    preview.canonical_vessel_name or comparison_vessel_name
+                )
+                comparison_voyage_no = (
+                    preview.canonical_voyage_no or comparison_voyage_no
+                )
+                self._apply_canonical_vessel_voyage(
+                    [source_row],
+                    vessel_name=comparison_vessel_name,
+                    voyage_no=comparison_voyage_no,
+                )
+                data_row = data_row.copy_with(
+                    vessel_name=comparison_vessel_name,
+                    voyage_no=comparison_voyage_no,
+                )
+                auto_alias_used = (
+                    preview.resolution_kind is VesselVoyageResolutionKind.AUTO_ALIAS
+                )
+            elif (
+                preview is not None
+                and preview.resolution_kind is VesselVoyageResolutionKind.AMBIGUOUS
+            ):
+                dialog = VesselVoyageNotFoundDialog(
+                    VesselVoyageNotFoundError(
+                        vessel_voyage=f"{comparison_vessel_name} {comparison_voyage_no}",
+                        bk_sheet=preview.bk_sheet,
+                        suggestions=preview.alias_candidates,
+                        ambiguous=True,
+                    ),
+                    self,
+                )
+                dialog_result = dialog.exec()
+                if dialog_result == VesselVoyageNotFoundDialog.USE_RESULT:
+                    suggestion = dialog.selected_suggestion
+                    if suggestion is None:
+                        return False
+                    comparison_vessel_name = suggestion.vessel_name
+                    comparison_voyage_no = suggestion.voyage_no
+                    self._apply_canonical_vessel_voyage(
+                        [source_row],
+                        vessel_name=comparison_vessel_name,
+                        voyage_no=comparison_voyage_no,
+                    )
+                    data_row = data_row.copy_with(
+                        vessel_name=comparison_vessel_name,
+                        voyage_no=comparison_voyage_no,
+                    )
+                    manual_alias_used = True
+                    LOGGER.info(
+                        "Kết quả resolve tàu/chuyến: MANUAL_ALIAS -> %s",
+                        suggestion.vessel_voyage,
+                    )
+                elif dialog_result == VesselVoyageNotFoundDialog.EDIT_RESULT:
+                    self._edit_source_row(source_row, focus_vessel=True)
+                    return False
+                else:
+                    return False
         managed_indices: set[int] = set()
         if self._batch_id is not None:
             try:
@@ -1355,8 +1554,6 @@ class ReviewWindow(QMainWindow):
                 )
             except Exception:
                 managed_indices = set()
-        vessel_key = normalize_match_key(data_row.vessel_name)
-        voyage_key = normalize_match_key(data_row.voyage_no)
         compatible = [
             (index, candidate)
             for index in range(self.model.rowCount())
@@ -1364,8 +1561,12 @@ class ReviewWindow(QMainWindow):
             and (candidate := self.model.row_at(index)).fee == "CB"
             and candidate.cont in (None, "")
             and not self._missing_reconciliation_fields(candidate)
-            and normalize_match_key(candidate.vessel_name) == vessel_key
-            and normalize_match_key(candidate.voyage_no) == voyage_key
+            and vessel_voyage_alias_equivalent(
+                candidate.vessel_name,
+                candidate.voyage_no,
+                comparison_vessel_name,
+                comparison_voyage_no,
+            )
         ]
         selection_dialog = SeaFreightContributionSelectionDialog(
             compatible, self
@@ -1377,50 +1578,109 @@ class ReviewWindow(QMainWindow):
             QMessageBox.warning(self, "Chưa chọn hóa đơn", "Hãy chọn ít nhất một hóa đơn.")
             return False
         outcome: Any | None = None
-        try:
-            open_many = getattr(service, "open_or_create_many", None)
-            if callable(open_many):
-                outcome = open_many(
-                    [
-                        (
-                            self._source_index_by_runtime.get(
-                                self.model.runtime_id_at(index), index
-                            ),
-                            DataRow.from_mapping(self.model.row_at(index).to_object()),
-                        )
-                        for index in selected_indices
-                    ],
-                    bk_path=bk_path,
-                    month=month,
-                    year=year,
-                    source_batch_id=(
-                        int(self._batch_id) if self._batch_id is not None else None
-                    ),
-                    source_sha256=str(
-                        _value(self._metadata, "sha256", default="") or ""
-                    ),
-                )
-                group = getattr(outcome, "group", outcome)
-            else:
-                group = service.open_or_create(
-                    data_row,
-                    bk_path=bk_path, month=month, year=year,
-                    source_batch_id=int(self._batch_id) if self._batch_id is not None else None,
-                    source_item_index=self._source_index_by_runtime.get(row.runtime_id, source_row),
-                    source_sha256=str(_value(self._metadata, "sha256", default="") or ""),
-                )
-                selected_indices = [source_row]
-        except VesselVoyageNotFoundError as exc:
-            if exc.sheet_missing:
-                QMessageBox.warning(self, "Không tìm thấy sheet BK", str(exc))
-            else:
+        while True:
+            try:
+                open_many = getattr(service, "open_or_create_many", None)
+                if callable(open_many):
+                    outcome = open_many(
+                        [
+                            (
+                                self._source_index_by_runtime.get(
+                                    self.model.runtime_id_at(index), index
+                                ),
+                                DataRow.from_mapping(self.model.row_at(index).to_object()),
+                            )
+                            for index in selected_indices
+                        ],
+                        bk_path=bk_path,
+                        month=month,
+                        year=year,
+                        source_batch_id=(
+                            int(self._batch_id) if self._batch_id is not None else None
+                        ),
+                        source_sha256=str(
+                            _value(self._metadata, "sha256", default="") or ""
+                        ),
+                    )
+                    group = getattr(outcome, "group", outcome)
+                else:
+                    current_data_row = DataRow.from_mapping(
+                        self.model.row_at(source_row).to_object()
+                    )
+                    group = service.open_or_create(
+                        current_data_row,
+                        bk_path=bk_path, month=month, year=year,
+                        source_batch_id=(
+                            int(self._batch_id) if self._batch_id is not None else None
+                        ),
+                        source_item_index=self._source_index_by_runtime.get(
+                            row.runtime_id, source_row
+                        ),
+                        source_sha256=str(
+                            _value(self._metadata, "sha256", default="") or ""
+                        ),
+                    )
+                    selected_indices = [source_row]
+                break
+            except VesselVoyageNotFoundError as exc:
+                if exc.sheet_missing:
+                    QMessageBox.warning(self, "Không tìm thấy sheet BK", str(exc))
+                    return False
                 dialog = VesselVoyageNotFoundDialog(exc, self)
-                if dialog.exec() == VesselVoyageNotFoundDialog.EDIT_RESULT:
+                dialog_result = dialog.exec()
+                if dialog_result == VesselVoyageNotFoundDialog.USE_RESULT:
+                    suggestion = dialog.selected_suggestion
+                    if suggestion is not None:
+                        selected_indices = [
+                            index
+                            for index in selected_indices
+                            if vessel_voyage_alias_equivalent(
+                                self.model.row_at(index).vessel_name,
+                                self.model.row_at(index).voyage_no,
+                                suggestion.vessel_name,
+                                suggestion.voyage_no,
+                            )
+                        ]
+                        self._apply_canonical_vessel_voyage(
+                            selected_indices,
+                            vessel_name=suggestion.vessel_name,
+                            voyage_no=suggestion.voyage_no,
+                        )
+                        manual_alias_used = True
+                        LOGGER.info(
+                            "Kết quả resolve tàu/chuyến: MANUAL_ALIAS -> %s",
+                            suggestion.vessel_voyage,
+                        )
+                        continue
+                if dialog_result == VesselVoyageNotFoundDialog.EDIT_RESULT:
                     self._edit_source_row(source_row, focus_vessel=True)
-            return False
-        except Exception as exc:
-            QMessageBox.warning(self, "Chưa thể đối soát số cont", str(exc))
-            return False
+                return False
+            except Exception as exc:
+                QMessageBox.warning(self, "Chưa thể đối soát số cont", str(exc))
+                return False
+
+        canonical_vessel_name = str(
+            getattr(outcome, "canonical_vessel_name", "") or ""
+        ).strip()
+        canonical_voyage_no = str(
+            getattr(outcome, "canonical_voyage_no", "") or ""
+        ).strip()
+        if canonical_vessel_name and canonical_voyage_no:
+            self._apply_canonical_vessel_voyage(
+                selected_indices,
+                vessel_name=canonical_vessel_name,
+                voyage_no=canonical_voyage_no,
+            )
+        resolution_kind = getattr(outcome, "resolution_kind", None)
+        if (
+            auto_alias_used
+            or manual_alias_used
+            or resolution_kind is VesselVoyageResolutionKind.AUTO_ALIAS
+        ):
+            self.statusBar().showMessage(
+                f"Đã dùng tàu/chuyến theo BK: {group.vessel_voyage_raw}",
+                7000,
+            )
 
         if bool(getattr(outcome, "requires_revision", False)):
             QMessageBox.information(

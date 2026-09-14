@@ -428,6 +428,7 @@ class RowCandidate:
     closing_date: Any = None
     closing_place: Any = None
     vessel: Any = None
+    departure_date: Any = None
     recipient: Any = None
     carrier: Any = None
     is_ron: bool = False

@@ -115,13 +115,15 @@ class ExcelDraftRestore:
     saved_choice_count: int
     restored_count: int
     target_compatible: bool
+    target_changed: bool
+    skipped_count: int
     last_error: str | None
 
 
 class ExcelDraftService:
     """Keep the latest decisions per source file and replay compatible choices."""
 
-    PAYLOAD_VERSION = 1
+    PAYLOAD_VERSION = 2
 
     def __init__(self, repository: ExcelDraftRepository) -> None:
         self.repository = repository
@@ -140,7 +142,9 @@ class ExcelDraftService:
 
         context = self._context(plan, operation)
         record = self.repository.get_latest(self._source_file_key(context))
-        if record is None or not self._target_is_compatible(record.context, context):
+        if record is None or not self._target_path_is_compatible(
+            record.context, context
+        ):
             return {}
         entries = record.payload.get("entries", {})
         if not isinstance(entries, Mapping):
@@ -148,16 +152,17 @@ class ExcelDraftService:
         restored: dict[str, Any] = {}
         for conflict in conflicts:
             conflict_id = self._conflict_id(conflict)
-            entry = entries.get(conflict_id)
+            entry = self._matching_entry(entries, conflict_id, conflict)
             if not isinstance(entry, Mapping):
-                continue
-            if entry.get("signature") != self._conflict_signature(conflict):
                 continue
             resolution = entry.get("resolution")
             if isinstance(resolution, Mapping) and self._resolution_is_valid(
                 conflict, resolution
             ):
-                restored[conflict_id] = dict(resolution)
+                restored[conflict_id] = {
+                    **dict(resolution),
+                    "conflict_id": conflict_id,
+                }
         return restored
 
     def restore_with_info(self, plan: Any, operation: str) -> ExcelDraftRestore:
@@ -176,26 +181,30 @@ class ExcelDraftService:
                 saved_choice_count=0,
                 restored_count=0,
                 target_compatible=True,
+                target_changed=False,
+                skipped_count=0,
                 last_error=None,
             )
 
         payload = record.payload
         entries = payload.get("entries", {})
         restored: dict[str, Any] = {}
-        target_compatible = self._target_is_compatible(record.context, context)
+        target_compatible = self._target_path_is_compatible(record.context, context)
+        target_changed = self._target_fingerprint_changed(record.context, context)
         if target_compatible:
             for conflict in conflicts:
                 conflict_id = self._conflict_id(conflict)
-                entry = entries.get(conflict_id)
+                entry = self._matching_entry(entries, conflict_id, conflict)
                 if not isinstance(entry, Mapping):
-                    continue
-                if entry.get("signature") != self._conflict_signature(conflict):
                     continue
                 resolution = entry.get("resolution")
                 if isinstance(resolution, Mapping) and self._resolution_is_valid(
                     conflict, resolution
                 ):
-                    restored[conflict_id] = dict(resolution)
+                    restored[conflict_id] = {
+                        **dict(resolution),
+                        "conflict_id": conflict_id,
+                    }
 
         globals_value = payload.get("globals", {})
         if (
@@ -205,14 +214,23 @@ class ExcelDraftService:
         ):
             selected = globals_value.get("selected_new_rows")
             if isinstance(selected, list):
-                valid_ids = {
-                    str(_value(item, "item_id", default=""))
+                current_items = {
+                    str(_value(item, "item_id", default="")): item
                     for item in _sequence(_value(plan, "new_rows", default=()))
                 }
+                saved_signatures = globals_value.get(
+                    "selected_new_row_signatures", {}
+                )
                 restored["selected_new_rows"] = [
                     str(item_id)
                     for item_id in selected
-                    if str(item_id) in valid_ids
+                    if str(item_id) in current_items
+                    and (
+                        not isinstance(saved_signatures, Mapping)
+                        or str(item_id) not in saved_signatures
+                        or saved_signatures[str(item_id)]
+                        == self._item_signature(current_items[str(item_id)])
+                    )
                 ]
         if target_compatible and isinstance(globals_value, Mapping):
             saved_splits = globals_value.get("split_document_ids")
@@ -235,13 +253,7 @@ class ExcelDraftService:
                 for group in _sequence(_value(plan, "source_groups", default=()))
                 if str(_value(group, "group_id", default=""))
             }
-            candidate_names = {
-                str(_value(candidate, "sheet_name", "name", default="")).strip()
-                for candidate in _sequence(
-                    _value(plan, "sheet_candidates", "target_sheet_candidates", default=())
-                )
-                if str(_value(candidate, "sheet_name", "name", default="")).strip()
-            }
+            candidate_names = self._candidate_sheet_names(plan)
             if isinstance(saved_assignments, Mapping) and groups:
                 compatible_assignments = {
                     str(group_id): str(sheet_name)
@@ -252,9 +264,81 @@ class ExcelDraftService:
                 }
                 if compatible_assignments:
                     restored["group_target_sheets"] = compatible_assignments
+            saved_source_targets = globals_value.get("source_target_sheets")
+            current_source_targets = _value(
+                plan, "source_target_sheets", default={}
+            )
+            target_names = self._candidate_sheet_names(plan)
+            if isinstance(saved_source_targets, Mapping) and isinstance(
+                current_source_targets, Mapping
+            ):
+                compatible_source_targets = {
+                    str(source): str(target)
+                    for source, target in saved_source_targets.items()
+                    if source in current_source_targets
+                    and target not in (None, "")
+                    and (not target_names or str(target) in target_names)
+                }
+                if compatible_source_targets:
+                    restored["source_target_sheets"] = compatible_source_targets
+            selected_sheet = globals_value.get("selected_sheet")
+            if selected_sheet not in (None, "") and (
+                not target_names or str(selected_sheet) in target_names
+            ):
+                restored["selected_sheet"] = str(selected_sheet)
+            selected_month = globals_value.get("selected_month")
+            if selected_month not in (None, ""):
+                try:
+                    selected_month_value = int(selected_month)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    candidate_months = {
+                        int(month)
+                        for candidate in _sequence(
+                            _value(plan, "month_candidates", default=())
+                        )
+                        if (month := _value(candidate, "month", default=None))
+                        is not None
+                    }
+                    if (
+                        not candidate_months
+                        or selected_month_value in candidate_months
+                    ):
+                        restored["selected_month"] = selected_month_value
+            saved_reposts = globals_value.get("repost_source_indices")
+            if isinstance(saved_reposts, list):
+                current_reposts: dict[int, Any] = {}
+                for item in _sequence(
+                    _value(plan, "previously_posted_items", default=())
+                ):
+                    try:
+                        index = int(_value(item, "source_item_index"))
+                    except (TypeError, ValueError):
+                        continue
+                    current_reposts[index] = item
+                saved_signatures = globals_value.get("repost_signatures", {})
+                compatible_reposts: list[int] = []
+                for raw_index in saved_reposts:
+                    try:
+                        index = int(raw_index)
+                    except (TypeError, ValueError):
+                        continue
+                    if index not in current_reposts:
+                        continue
+                    if (
+                        not isinstance(saved_signatures, Mapping)
+                        or str(index) not in saved_signatures
+                        or saved_signatures[str(index)]
+                        == self._item_signature(current_reposts[index])
+                    ):
+                        compatible_reposts.append(index)
+                restored["repost_source_indices"] = compatible_reposts
         restored_count = sum(
             key not in {
-                "selected_new_rows", "group_target_sheets", "split_document_ids"
+                "selected_new_rows", "group_target_sheets", "split_document_ids",
+                "source_target_sheets", "selected_sheet", "selected_month",
+                "repost_source_indices",
             }
             for key in restored
         )
@@ -268,6 +352,8 @@ class ExcelDraftService:
             saved_choice_count=len(entries),
             restored_count=restored_count,
             target_compatible=target_compatible,
+            target_changed=target_changed,
+            skipped_count=max(0, len(conflicts) - restored_count),
             last_error=record.last_error,
         )
 
@@ -322,9 +408,19 @@ class ExcelDraftService:
         for key, raw_resolution in resolution_values.items():
             key = str(key)
             if key == "selected_new_rows":
-                globals_value[key] = [
+                selected_ids = [
                     str(item_id) for item_id in _sequence(raw_resolution)
                 ]
+                globals_value[key] = selected_ids
+                current_items = {
+                    str(_value(item, "item_id", default="")): item
+                    for item in _sequence(_value(plan, "new_rows", default=()))
+                }
+                globals_value["selected_new_row_signatures"] = {
+                    item_id: self._item_signature(current_items[item_id])
+                    for item_id in selected_ids
+                    if item_id in current_items
+                }
                 continue
             if key == "group_target_sheets" and isinstance(raw_resolution, Mapping):
                 globals_value[key] = {
@@ -337,6 +433,34 @@ class ExcelDraftService:
                 globals_value[key] = sorted(
                     str(value) for value in _sequence(raw_resolution) if str(value).strip()
                 )
+                continue
+            if key == "source_target_sheets" and isinstance(
+                raw_resolution, Mapping
+            ):
+                globals_value[key] = {
+                    str(source): str(target)
+                    for source, target in raw_resolution.items()
+                    if str(source).strip() and target not in (None, "")
+                }
+                continue
+            if key in {"selected_sheet", "selected_month"}:
+                globals_value[key] = _jsonable(raw_resolution)
+                continue
+            if key == "repost_source_indices":
+                indexes = [int(value) for value in _sequence(raw_resolution)]
+                globals_value[key] = indexes
+                current_reposts = {
+                    int(_value(item, "source_item_index")): item
+                    for item in _sequence(
+                        _value(plan, "previously_posted_items", default=())
+                    )
+                    if _value(item, "source_item_index", default=None) is not None
+                }
+                globals_value["repost_signatures"] = {
+                    str(index): self._item_signature(current_reposts[index])
+                    for index in indexes
+                    if index in current_reposts
+                }
                 continue
             conflict = conflicts_by_id.get(key)
             if conflict is None:
@@ -361,6 +485,10 @@ class ExcelDraftService:
             run_id=run_id,
         )
         return source_file_key
+
+    def clear(self, plan: Any, operation: str) -> bool:
+        context = self._context(plan, operation)
+        return self.repository.delete(self._source_file_key(context))
 
     def mark_failed(self, context_key: str | None, error: object) -> None:
         if context_key:
@@ -436,7 +564,7 @@ class ExcelDraftService:
             return None
 
     @staticmethod
-    def _target_is_compatible(
+    def _target_path_is_compatible(
         previous_context: Mapping[str, Any], current_context: Mapping[str, Any]
     ) -> bool:
         previous = previous_context.get("target_path")
@@ -445,12 +573,17 @@ class ExcelDraftService:
             return True
         if str(previous).casefold() != str(current).casefold():
             return False
-        previous_fingerprint = previous_context.get("target_fingerprint")
-        current_fingerprint = current_context.get("target_fingerprint")
-        if previous_fingerprint in (None, "") or current_fingerprint in (None, ""):
-            # Payload v1 cũ chưa có fingerprint vẫn được đọc tương thích ngược.
-            return True
-        return str(previous_fingerprint) == str(current_fingerprint)
+        return True
+
+    @staticmethod
+    def _target_fingerprint_changed(
+        previous_context: Mapping[str, Any], current_context: Mapping[str, Any]
+    ) -> bool:
+        previous = previous_context.get("target_fingerprint")
+        current = current_context.get("target_fingerprint")
+        if previous in (None, "") or current in (None, ""):
+            return False
+        return str(previous) != str(current)
 
     @staticmethod
     def _conflicts(plan: Any) -> tuple[Any, ...]:
@@ -459,6 +592,69 @@ class ExcelDraftService:
     @staticmethod
     def _conflict_id(conflict: Any) -> str:
         return str(_value(conflict, "conflict_id", "id", default=""))
+
+    @staticmethod
+    def _candidate_sheet_names(plan: Any) -> set[str]:
+        names = {
+            str(
+                _value(
+                    candidate,
+                    "target_sheet",
+                    "sheet_name",
+                    "name",
+                    default="",
+                )
+            ).strip()
+            for candidate in _sequence(
+                _value(
+                    plan,
+                    "month_candidates",
+                    "sheet_candidates",
+                    "target_sheet_candidates",
+                    default=(),
+                )
+            )
+            if str(
+                _value(candidate, "target_sheet", "sheet_name", "name", default="")
+            ).strip()
+        }
+        rows_by_target = _value(plan, "rows_by_target", default={})
+        if isinstance(rows_by_target, Mapping):
+            names.update(str(name) for name in rows_by_target if str(name).strip())
+        return names
+
+    def _item_signature(self, item: Any) -> str:
+        return _digest(
+            {
+                "item_id": _value(item, "item_id"),
+                "source_item_index": _value(item, "source_item_index"),
+                "source_row": _value(item, "source_row"),
+                "source_rows": _value(item, "source_rows", default=()),
+                "sqt": _value(item, "sqt"),
+                "container": _value(item, "container"),
+                "fee": _value(item, "fee", "fee_selected"),
+                "amount": _value(item, "amount"),
+                "values": _value(item, "values", default={}),
+                "sheet": _value(item, "sheet_name"),
+            }
+        )
+
+    def _matching_entry(
+        self,
+        entries: Mapping[str, Any],
+        conflict_id: str,
+        conflict: Any,
+    ) -> Mapping[str, Any] | None:
+        signature = self._conflict_signature(conflict)
+        exact = entries.get(conflict_id)
+        if isinstance(exact, Mapping) and exact.get("signature") == signature:
+            return exact
+        compatible = [
+            entry
+            for entry in entries.values()
+            if isinstance(entry, Mapping) and entry.get("signature") == signature
+        ]
+        return compatible[0] if len(compatible) == 1 else None
 
     def _conflict_signature(self, conflict: Any) -> str:
         candidates = []

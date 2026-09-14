@@ -769,6 +769,141 @@ def test_regular_posting_still_reanalyzes_the_selected_month(monkeypatch) -> Non
     assert tasks.start_calls == [{"batch_id": 7, "sheet_name": "T07 26"}]
 
 
+def test_restored_group_targets_trigger_only_the_required_reanalysis(
+    monkeypatch,
+) -> None:
+    group = SimpleNamespace(
+        group_id="group-1",
+        target_sheet=None,
+        target_locked=False,
+    )
+    plan = SimpleNamespace(
+        operation="posting",
+        source_kind="ASSISTANT",
+        batch_id=8,
+        conflicts=[],
+        selected_sheet=None,
+        sheet_candidates=[SimpleNamespace(target_sheet="T08 26")],
+        source_groups=[group],
+        items=[SimpleNamespace(sheet_name=None)],
+        previously_posted_items=[],
+        split_document_ids=set(),
+    )
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.start_calls: list[dict[str, Any]] = []
+            self.cancel_calls = 0
+
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "posting"
+
+        @staticmethod
+        def saved_resolutions(_plan: Any, *, operation: str) -> dict[str, Any]:
+            assert operation == "posting"
+            return {"group_target_sheets": {"group-1": "T08 26"}}
+
+        def start_posting(self, **kwargs: Any) -> None:
+            self.start_calls.append(kwargs)
+
+        def cancel_waiting(self) -> None:
+            self.cancel_calls += 1
+
+    class UnexpectedDialog:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("Không được hỏi lại ánh xạ đã nhớ hợp lệ.")
+
+    monkeypatch.setattr(
+        main_window_module,
+        "PostingAllocationDialog",
+        UnexpectedDialog,
+    )
+    tasks = Tasks()
+    owner = SimpleNamespace(
+        _excel_tasks=tasks,
+        _excel_context="workflow",
+        _excel_operation="posting",
+        _show_excel_error=lambda *_args, **_kwargs: None,
+    )
+
+    MainWindow._excel_analysis_ready(owner, plan)
+
+    assert tasks.cancel_calls == 1
+    assert tasks.start_calls == [
+        {
+            "batch_id": 8,
+            "group_target_sheets": {"group-1": "T08 26"},
+        }
+    ]
+
+
+def test_analyzed_group_targets_do_not_reopen_allocation_dialog(
+    monkeypatch,
+) -> None:
+    plan = SimpleNamespace(
+        operation="posting",
+        source_kind="ASSISTANT",
+        batch_id=8,
+        conflicts=[],
+        selected_sheet="T08 26",
+        sheet_candidates=[SimpleNamespace(target_sheet="T08 26")],
+        source_groups=[
+            SimpleNamespace(
+                group_id="group-1",
+                target_sheet="T08 26",
+                target_locked=False,
+            )
+        ],
+        items=[],
+        previously_posted_items=[],
+        split_document_ids=set(),
+        confirmation_required=False,
+    )
+
+    class Tasks:
+        def __init__(self) -> None:
+            self.apply_calls: list[tuple[Any, Any, str]] = []
+
+        @staticmethod
+        def normalize_operation(_operation: Any) -> str:
+            return "posting"
+
+        @staticmethod
+        def saved_resolutions(_plan: Any, *, operation: str) -> dict[str, Any]:
+            assert operation == "posting"
+            return {"group_target_sheets": {"group-1": "T08 26"}}
+
+        def apply_plan(
+            self, value: Any, resolutions: Any, *, operation: str
+        ) -> None:
+            self.apply_calls.append((value, resolutions, operation))
+
+        @staticmethod
+        def cancel_waiting() -> None:
+            raise AssertionError("Không được phân tích lặp lại.")
+
+    class UnexpectedDialog:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("Không được mở lại cửa sổ chọn tháng dò.")
+
+    monkeypatch.setattr(
+        main_window_module,
+        "PostingAllocationDialog",
+        UnexpectedDialog,
+    )
+    tasks = Tasks()
+    owner = SimpleNamespace(
+        _excel_tasks=tasks,
+        _excel_operation="posting",
+        _show_excel_error=lambda *_args, **_kwargs: None,
+    )
+
+    MainWindow._excel_analysis_ready(owner, plan)
+
+    assert tasks.apply_calls == [(plan, {}, "posting")]
+
+
 def test_bang_ke_repost_selection_reanalyzes_without_a_global_month(
     monkeypatch,
 ) -> None:
@@ -2571,6 +2706,7 @@ def test_manual_row_picker_returns_source_sheet_and_workbook_row(qtbot) -> None:
                 "closing_date": "28/07/2026",
                 "closing_place": "Kho A",
                 "vessel": "Tàu A",
+                "departure_date": "2026-07-30 00:00:00",
                 "recipient": "Công ty B",
                 "carrier": "Vận tải ABC",
             }
@@ -2582,10 +2718,12 @@ def test_manual_row_picker_returns_source_sheet_and_workbook_row(qtbot) -> None:
 
     assert dialog.selected_row == 12
     assert dialog.selected_source_sheet == "T06 26"
-    assert dialog.table.columnCount() == 9
+    assert dialog.table.columnCount() == 10
     assert dialog.table.horizontalHeaderItem(5).text() == "Nơi đóng hàng"
     assert dialog.table.item(0, 5).text() == "Kho A"
-    assert dialog.table.item(0, 8).text() == "Vận tải ABC"
+    assert dialog.table.horizontalHeaderItem(7).text() == "Ngày tàu chạy"
+    assert dialog.table.item(0, 7).text() == "30/07/2026"
+    assert dialog.table.item(0, 9).text() == "Vận tải ABC"
     assert "Cột" not in [
         dialog.table.horizontalHeaderItem(column).text()
         for column in range(dialog.table.columnCount())
@@ -2649,3 +2787,25 @@ def test_decision_tables_sort_by_container_and_preserve_initial_order(qtbot) -> 
     assert conflicts.table.cellWidget(
         0, conflicts.COLUMNS.index("Cách xử lý")
     ) is conflicts._action_combos["a"]
+
+
+def test_payment_new_rows_prefills_and_clears_remembered_selection(qtbot) -> None:
+    cleared: list[bool] = []
+    dialog = PaymentNewRowsDialog(
+        [
+            {"item_id": "a", "container": "CONT-A", "values": {}},
+            {"item_id": "b", "container": "CONT-B", "values": {}},
+        ],
+        initial_selected_item_ids=["b"],
+        restore_info={"found": True},
+        clear_saved_callback=lambda: cleared.append(True) or True,
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.selected_item_ids == ["b"]
+    assert "Đã khôi phục 1" in dialog.restore_label.text()
+
+    dialog.findChild(QPushButton, "clearRememberedPaymentRowsButton").click()
+
+    assert cleared == [True]
+    assert dialog.selected_item_ids == ["a", "b"]
