@@ -142,7 +142,11 @@ class Database:
                 self._migration_19(connection)
                 connection.execute("PRAGMA user_version = 19")
                 current_version = 19
-            self._ensure_schema_19(connection)
+            if current_version < 20:
+                self._migration_20(connection)
+                connection.execute("PRAGMA user_version = 20")
+                current_version = 20
+            self._ensure_schema_20(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -1180,6 +1184,116 @@ class Database:
             )
             """
         )
+
+    @staticmethod
+    def _migration_20(connection: sqlite3.Connection) -> None:
+        """Nguồn BK nhiều tháng và mọi vị trí xuất hiện của container."""
+
+        Database._ensure_schema_19(connection)
+        Database._ensure_schema_20(connection)
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO sea_freight_reconciliation_sources(
+                group_id, bk_sheet, reconciliation_month, reconciliation_year,
+                vessel_voyage_raw, vessel_name, voyage_no,
+                vessel_key, voyage_key, combined_key,
+                resolution_kind, container_count, invalid_container_count,
+                duplicate_container_count, snapshot_hash, source_order
+            )
+            SELECT id, bk_sheet, reconciliation_month, reconciliation_year,
+                   vessel_voyage_raw, vessel_key, voyage_key,
+                   vessel_key, voyage_key, combined_key,
+                   CASE WHEN bk_container_count > 0 THEN 'EXACT' ELSE 'NOT_FOUND' END,
+                   bk_container_count, bk_invalid_container_count,
+                   bk_duplicate_container_count, container_snapshot_hash, 0
+            FROM sea_freight_reconciliation_groups
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO sea_freight_container_occurrences(
+                group_id, source_id, container, source_sheet, source_row,
+                source_sqt, departure_date, selected
+            )
+            SELECT c.group_id, s.id, c.container, c.source_sheet, c.source_row,
+                   c.source_sqt, c.departure_date, 1
+            FROM sea_freight_group_containers AS c
+            JOIN sea_freight_reconciliation_sources AS s
+              ON s.group_id = c.group_id AND s.bk_sheet = c.source_sheet
+            """
+        )
+
+    @staticmethod
+    def _ensure_schema_20(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_19(connection)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sea_freight_reconciliation_sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                bk_sheet TEXT NOT NULL,
+                reconciliation_month INTEGER,
+                reconciliation_year INTEGER,
+                vessel_voyage_raw TEXT NOT NULL,
+                vessel_name TEXT NOT NULL,
+                voyage_no TEXT NOT NULL,
+                vessel_key TEXT NOT NULL,
+                voyage_key TEXT NOT NULL,
+                combined_key TEXT NOT NULL,
+                resolution_kind TEXT NOT NULL CHECK (resolution_kind IN (
+                    'EXACT','AUTO_ALIAS','AMBIGUOUS','NOT_FOUND'
+                )),
+                container_count INTEGER NOT NULL DEFAULT 0,
+                invalid_container_count INTEGER NOT NULL DEFAULT 0,
+                duplicate_container_count INTEGER NOT NULL DEFAULT 0,
+                snapshot_hash TEXT,
+                source_order INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (group_id) REFERENCES sea_freight_reconciliation_groups(id) ON DELETE CASCADE,
+                UNIQUE(group_id, bk_sheet)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sea_freight_container_occurrences (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                source_id INTEGER NOT NULL,
+                container TEXT NOT NULL,
+                source_sheet TEXT NOT NULL,
+                source_row INTEGER NOT NULL,
+                source_sqt INTEGER,
+                departure_date TEXT,
+                selected INTEGER NOT NULL DEFAULT 0 CHECK (selected IN (0,1)),
+                manually_selected INTEGER NOT NULL DEFAULT 0 CHECK (manually_selected IN (0,1)),
+                FOREIGN KEY (group_id) REFERENCES sea_freight_reconciliation_groups(id) ON DELETE CASCADE,
+                FOREIGN KEY (source_id) REFERENCES sea_freight_reconciliation_sources(id) ON DELETE CASCADE,
+                UNIQUE(group_id, container, source_sheet, source_row)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_sea_freight_selected_occurrence
+            ON sea_freight_container_occurrences(group_id, container)
+            WHERE selected = 1
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sea_freight_source_group "
+            "ON sea_freight_reconciliation_sources(group_id, source_order, id)"
+        )
+        occurrence_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(sea_freight_container_occurrences)"
+            ).fetchall()
+        }
+        if "manually_selected" not in occurrence_columns:
+            connection.execute(
+                "ALTER TABLE sea_freight_container_occurrences "
+                "ADD COLUMN manually_selected INTEGER NOT NULL DEFAULT 0"
+            )
 
     @contextmanager
     def transaction(

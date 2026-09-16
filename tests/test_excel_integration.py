@@ -60,6 +60,7 @@ def test_posting_conflict_carries_effective_source_vessel_voyage(
         vessel_voyage_raw="AI RAW KHÁC",
         vessel_name="NEW VISION",
         voyage_no="2610S",
+        source_sqt=688,
         invoice_candidates=["HD-01"],
         carrier_candidates=["DAILY ROAD"],
     )
@@ -74,6 +75,7 @@ def test_posting_conflict_carries_effective_source_vessel_voyage(
     )
 
     assert conflict.vessel_voyage == "NEW VISION 2610S"
+    assert conflict.sqt == 688
     assert conflict.details["invoice_candidates"] == ["HD-01"]
     assert conflict.carrier == "DAILY ROAD"
 

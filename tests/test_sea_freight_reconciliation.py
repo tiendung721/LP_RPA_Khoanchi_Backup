@@ -19,13 +19,17 @@ from app.sea_freight import (
     GroupStatus,
     SeaFreightReconciliationService,
     SeaFreightRepository,
+    ReconciliationSourceSelection,
     VesselVoyageResolutionKind,
     VesselVoyageNotFoundError,
     iso6346_check_digit,
     normalize_match_key,
     validate_vessel_voyage,
 )
-from app.ui.sea_freight_center import SeaFreightReconciliationDialog
+from app.ui.sea_freight_center import (
+    ReconciliationSourceManagerDialog,
+    SeaFreightReconciliationDialog,
+)
 
 
 def _container(serial: int) -> str:
@@ -59,6 +63,17 @@ class _Matcher:
 
     def sheet_names(self, _path) -> tuple[str, ...]:
         return ("T07 26",)
+
+
+class _MultiMatcher:
+    def __init__(self, snapshots: dict[str, BkContainerSnapshot]) -> None:
+        self.snapshots = snapshots
+
+    def snapshot(self, _path, sheet, **_kwargs) -> BkContainerSnapshot:
+        return self.snapshots[sheet]
+
+    def sheet_names(self, _path) -> tuple[str, ...]:
+        return tuple(self.snapshots)
 
 
 def _row(count: int, amount: int, invoice: str, carrier: str = "HÃNG TÀU") -> DataRow:
@@ -207,6 +222,131 @@ def test_matcher_auto_resolves_unique_missing_voyage_prefix(
     assert snapshot.vessel_voyage_raw == bk_value
     assert snapshot.container_count == 1
 
+
+def _sheet_snapshot(
+    tmp_path: Path,
+    sheet: str,
+    serials: tuple[int, ...],
+) -> BkContainerSnapshot:
+    return BkContainerSnapshot(
+        bk_path=str((tmp_path / "BK.xlsx").resolve()),
+        bk_sheet=sheet,
+        vessel_voyage_raw="PROSPER 2625S",
+        vessel_key="PROSPER",
+        voyage_key="2625S",
+        combined_key="PROSPER2625S",
+        workbook_fingerprint="workbook-fp",
+        snapshot_hash=f"snapshot-{sheet}-{'-'.join(map(str, serials))}",
+        containers=tuple(
+            ContainerRecord(_container(serial), sheet, serial + 10, serial, None)
+            for serial in serials
+        ),
+        canonical_vessel_name="PROSPER",
+        canonical_voyage_no="2625S",
+    )
+
+
+def test_multi_month_profile_combines_unique_containers(tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.db")
+    database.initialize()
+    repository = SeaFreightRepository(database)
+    matcher = _MultiMatcher({
+        "T07 26": _sheet_snapshot(tmp_path, "T07 26", (1,)),
+        "T08 26": _sheet_snapshot(tmp_path, "T08 26", (2, 3, 4)),
+    })
+    service = SeaFreightReconciliationService(repository, matcher=matcher)
+
+    result = service.open_or_create_many(
+        [(0, _row(4, 40_000_000, "INV-MULTI"))],
+        bk_path=tmp_path / "BK.xlsx",
+        source_selections=[
+            ReconciliationSourceSelection("T07 26", "PROSPER", "2625S"),
+            ReconciliationSourceSelection("T08 26", "PROSPER", "2625S"),
+        ],
+        source_batch_id=None,
+        source_sha256="multi-source",
+    )
+
+    assert result.group.status is GroupStatus.READY
+    assert result.group.bk_container_count == 4
+    assert [item.bk_sheet for item in repository.list_sources(result.group.id)] == [
+        "T07 26", "T08 26"
+    ]
+    assert [item["source_sheet"] for item in repository.list_container_rows(result.group.id)] == [
+        "T07 26", "T08 26", "T08 26", "T08 26"
+    ]
+    database.close()
+
+
+def test_cross_month_duplicate_requires_explicit_source_selection(tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.db")
+    database.initialize()
+    repository = SeaFreightRepository(database)
+    matcher = _MultiMatcher({
+        "T07 26": _sheet_snapshot(tmp_path, "T07 26", (1,)),
+        "T08 26": _sheet_snapshot(tmp_path, "T08 26", (1, 2)),
+    })
+    service = SeaFreightReconciliationService(repository, matcher=matcher)
+    result = service.open_or_create_many(
+        [(0, _row(2, 20_000_000, "INV-DUP"))],
+        bk_path=tmp_path / "BK.xlsx",
+        source_selections=[
+            ReconciliationSourceSelection("T07 26", "PROSPER", "2625S"),
+            ReconciliationSourceSelection("T08 26", "PROSPER", "2625S"),
+        ],
+        source_batch_id=None,
+        source_sha256="duplicate-source",
+    )
+
+    assert result.group.bk_container_count == 2
+    assert result.group.status is GroupStatus.METADATA_CONFLICT
+    assert repository.unresolved_duplicate_containers(result.group.id) == [
+        {"container": _container(1), "occurrence_count": 2}
+    ]
+
+    selected = service.select_container_source(
+        result.group.id, _container(1), source_sheet="T07 26", source_row=11
+    )
+    assert selected.status is GroupStatus.READY
+    assert not repository.unresolved_duplicate_containers(result.group.id)
+    assert len(repository.list_container_rows(result.group.id)) == 2
+    database.close()
+
+
+def test_posting_source_groups_are_locked_to_each_reconciled_sheet(tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.db")
+    database.initialize()
+    repository = SeaFreightRepository(database)
+    group = repository.upsert_snapshot(_sheet_snapshot(tmp_path, "T07 26", (1,)))
+    posting = ExpensePostingService(
+        provider=object(),
+        bk_path=tmp_path / "BK.xlsx",
+        sea_freight_repository=repository,
+    )
+    rows = [
+        {
+            "source_item_index": index,
+            "source_document_id": "SEA-MULTI",
+            "source_document_name": "Sea freight",
+            "invoice_no": "INV",
+            "invoice_date": "2026-07-15",
+            "reconciliation_group_id": group.id,
+            "reconciliation_source_sheet": sheet,
+        }
+        for index, sheet in enumerate(("T07 26", "T09 26"))
+    ]
+
+    groups = posting._build_posting_source_groups(
+        rows,
+        ("T07 26", "T08 26", "T09 26"),
+        group_target_sheets=None,
+        legacy_sheet=None,
+        split_document_ids=set(),
+    )
+
+    assert [item.target_sheet for item in groups] == ["T07 26", "T09 26"]
+    assert all(item.target_locked for item in groups)
+    database.close()
 
 def test_exact_voyage_wins_when_prefixed_alias_also_exists(tmp_path: Path) -> None:
     path = _write_vessel_bk(
@@ -968,6 +1108,38 @@ def test_reconciliation_dialog_has_only_the_six_confirmed_actions(qtbot, tmp_pat
         assert dialog.group_value.isReadOnly()
         assert dialog.group_value.text().startswith("PROSPER 2625S – Lần 1 –")
         assert not hasattr(dialog, "group_combo")
+        assert not hasattr(dialog, "source_table")
+        assert dialog.manage_sources_button.text() == "Quản lý nguồn"
+        assert dialog.source_summary_label.text().startswith("1 tháng  •  2 cont")
+        assert dialog.sources_box.height() < dialog.invoice_table.height()
+    finally:
+        dialog.close()
+        database.close()
+
+
+def test_source_manager_owns_the_detailed_source_table(qtbot, tmp_path: Path) -> None:
+    settings = AppSettings(data_root=tmp_path, output_dir=tmp_path / "Output")
+    database = Database(settings.paths.database_path)
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=2))
+    )
+    group = service.open_or_create(
+        _row(2, 101, "INV"), bk_path=tmp_path / "BK.xlsx", month=7, year=2026,
+        source_batch_id=None, source_item_index=0, source_sha256="source",
+    )
+    dialog = ReconciliationSourceManagerDialog(service, group_id=group.id)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    try:
+        assert dialog.windowTitle() == "Quản lý nguồn đối soát"
+        assert dialog.source_table.rowCount() == 1
+        assert dialog.source_table.item(0, 2).text() == "Khớp chính xác"
+        assert dialog.source_table.item(0, 3).text() == "2"
+        assert dialog.add_source_button.isEnabled()
+        assert dialog.change_source_button.isEnabled()
+        assert not dialog.remove_source_button.isEnabled()
+        assert not dialog.resolve_duplicate_button.isEnabled()
     finally:
         dialog.close()
         database.close()
@@ -1296,6 +1468,15 @@ def test_posting_bundle_keeps_normal_rows_and_replaces_managed_sea_freight(
     assert bundle["reconciliation_source_count"] == 2
     assert [row["container"] for row in bundle["rows"]][1:] == [
         record.container for record in _snapshot(tmp_path, count=2).containers
+    ]
+    assert [row["reconciliation_source_sheet"] for row in bundle["rows"][1:]] == [
+        "T07 26", "T07 26"
+    ]
+    assert [row["reconciliation_source_row"] for row in bundle["rows"][1:]] == [
+        11, 12
+    ]
+    assert [row["reconciliation_source_sqt"] for row in bundle["rows"][1:]] == [
+        1, 2
     ]
     assert all(
         row.get("invoice_no") != "SEA" or row["container"]

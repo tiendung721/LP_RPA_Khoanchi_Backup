@@ -56,6 +56,7 @@ from app.sea_freight.contracts import (
     InvoiceHistoryMatchKind,
     VesselVoyageResolutionKind,
     VesselVoyageSuggestion,
+    ReconciliationSourceSelection,
     group_status_text,
 )
 from app.sea_freight.service import VesselVoyageNotFoundError
@@ -1469,54 +1470,74 @@ class ReviewWindow(QMainWindow):
         )
         if period_dialog.exec() != QDialog.DialogCode.Accepted:
             return False
-        month, year = period_dialog.period()
+        selected_sheets = period_dialog.selected_sheet_names
+        if not selected_sheets:
+            return False
         comparison_vessel_name = str(data_row.vessel_name or "")
         comparison_voyage_no = str(data_row.voyage_no or "")
         auto_alias_used = False
         manual_alias_used = False
-        resolve_for_period = getattr(service, "resolve_for_period", None)
-        if callable(resolve_for_period):
+        source_selections: list[ReconciliationSourceSelection] = []
+        for selected_sheet in selected_sheets:
             try:
-                preview = resolve_for_period(
-                    data_row,
-                    bk_path=bk_path,
-                    month=month,
-                    year=year,
+                preview = service.inspect(
+                    data_row, bk_path=bk_path, bk_sheet=selected_sheet
                 )
-            except Exception:
-                preview = None
-            if preview is not None and preview.resolution_kind in {
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Không đọc được nguồn đối soát",
+                    f"Không thể đọc sheet {selected_sheet}.\n\n{exc}",
+                )
+                return False
+            source_vessel_name = comparison_vessel_name
+            source_voyage_no = comparison_voyage_no
+            if preview.resolution_kind in {
                 VesselVoyageResolutionKind.EXACT,
                 VesselVoyageResolutionKind.AUTO_ALIAS,
             }:
-                comparison_vessel_name = (
-                    preview.canonical_vessel_name or comparison_vessel_name
+                source_vessel_name = (
+                    preview.canonical_vessel_name or source_vessel_name
                 )
-                comparison_voyage_no = (
-                    preview.canonical_voyage_no or comparison_voyage_no
-                )
-                self._apply_canonical_vessel_voyage(
-                    [source_row],
-                    vessel_name=comparison_vessel_name,
-                    voyage_no=comparison_voyage_no,
-                )
-                data_row = data_row.copy_with(
-                    vessel_name=comparison_vessel_name,
-                    voyage_no=comparison_voyage_no,
+                source_voyage_no = (
+                    preview.canonical_voyage_no or source_voyage_no
                 )
                 auto_alias_used = (
+                    auto_alias_used
+                    or
                     preview.resolution_kind is VesselVoyageResolutionKind.AUTO_ALIAS
                 )
-            elif (
-                preview is not None
-                and preview.resolution_kind is VesselVoyageResolutionKind.AMBIGUOUS
-            ):
+            elif preview.resolution_kind is VesselVoyageResolutionKind.NOT_FOUND:
+                source_selections.append(
+                    ReconciliationSourceSelection(
+                        selected_sheet, source_vessel_name, source_voyage_no
+                    )
+                )
+                continue
+            else:
+                suggestions = tuple(preview.alias_candidates)
+                if not suggestions:
+                    try:
+                        suggestions = tuple(
+                            service.matcher.suggestions(
+                                bk_path,
+                                selected_sheet,
+                                vessel_name=comparison_vessel_name,
+                                voyage_no=comparison_voyage_no,
+                                limit=5,
+                            )
+                        )
+                    except Exception:
+                        suggestions = ()
                 dialog = VesselVoyageNotFoundDialog(
                     VesselVoyageNotFoundError(
                         vessel_voyage=f"{comparison_vessel_name} {comparison_voyage_no}",
-                        bk_sheet=preview.bk_sheet,
-                        suggestions=preview.alias_candidates,
-                        ambiguous=True,
+                        bk_sheet=selected_sheet,
+                        suggestions=suggestions,
+                        ambiguous=(
+                            preview.resolution_kind
+                            is VesselVoyageResolutionKind.AMBIGUOUS
+                        ),
                     ),
                     self,
                 )
@@ -1525,17 +1546,8 @@ class ReviewWindow(QMainWindow):
                     suggestion = dialog.selected_suggestion
                     if suggestion is None:
                         return False
-                    comparison_vessel_name = suggestion.vessel_name
-                    comparison_voyage_no = suggestion.voyage_no
-                    self._apply_canonical_vessel_voyage(
-                        [source_row],
-                        vessel_name=comparison_vessel_name,
-                        voyage_no=comparison_voyage_no,
-                    )
-                    data_row = data_row.copy_with(
-                        vessel_name=comparison_vessel_name,
-                        voyage_no=comparison_voyage_no,
-                    )
+                    source_vessel_name = suggestion.vessel_name
+                    source_voyage_no = suggestion.voyage_no
                     manual_alias_used = True
                     LOGGER.info(
                         "Kết quả resolve tàu/chuyến: MANUAL_ALIAS -> %s",
@@ -1546,6 +1558,23 @@ class ReviewWindow(QMainWindow):
                     return False
                 else:
                     return False
+            source_selections.append(
+                ReconciliationSourceSelection(
+                    selected_sheet, source_vessel_name, source_voyage_no
+                )
+            )
+        first_selection = source_selections[0]
+        comparison_vessel_name = first_selection.vessel_name
+        comparison_voyage_no = first_selection.voyage_no
+        self._apply_canonical_vessel_voyage(
+            [source_row],
+            vessel_name=comparison_vessel_name,
+            voyage_no=comparison_voyage_no,
+        )
+        data_row = data_row.copy_with(
+            vessel_name=comparison_vessel_name,
+            voyage_no=comparison_voyage_no,
+        )
         managed_indices: set[int] = set()
         if self._batch_id is not None:
             try:
@@ -1593,8 +1622,7 @@ class ReviewWindow(QMainWindow):
                             for index in selected_indices
                         ],
                         bk_path=bk_path,
-                        month=month,
-                        year=year,
+                        source_selections=source_selections,
                         source_batch_id=(
                             int(self._batch_id) if self._batch_id is not None else None
                         ),
@@ -1609,7 +1637,9 @@ class ReviewWindow(QMainWindow):
                     )
                     group = service.open_or_create(
                         current_data_row,
-                        bk_path=bk_path, month=month, year=year,
+                        bk_path=bk_path,
+                        month=service.period_from_sheet(selected_sheets[0])[0],
+                        year=service.period_from_sheet(selected_sheets[0])[1],
                         source_batch_id=(
                             int(self._batch_id) if self._batch_id is not None else None
                         ),

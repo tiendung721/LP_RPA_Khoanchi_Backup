@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
     QDialogButtonBox,
     QFrame,
     QGridLayout,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QMessageBox,
     QPushButton,
     QHeaderView,
@@ -24,7 +26,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from app.sea_freight.contracts import GroupStatus, group_status_text
+from app.sea_freight.contracts import (
+    GroupStatus,
+    ReconciliationSourceSelection,
+    group_status_text,
+)
 
 from .app_dialog import AppDialog
 
@@ -58,7 +64,7 @@ class ReconciliationPeriodDialog(AppDialog):
 
         layout = QVBoxLayout(self)
         note = QLabel(
-            "Hãy chọn một sheet để tiếp tục; chỉ sheet này được dùng để đối soát."
+            "Hãy chọn một hoặc nhiều sheet tháng dùng để đối soát hồ sơ."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -67,7 +73,7 @@ class ReconciliationPeriodDialog(AppDialog):
         self.table.setObjectName("reconciliationPeriodTable")
         self.table.setHorizontalHeaderLabels(("Sheet", "Tháng", "Năm"))
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
@@ -97,7 +103,6 @@ class ReconciliationPeriodDialog(AppDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
         self.table.itemSelectionChanged.connect(self._update_action)
-        self.table.itemDoubleClicked.connect(lambda _item: self.accept())
         self._update_action()
 
         # Giữ tháng hóa đơn trong vùng nhìn thấy nếu có, nhưng không tự chọn thay user.
@@ -125,15 +130,24 @@ class ReconciliationPeriodDialog(AppDialog):
 
     def _update_action(self) -> None:
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
-            self.table.currentRow() >= 0
+            bool(self.table.selectionModel().selectedRows())
         )
 
     @property
+    def selected_sheet_names(self) -> list[str]:
+        selected = {
+            index.row() for index in self.table.selectionModel().selectedRows()
+        }
+        return [
+            sheet_name
+            for row, (sheet_name, _month, _year) in enumerate(self._candidates)
+            if row in selected
+        ]
+
+    @property
     def selected_sheet_name(self) -> str | None:
-        row = self.table.currentRow()
-        item = self.table.item(row, 0) if row >= 0 else None
-        candidate = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-        return str(candidate[0]) if candidate is not None else None
+        selected = self.selected_sheet_names
+        return selected[0] if len(selected) == 1 else None
 
     def period(self) -> tuple[int, int]:
         row = self.table.currentRow()
@@ -157,6 +171,13 @@ class SeaFreightReconciliationDialog(AppDialog):
         "Số HĐ", "Ngày HĐ", "B/L", "Số cont", "Số tiền", "Bên vận tải", "Nguồn dữ liệu"
     )
     CONTAINER_HEADERS = ("Số cont", "BK tháng", "Dòng BK", "SQT", "Ngày đi")
+    SOURCE_HEADERS = ("Sheet", "Tàu/chuyến được chọn", "Kiểu khớp", "Số cont", "Trạng thái")
+    SOURCE_RESOLUTION_LABELS = {
+        "EXACT": "Khớp chính xác",
+        "AUTO_ALIAS": "Tự nhận diện",
+        "AMBIGUOUS": "Có nhiều kết quả",
+        "NOT_FOUND": "Không tìm thấy",
+    }
     RESULT_HEADERS = ("Số cont", "Số HĐ", "Tàu/chuyến", "Bên vận tải", "Tiền cước")
 
     def __init__(
@@ -177,6 +198,9 @@ class SeaFreightReconciliationDialog(AppDialog):
         self._loading = False
         self._dirty = False
         self._built_preview: list[Any] = []
+        self._source_rows: list[Any] = []
+        self._source_container_count = 0
+        self._unresolved_duplicate_count = 0
         self.setWindowTitle("Đối soát số cont")
         self.setMinimumSize(1050, 720)
         self.resize(1280, 820)
@@ -211,42 +235,76 @@ class SeaFreightReconciliationDialog(AppDialog):
         self.vessel_name_edit = QLineEdit()
         self.voyage_edit = QLineEdit()
         self.vessel_preview = QLabel("—")
+        self.vessel_preview.hide()
         self.vessel_preview.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        common_layout.addWidget(QLabel("Tháng đối soát:"), 0, 0)
+        common_layout.addWidget(QLabel("Các tháng đối soát:"), 0, 0)
         common_layout.addWidget(self.period_value, 0, 1)
-        common_layout.addWidget(QLabel("Tàu/chuyến dùng để đối soát:"), 0, 2)
-        common_layout.addWidget(self.vessel_preview, 0, 3)
-        common_layout.addWidget(QLabel("Tên tàu:"), 1, 0)
-        common_layout.addWidget(self.vessel_name_edit, 1, 1)
-        common_layout.addWidget(QLabel("Số chuyến:"), 1, 2)
-        common_layout.addWidget(self.voyage_edit, 1, 3)
+        common_layout.addWidget(QLabel("Tên tàu:"), 0, 2)
+        common_layout.addWidget(self.vessel_name_edit, 0, 3)
+        common_layout.addWidget(QLabel("Số chuyến:"), 0, 4)
+        common_layout.addWidget(self.voyage_edit, 0, 5)
+        common_layout.setColumnStretch(1, 1)
+        common_layout.setColumnStretch(3, 1)
+        common_layout.setColumnStretch(5, 1)
         self.stats: dict[str, QLabel] = {}
-        for column, (key, label) in enumerate(
+        stats_layout = QHBoxLayout()
+        stats_layout.setSpacing(6)
+        for key, label in (
             (("invoices", "Số HĐ"), ("invoice_containers", "Cont trên HĐ"),
              ("bk_containers", "Cont trong BK"), ("difference", "Chênh lệch"),
              ("amount", "Tổng tiền"))
         ):
             frame = QFrame()
             frame.setProperty("card", True)
-            box = QVBoxLayout(frame)
+            box = QHBoxLayout(frame)
             box.setContentsMargins(8, 4, 8, 4)
             caption = QLabel(label)
             caption.setProperty("muted", True)
             value = QLabel("0")
             value.setStyleSheet("font-weight: 700;")
             box.addWidget(caption)
+            box.addStretch(1)
             box.addWidget(value)
-            common_layout.addWidget(frame, 2, column)
+            stats_layout.addWidget(frame, 1)
             self.stats[key] = value
+        common_layout.addLayout(stats_layout, 1, 0, 1, 6)
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet(
             "font-weight: 700; color: #92400E; background: #FFF7D6; padding: 7px; border-radius: 5px;"
         )
-        common_layout.addWidget(self.status_label, 3, 0, 1, 5)
+        common_layout.addWidget(self.status_label, 2, 0, 1, 6)
         root.addWidget(common)
+
+        self.sources_box = QFrame()
+        self.sources_box.setProperty("card", True)
+        sources_layout = QHBoxLayout(self.sources_box)
+        sources_layout.setContentsMargins(12, 7, 12, 7)
+        sources_layout.setSpacing(8)
+        source_title = QLabel("Nguồn đối soát")
+        source_title.setStyleSheet("font-weight: 700;")
+        self.source_summary_label = QLabel("Chưa có nguồn đối soát")
+        self.source_summary_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.source_state_label = QLabel()
+        self.source_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.manage_sources_button = QPushButton("Quản lý nguồn")
+        self.manage_sources_button.setToolTip(
+            "Mở danh sách nguồn để thêm, bỏ hoặc đổi tàu/chuyến."
+        )
+        self.refresh_sources_button = QPushButton("Đọc lại BK")
+        self.refresh_sources_button.setToolTip("Đọc lại dữ liệu từ các sheet BK đang sử dụng.")
+        sources_layout.addWidget(source_title)
+        sources_layout.addSpacing(6)
+        sources_layout.addWidget(self.source_summary_label)
+        sources_layout.addWidget(self.source_state_label)
+        sources_layout.addStretch(1)
+        sources_layout.addWidget(self.manage_sources_button)
+        sources_layout.addWidget(self.refresh_sources_button)
+        root.addWidget(self.sources_box)
 
         invoices_box = QGroupBox("Danh sách HĐ trong hồ sơ")
         invoices_layout = QVBoxLayout(invoices_box)
@@ -272,7 +330,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         self.container_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.container_table.horizontalHeader().setStretchLastSection(True)
         containers_layout.addWidget(self.container_table)
-        lower.addWidget(containers_box, 1)
+        lower.addWidget(containers_box, 2)
 
         preview_box = QGroupBox("Kết quả dự kiến")
         preview_layout = QVBoxLayout(preview_box)
@@ -281,7 +339,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         self.result_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.result_table.horizontalHeader().setStretchLastSection(True)
         preview_layout.addWidget(self.result_table)
-        lower.addWidget(preview_box, 2)
+        lower.addWidget(preview_box, 3)
         root.addLayout(lower, 2)
 
         actions = QHBoxLayout()
@@ -314,6 +372,8 @@ class SeaFreightReconciliationDialog(AppDialog):
         self.rerun_button.clicked.connect(self.create_revision)
         self.confirm_button.clicked.connect(self.confirm)
         self.close_button.clicked.connect(self.close)
+        self.manage_sources_button.clicked.connect(self.manage_sources)
+        self.refresh_sources_button.clicked.connect(self.refresh_sources)
 
     def load_group(self, group_id: int) -> None:
         group = self.service.repository.get_group(group_id)
@@ -324,17 +384,22 @@ class SeaFreightReconciliationDialog(AppDialog):
         self._loading = True
         try:
             self._show_current_group(group)
-            self.period_value.setText(
-                f"{group.reconciliation_month:02d}/{group.reconciliation_year}"
-                if group.reconciliation_month and group.reconciliation_year
-                else group.bk_sheet
-            )
             contributions = self.service.repository.list_contributions(group_id)
+            sources = self.service.repository.list_sources(group_id)
+            self.period_value.setText(
+                ", ".join(item.bk_sheet for item in sources)
+                or (
+                    f"{group.reconciliation_month:02d}/{group.reconciliation_year}"
+                    if group.reconciliation_month and group.reconciliation_year
+                    else group.bk_sheet
+                )
+            )
             first = contributions[0] if contributions else None
             self.vessel_name_edit.setText(first.vessel_name if first else "")
             self.voyage_edit.setText(first.voyage_no if first else "")
             self._update_vessel_preview()
             self._load_invoices(contributions)
+            self._load_sources(group, sources)
             self._load_containers(self.service.repository.list_container_rows(group_id))
             self._refresh_summary(group)
             locked = (
@@ -396,6 +461,55 @@ class SeaFreightReconciliationDialog(AppDialog):
                 self.container_table.setItem(row_index, column, QTableWidgetItem(str(value or "")))
         self.container_table.resizeColumnsToContents()
 
+    def _load_sources(self, group: Any, sources: list[Any]) -> None:
+        self._source_rows = list(sources)
+        self._source_container_count = int(group.bk_container_count)
+        self._update_source_summary()
+
+    def _update_source_summary(self) -> None:
+        source_count = len(self._source_rows)
+        unresolved_sources = sum(
+            source.resolution_kind.value in {"AMBIGUOUS", "NOT_FOUND"}
+            for source in self._source_rows
+        )
+        warning_sources = sum(
+            bool(source.invalid_container_count or source.duplicate_container_count)
+            for source in self._source_rows
+        )
+        parts = [
+            f"{source_count} tháng",
+            f"{self._source_container_count} cont",
+        ]
+        if unresolved_sources:
+            parts.append(f"{unresolved_sources} nguồn cần xử lý")
+        elif warning_sources:
+            parts.append(f"{warning_sources} nguồn có cảnh báo")
+        if self._unresolved_duplicate_count:
+            parts.append(f"{self._unresolved_duplicate_count} cont trùng chưa chọn")
+        self.source_summary_label.setText("  •  ".join(parts))
+
+        requires_attention = bool(
+            unresolved_sources or self._unresolved_duplicate_count
+        )
+        has_warnings = bool(warning_sources)
+        if requires_attention:
+            state_text = "Cần xử lý"
+        elif has_warnings:
+            state_text = "Có cảnh báo"
+        else:
+            state_text = "Sẵn sàng"
+        self.source_state_label.setText(state_text)
+        if requires_attention or has_warnings:
+            self.source_state_label.setStyleSheet(
+                "font-weight: 700; color: #92400E; background: #FFF1C2; "
+                "border: 1px solid #F4D58A; border-radius: 6px; padding: 5px 10px;"
+            )
+        else:
+            self.source_state_label.setStyleSheet(
+                "font-weight: 700; color: #027A48; background: #ECFDF3; "
+                "border: 1px solid #ABEFC6; border-radius: 6px; padding: 5px 10px;"
+            )
+
     def _refresh_summary(self, group: Any) -> None:
         invoice_count = self.invoice_table.rowCount()
         self.stats["invoices"].setText(str(invoice_count))
@@ -410,6 +524,11 @@ class SeaFreightReconciliationDialog(AppDialog):
             warnings.append(f"BK có {group.bk_duplicate_container_count} dòng cont trùng đã bỏ qua")
         if group.bk_invalid_container_count:
             warnings.append(f"BK có {group.bk_invalid_container_count} số cont sai đã bỏ qua")
+        duplicate_rows = self.service.repository.unresolved_duplicate_containers(group.id)
+        self._unresolved_duplicate_count = len(duplicate_rows)
+        self._update_source_summary()
+        if duplicate_rows:
+            warnings.append(f"Còn {len(duplicate_rows)} cont trùng chưa chọn nguồn")
         self.status_label.setText(" • ".join((status, *warnings)))
         self._built_preview = []
         if group.status in {
@@ -437,6 +556,7 @@ class SeaFreightReconciliationDialog(AppDialog):
             self.vessel_name_edit, self.voyage_edit,
             self.invoice_table, self.assistant_button, self.add_button,
             self.delete_button, self.save_button,
+            self.refresh_sources_button,
         ):
             widget.setEnabled(editable)
 
@@ -487,6 +607,30 @@ class SeaFreightReconciliationDialog(AppDialog):
             text = f"Đủ {invoice_containers}/{bk_count} cont"
         self.status_label.setText(text + " • Chưa lưu")
         self.result_table.setRowCount(0)
+
+    def manage_sources(self) -> None:
+        dialog = ReconciliationSourceManagerDialog(
+            self.service,
+            group_id=self.group_id,
+            default_vessel_name=self.vessel_name_edit.text().strip(),
+            default_voyage_no=self.voyage_edit.text().strip(),
+            parent=self,
+        )
+        dialog.changed.connect(self._source_manager_changed)
+        dialog.exec()
+
+    def _source_manager_changed(self) -> None:
+        self.load_group(self.group_id)
+        self.changed.emit()
+
+    def refresh_sources(self) -> None:
+        try:
+            group = self.service.refresh_group(self.group_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "Không đọc lại được BK", str(exc))
+            return
+        self.load_group(group.id)
+        self.changed.emit()
 
     def add_invoice(self) -> None:
         row = self.invoice_table.rowCount()
@@ -668,11 +812,373 @@ class SeaFreightReconciliationDialog(AppDialog):
             event.ignore()
 
 
+class ReconciliationSourceManagerDialog(AppDialog):
+    """Cửa sổ quản lý nguồn BK, tách khỏi vùng đối chiếu chính."""
+
+    changed = Signal()
+
+    def __init__(
+        self,
+        service: Any,
+        *,
+        group_id: int,
+        default_vessel_name: str = "",
+        default_voyage_no: str = "",
+        parent: Any | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.service = service
+        self.group_id = group_id
+        self.default_vessel_name = default_vessel_name
+        self.default_voyage_no = default_voyage_no
+        self._editable = False
+        self._unresolved_duplicate_count = 0
+        self.setWindowTitle("Quản lý nguồn đối soát")
+        self.setMinimumSize(900, 380)
+        self.resize(1050, 460)
+        self._build_ui()
+        self._connect_signals()
+        self.load_group()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(10)
+
+        heading = QHBoxLayout()
+        title = QLabel("Quản lý nguồn đối soát")
+        title.setStyleSheet("font-size: 16pt; font-weight: 700;")
+        self.summary_label = QLabel()
+        self.summary_label.setProperty("muted", True)
+        heading.addWidget(title)
+        heading.addSpacing(12)
+        heading.addWidget(self.summary_label)
+        heading.addStretch(1)
+        root.addLayout(heading)
+
+        self.source_table = QTableWidget(
+            0, len(SeaFreightReconciliationDialog.SOURCE_HEADERS)
+        )
+        self.source_table.setHorizontalHeaderLabels(
+            SeaFreightReconciliationDialog.SOURCE_HEADERS
+        )
+        self.source_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.source_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.source_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.source_table.setAlternatingRowColors(True)
+        self.source_table.setWordWrap(False)
+        self.source_table.verticalHeader().setVisible(False)
+        self.source_table.verticalHeader().setDefaultSectionSize(34)
+        header = self.source_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(72)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        root.addWidget(self.source_table, 1)
+
+        actions = QHBoxLayout()
+        self.add_source_button = QPushButton("Thêm tháng")
+        self.change_source_button = QPushButton("Đổi tàu/chuyến")
+        self.remove_source_button = QPushButton("Bỏ tháng")
+        self.remove_source_button.setProperty("danger", True)
+        self.resolve_duplicate_button = QPushButton("Xử lý cont trùng")
+        self.close_button = QPushButton("Đóng")
+        self.add_source_button.setToolTip(
+            "Bổ sung một hoặc nhiều sheet tháng vào hồ sơ đối soát."
+        )
+        self.change_source_button.setToolTip(
+            "Đổi tàu/chuyến cho nguồn đang chọn."
+        )
+        self.remove_source_button.setToolTip(
+            "Bỏ nguồn đang chọn khỏi hồ sơ đối soát."
+        )
+        self.resolve_duplicate_button.setToolTip(
+            "Chọn dòng BK được sử dụng cho container xuất hiện ở nhiều nguồn."
+        )
+        actions.addWidget(self.add_source_button)
+        actions.addWidget(self.change_source_button)
+        actions.addWidget(self.remove_source_button)
+        actions.addStretch(1)
+        actions.addWidget(self.resolve_duplicate_button)
+        actions.addWidget(self.close_button)
+        root.addLayout(actions)
+
+    def _connect_signals(self) -> None:
+        self.add_source_button.clicked.connect(self.add_sources)
+        self.change_source_button.clicked.connect(self.change_source_vessel)
+        self.remove_source_button.clicked.connect(self.remove_source)
+        self.resolve_duplicate_button.clicked.connect(self.resolve_duplicate)
+        self.close_button.clicked.connect(self.accept)
+        self.source_table.itemSelectionChanged.connect(self._update_actions)
+
+    def load_group(self) -> None:
+        group = self.service.repository.get_group(self.group_id)
+        if group is None:
+            QMessageBox.warning(
+                self, "Không mở được hồ sơ", "Hồ sơ không còn tồn tại."
+            )
+            self.reject()
+            return
+        sources = self.service.repository.list_sources(self.group_id)
+        duplicates = self.service.repository.unresolved_duplicate_containers(
+            self.group_id
+        )
+        self._unresolved_duplicate_count = len(duplicates)
+        self._editable = bool(
+            group.is_current
+            and group.status
+            not in {GroupStatus.ALLOCATED, GroupStatus.POSTED, GroupStatus.CANCELLED}
+        )
+        self._load_sources(sources)
+
+    def _load_sources(self, sources: list[Any]) -> None:
+        self.source_table.setRowCount(len(sources))
+        total_containers = sum(int(source.container_count) for source in sources)
+        details = [f"{len(sources)} nguồn", f"{total_containers} cont"]
+        if self._unresolved_duplicate_count:
+            details.append(f"{self._unresolved_duplicate_count} cont trùng chưa chọn")
+        if not self._editable:
+            details.append("chỉ xem")
+        self.summary_label.setText("  •  ".join(details))
+
+        for row_index, source in enumerate(sources):
+            resolution_kind = source.resolution_kind.value
+            requires_attention = resolution_kind in {"AMBIGUOUS", "NOT_FOUND"}
+            has_warnings = bool(
+                source.invalid_container_count or source.duplicate_container_count
+            )
+            if requires_attention:
+                status = "Cần xử lý tàu/chuyến"
+            else:
+                warnings: list[str] = []
+                if source.invalid_container_count:
+                    warnings.append(f"{source.invalid_container_count} cont sai")
+                if source.duplicate_container_count:
+                    warnings.append(f"{source.duplicate_container_count} dòng trùng")
+                status = " • ".join(("Sẵn sàng", *warnings))
+            values = (
+                source.bk_sheet,
+                source.vessel_voyage_raw,
+                SeaFreightReconciliationDialog.SOURCE_RESOLUTION_LABELS.get(
+                    resolution_kind, resolution_kind
+                ),
+                source.container_count,
+                status,
+            )
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                if column == 0:
+                    cell.setData(Qt.ItemDataRole.UserRole, source)
+                if column == 3:
+                    cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if column == 2:
+                    self._set_status_color(cell, requires_attention)
+                if column == 4:
+                    self._set_status_color(
+                        cell, requires_attention or has_warnings
+                    )
+                self.source_table.setItem(row_index, column, cell)
+
+        if sources:
+            self.source_table.selectRow(0)
+        self.source_table.scrollToTop()
+        self.resolve_duplicate_button.setText(
+            f"Xử lý cont trùng ({self._unresolved_duplicate_count})"
+            if self._unresolved_duplicate_count
+            else "Xử lý cont trùng"
+        )
+        self._update_actions()
+
+    @staticmethod
+    def _set_status_color(cell: QTableWidgetItem, warning: bool) -> None:
+        if warning:
+            cell.setBackground(QColor("#FFF7D6"))
+            cell.setForeground(QColor("#92400E"))
+        else:
+            cell.setBackground(QColor("#ECFDF3"))
+            cell.setForeground(QColor("#027A48"))
+
+    def _update_actions(self) -> None:
+        has_selection = self.source_table.currentRow() >= 0
+        self.add_source_button.setEnabled(self._editable)
+        self.change_source_button.setEnabled(self._editable and has_selection)
+        self.remove_source_button.setEnabled(
+            self._editable and has_selection and self.source_table.rowCount() > 1
+        )
+        self.resolve_duplicate_button.setEnabled(
+            self._editable and self._unresolved_duplicate_count > 0
+        )
+
+    def _source_selections(self) -> list[ReconciliationSourceSelection]:
+        result: list[ReconciliationSourceSelection] = []
+        for row in range(self.source_table.rowCount()):
+            item = self.source_table.item(row, 0)
+            source = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            if source is not None:
+                result.append(
+                    ReconciliationSourceSelection(
+                        source.bk_sheet, source.vessel_name, source.voyage_no
+                    )
+                )
+        return result
+
+    def add_sources(self) -> None:
+        group = self.service.repository.get_group(self.group_id)
+        if group is None:
+            return
+        existing = {
+            item.bk_sheet
+            for item in self.service.repository.list_sources(self.group_id)
+        }
+        try:
+            available = [
+                name
+                for name in self.service.sheet_names(group.bk_path)
+                if name not in existing
+            ]
+        except Exception as exc:
+            QMessageBox.warning(self, "Không đọc được BK", str(exc))
+            return
+        if not available:
+            QMessageBox.information(
+                self, "Không còn sheet", "Mọi sheet tháng đã có trong hồ sơ."
+            )
+            return
+        dialog = ReconciliationPeriodDialog(sheet_names=available, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        additions = [
+            ReconciliationSourceSelection(
+                sheet, self.default_vessel_name, self.default_voyage_no
+            )
+            for sheet in dialog.selected_sheet_names
+        ]
+        self._apply_source_selections(self._source_selections() + additions)
+
+    def remove_source(self) -> None:
+        row = self.source_table.currentRow()
+        selections = self._source_selections()
+        if row < 0:
+            QMessageBox.information(
+                self, "Chưa chọn nguồn", "Hãy chọn một sheet cần bỏ."
+            )
+            return
+        if len(selections) <= 1:
+            QMessageBox.warning(
+                self, "Không thể bỏ", "Hồ sơ phải còn ít nhất một sheet đối soát."
+            )
+            return
+        self._apply_source_selections(
+            [item for index, item in enumerate(selections) if index != row]
+        )
+
+    def change_source_vessel(self) -> None:
+        row = self.source_table.currentRow()
+        selections = self._source_selections()
+        if row < 0 or row >= len(selections):
+            QMessageBox.information(
+                self,
+                "Chưa chọn nguồn",
+                "Hãy chọn một sheet cần đổi tàu/chuyến.",
+            )
+            return
+        current = selections[row]
+        vessel_name, accepted = QInputDialog.getText(
+            self,
+            "Đổi tàu/chuyến",
+            f"Tên tàu trong {current.bk_sheet}:",
+            text=current.vessel_name,
+        )
+        if not accepted:
+            return
+        voyage_no, accepted = QInputDialog.getText(
+            self,
+            "Đổi tàu/chuyến",
+            f"Số chuyến trong {current.bk_sheet}:",
+            text=current.voyage_no,
+        )
+        if not accepted:
+            return
+        selections[row] = ReconciliationSourceSelection(
+            current.bk_sheet, vessel_name.strip(), voyage_no.strip()
+        )
+        self._apply_source_selections(selections)
+
+    def resolve_duplicate(self) -> None:
+        duplicates = self.service.repository.unresolved_duplicate_containers(
+            self.group_id
+        )
+        if not duplicates:
+            QMessageBox.information(
+                self,
+                "Không có cont trùng",
+                "Hồ sơ không còn cont trùng cần xử lý.",
+            )
+            return
+        containers = [str(item["container"]) for item in duplicates]
+        container, accepted = QInputDialog.getItem(
+            self, "Chọn cont trùng", "Container:", containers, 0, False
+        )
+        if not accepted:
+            return
+        occurrences = [
+            item
+            for item in self.service.repository.list_container_occurrences(
+                self.group_id
+            )
+            if str(item["container"]) == container
+        ]
+        labels = [
+            f'{item["source_sheet"]} – dòng {item["source_row"]} – '
+            f'SQT {item["source_sqt"] or "—"}'
+            for item in occurrences
+        ]
+        label, accepted = QInputDialog.getItem(
+            self, "Chọn nguồn container", "Vị trí sử dụng:", labels, 0, False
+        )
+        if not accepted:
+            return
+        selected = occurrences[labels.index(label)]
+        try:
+            self.service.select_container_source(
+                self.group_id,
+                container,
+                source_sheet=str(selected["source_sheet"]),
+                source_row=int(selected["source_row"]),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Không chọn được nguồn", str(exc))
+            return
+        self.load_group()
+        self.changed.emit()
+
+    def _apply_source_selections(
+        self, selections: list[ReconciliationSourceSelection]
+    ) -> None:
+        try:
+            self.service.update_sources(self.group_id, selections)
+        except Exception as exc:
+            QMessageBox.warning(self, "Không cập nhật được nguồn", str(exc))
+            return
+        self.load_group()
+        self.changed.emit()
+
+
 # Tên cũ được giữ làm alias để code tích hợp ngoài dự án không vỡ ngay.
 SeaFreightCenterDialog = SeaFreightReconciliationDialog
 
 __all__ = [
     "ReconciliationPeriodDialog",
+    "ReconciliationSourceManagerDialog",
     "SeaFreightCenterDialog",
     "SeaFreightReconciliationDialog",
 ]

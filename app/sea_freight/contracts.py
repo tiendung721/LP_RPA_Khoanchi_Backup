@@ -83,6 +83,34 @@ class BkContainerSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ReconciliationSourceSelection:
+    bk_sheet: str
+    vessel_name: str
+    voyage_no: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationSource:
+    id: int
+    group_id: int
+    bk_sheet: str
+    reconciliation_month: int | None
+    reconciliation_year: int | None
+    vessel_voyage_raw: str
+    vessel_name: str
+    voyage_no: str
+    vessel_key: str
+    voyage_key: str
+    combined_key: str
+    resolution_kind: VesselVoyageResolutionKind
+    container_count: int
+    invalid_container_count: int
+    duplicate_container_count: int
+    snapshot_hash: str | None
+    source_order: int
+
+
+@dataclass(frozen=True, slots=True)
 class ReconciliationGroup:
     id: int
     bk_path: str
@@ -205,6 +233,11 @@ def group_status_text(group: ReconciliationGroup) -> str:
         return f"Thiếu {group.missing_count} cont"
     if group.status is GroupStatus.OVER_COUNT:
         return f"Thừa {group.received_container_count - group.bk_container_count} cont"
+    if group.status is GroupStatus.METADATA_CONFLICT:
+        if group.bk_issue == "DUPLICATE_UNRESOLVED":
+            return "Cần chọn nguồn cho container trùng"
+        if group.bk_issue == "SOURCE_UNRESOLVED":
+            return "Cần xử lý nguồn đối soát"
     if group.status is GroupStatus.READY:
         return f"Đủ {group.received_container_count}/{group.bk_container_count} cont – chờ xác nhận"
     return GROUP_STATUS_LABELS.get(group.status, "Cần kiểm tra")

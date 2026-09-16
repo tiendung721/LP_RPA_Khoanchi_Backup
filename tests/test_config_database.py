@@ -157,6 +157,14 @@ def test_database_migration_and_active_batch_restore(tmp_path: Path) -> None:
         "SELECT 1 FROM sqlite_master WHERE type = 'index' "
         "AND name = 'idx_sea_freight_contribution_invoice'"
     ) is not None
+    assert database.query_one(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'sea_freight_reconciliation_sources'"
+    ) is not None
+    assert database.query_one(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'sea_freight_container_occurrences'"
+    ) is not None
     database.close()
 
 

@@ -1803,11 +1803,18 @@ class ExpensePostingService:
         ):
             rows = []
             group_id = self._reconciliation_group_id(resolved_batch_id)
+            selected_containers: list[dict[str, Any]] = []
             if group_id is not None and self.sea_freight_service is not None:
                 group = self.sea_freight_repository.get_group(group_id)
                 if group is not None and str(group.status.value) == "ALLOCATED":
                     self.sea_freight_service.prepare_allocation(group_id)
+                selected_containers = self.sea_freight_repository.list_container_rows(group_id)
             for index, row in enumerate(source_rows):
+                source = (
+                    selected_containers[index]
+                    if index < len(selected_containers)
+                    else None
+                )
                 rows.append(
                     {
                         **row,
@@ -1816,6 +1823,15 @@ class ExpensePostingService:
                         "origin_batch_hash": source_hash,
                         "origin_source_item_index": index,
                         "reconciliation_group_id": group_id,
+                        **(
+                            {
+                                "reconciliation_source_sheet": source["source_sheet"],
+                                "reconciliation_source_row": source["source_row"],
+                                "reconciliation_source_sqt": source["source_sqt"],
+                            }
+                            if source is not None
+                            else {}
+                        ),
                     }
                 )
             return {
@@ -1907,6 +1923,11 @@ class ExpensePostingService:
                 raise ExpensePostingError(
                     f"Batch kết quả hồ sơ #{group.id} không còn đủ số cont."
                 )
+            selected_containers = self.sea_freight_repository.list_container_rows(group.id)
+            if len(selected_containers) != len(child_rows):
+                raise ExpensePostingError(
+                    f"Hồ sơ đối soát #{group.id} chưa chọn đủ nguồn container."
+                )
             members.append(
                 {
                     "batch_id": child_batch_id,
@@ -1924,6 +1945,7 @@ class ExpensePostingService:
                 }
             )
             for child_index, row in enumerate(child_rows):
+                source = selected_containers[child_index]
                 combined.append(
                     {
                         **row,
@@ -1931,6 +1953,9 @@ class ExpensePostingService:
                         "origin_batch_hash": child_hash,
                         "origin_source_item_index": child_index,
                         "reconciliation_group_id": group.id,
+                        "reconciliation_source_sheet": source["source_sheet"],
+                        "reconciliation_source_row": source["source_row"],
+                        "reconciliation_source_sqt": source["source_sqt"],
                     }
                 )
 
@@ -2067,11 +2092,16 @@ class ExpensePostingService:
         available = set(sheet_names)
         grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         document_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        reconciliation_rows: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        reconciliation_rows: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
             reconciliation_group_id = row.get("reconciliation_group_id")
             if reconciliation_group_id is not None:
-                reconciliation_rows[int(reconciliation_group_id)].append(row)
+                reconciliation_rows[
+                    (
+                        int(reconciliation_group_id),
+                        str(row.get("reconciliation_source_sheet") or ""),
+                    )
+                ].append(row)
             else:
                 document_rows[str(row["source_document_id"])].append(row)
 
@@ -2127,7 +2157,7 @@ class ExpensePostingService:
                 )
             )
 
-        for reconciliation_group_id, members in reconciliation_rows.items():
+        for (reconciliation_group_id, source_sheet), members in reconciliation_rows.items():
             reconciliation = (
                 self.sea_freight_repository.get_group(reconciliation_group_id)
                 if self.sea_freight_repository is not None
@@ -2138,6 +2168,8 @@ class ExpensePostingService:
                     f"Không tìm thấy hồ sơ đối soát #{reconciliation_group_id}."
                 )
             group_id = f"SEA_RECON_{reconciliation_group_id}_R{reconciliation.revision_no}"
+            if source_sheet:
+                group_id += "_" + re.sub(r"[^A-Za-z0-9]+", "_", source_sheet).strip("_")
             result.append(
                 self._posting_source_group(
                     group_id,
@@ -2149,7 +2181,7 @@ class ExpensePostingService:
                         )
                     ) or None,
                     target_locked=True,
-                    locked_target=reconciliation.bk_sheet,
+                    locked_target=source_sheet or reconciliation.bk_sheet,
                     group_target_sheets=group_target_sheets,
                     legacy_sheet=None,
                     reconciliation_group_id=reconciliation_group_id,
@@ -2370,6 +2402,9 @@ class ExpensePostingService:
                 carrier_candidates=unique_carriers(
                     [row.get("carrier") for row in group]
                 ),
+                selected_source_sheet=group[0].get("reconciliation_source_sheet"),
+                selected_source_row=group[0].get("reconciliation_source_row"),
+                source_sqt=group[0].get("reconciliation_source_sqt"),
                 force_repost=any(
                     row["source_item_index"] in repost for row in group
                 ),
@@ -3001,6 +3036,20 @@ class ExpensePostingService:
                     raise ExpensePostingError(
                         f"Dòng nguồn {selected_source_sheet or target_sheet}!"
                         f"{selected_source_row} không còn hợp lệ."
+                    )
+                if item.container and manually_selected.container != item.container:
+                    raise ExpensePostingError(
+                        f"Dòng nguồn {manually_selected.source_sheet}!{manually_selected.row} "
+                        f"không còn chứa container {item.container}."
+                    )
+                if (
+                    item.source_sqt is not None
+                    and manually_selected.sqt is not None
+                    and int(item.source_sqt) != int(manually_selected.sqt)
+                ):
+                    raise ExpensePostingError(
+                        f"SQT của container {item.container} đã thay đổi trong "
+                        f"sheet {manually_selected.source_sheet}."
                     )
 
             if item.container is None and manually_selected is None:
@@ -3652,6 +3701,7 @@ class ExpensePostingService:
             item_index=item_index,
             container=item.container,
             bl=item.bl,
+            sqt=item.source_sqt,
             fee=item.selected_fee,
             amount=item.amount,
             carrier=join_carriers(conflict_details.get("carrier_candidates", ())),

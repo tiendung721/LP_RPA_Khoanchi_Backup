@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from typing import Any
@@ -11,6 +12,8 @@ from .contracts import (
     GroupStatus,
     InvoiceContribution,
     ReconciliationGroup,
+    ReconciliationSource,
+    VesselVoyageResolutionKind,
 )
 
 
@@ -759,6 +762,247 @@ class SeaFreightRepository:
             )
         ]
 
+    def list_sources(self, group_id: int) -> list[ReconciliationSource]:
+        return [
+            self._source(row)
+            for row in self.database.query_all(
+                """
+                SELECT * FROM sea_freight_reconciliation_sources
+                WHERE group_id = ? ORDER BY source_order, id
+                """,
+                (group_id,),
+            )
+        ]
+
+    def list_container_occurrences(self, group_id: int) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.database.query_all(
+                """
+                SELECT o.*, s.resolution_kind
+                FROM sea_freight_container_occurrences AS o
+                JOIN sea_freight_reconciliation_sources AS s ON s.id = o.source_id
+                WHERE o.group_id = ?
+                ORDER BY o.container, s.source_order, o.source_row, o.id
+                """,
+                (group_id,),
+            )
+        ]
+
+    def unresolved_duplicate_containers(self, group_id: int) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.database.query_all(
+                """
+                SELECT container, COUNT(*) AS occurrence_count
+                FROM sea_freight_container_occurrences
+                WHERE group_id = ?
+                GROUP BY container
+                HAVING COUNT(*) > 1 AND SUM(selected) = 0
+                ORDER BY container
+                """,
+                (group_id,),
+            )
+        ]
+
+    def replace_group_sources(
+        self,
+        group_id: int,
+        snapshots: list[BkContainerSnapshot],
+    ) -> ReconciliationGroup:
+        """Thay snapshot nhiều sheet và giữ lựa chọn cont trùng còn hợp lệ."""
+
+        if not snapshots:
+            raise ValueError("Hồ sơ phải có ít nhất một sheet đối soát.")
+        timestamp = _now()
+        with self.database.transaction(immediate=True) as connection:
+            group = connection.execute(
+                "SELECT status FROM sea_freight_reconciliation_groups WHERE id = ?",
+                (group_id,),
+            ).fetchone()
+            if group is None:
+                raise KeyError("Không tìm thấy hồ sơ đối soát.")
+            had_persisted_sources = bool(
+                connection.execute(
+                    "SELECT 1 FROM sea_freight_reconciliation_sources "
+                    "WHERE group_id = ? LIMIT 1",
+                    (group_id,),
+                ).fetchone()
+            )
+            old_selected = {
+                str(row["container"]): (
+                    str(row["source_sheet"]), int(row["source_row"])
+                )
+                for row in connection.execute(
+                    "SELECT container, source_sheet, source_row "
+                    "FROM sea_freight_container_occurrences "
+                    "WHERE group_id = ? AND selected = 1 AND manually_selected = 1",
+                    (group_id,),
+                ).fetchall()
+            } if had_persisted_sources else {}
+            connection.execute(
+                "DELETE FROM sea_freight_group_containers WHERE group_id = ?",
+                (group_id,),
+            )
+            connection.execute(
+                "DELETE FROM sea_freight_reconciliation_sources WHERE group_id = ?",
+                (group_id,),
+            )
+            occurrences: dict[str, list[tuple[int, Any, int]]] = {}
+            for order, snapshot in enumerate(snapshots):
+                month = year = None
+                text = snapshot.bk_sheet.strip()
+                try:
+                    month, year = int(text[1:3]), 2000 + int(text[4:6])
+                except (ValueError, IndexError):
+                    pass
+                cursor = connection.execute(
+                    """
+                    INSERT INTO sea_freight_reconciliation_sources(
+                        group_id, bk_sheet, reconciliation_month, reconciliation_year,
+                        vessel_voyage_raw, vessel_name, voyage_no,
+                        vessel_key, voyage_key, combined_key,
+                        resolution_kind, container_count, invalid_container_count,
+                        duplicate_container_count, snapshot_hash, source_order
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        group_id, snapshot.bk_sheet, month, year,
+                        snapshot.vessel_voyage_raw,
+                        snapshot.canonical_vessel_name or snapshot.vessel_key,
+                        snapshot.canonical_voyage_no or snapshot.voyage_key,
+                        snapshot.vessel_key,
+                        snapshot.voyage_key, snapshot.combined_key,
+                        snapshot.resolution_kind.value, snapshot.container_count,
+                        snapshot.invalid_container_count,
+                        snapshot.duplicate_container_count, snapshot.snapshot_hash, order,
+                    ),
+                )
+                source_id = int(cursor.lastrowid)
+                for record in snapshot.containers:
+                    occurrences.setdefault(record.container, []).append(
+                        (source_id, record, order)
+                    )
+            allocation_order = 0
+            for container in sorted(occurrences):
+                values = occurrences[container]
+                old = old_selected.get(container)
+                selected_index: int | None = None
+                if len(values) == 1:
+                    selected_index = 0
+                elif old is not None:
+                    selected_index = next(
+                        (
+                            index
+                            for index, (_source_id, record, _order) in enumerate(values)
+                            if (record.source_sheet, record.source_row) == old
+                        ),
+                        None,
+                    )
+                for index, (source_id, record, _order) in enumerate(values):
+                    selected = int(index == selected_index)
+                    connection.execute(
+                        """
+                        INSERT INTO sea_freight_container_occurrences(
+                            group_id, source_id, container, source_sheet, source_row,
+                            source_sqt, departure_date, selected, manually_selected
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            group_id, source_id, record.container,
+                            record.source_sheet, record.source_row,
+                            record.source_sqt, record.departure_date, selected,
+                            int(selected and len(values) > 1),
+                        ),
+                    )
+                    if selected:
+                        connection.execute(
+                            """
+                            INSERT INTO sea_freight_group_containers(
+                                group_id, container, source_sheet, source_row,
+                                source_sqt, departure_date, allocation_order
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                group_id, record.container, record.source_sheet,
+                                record.source_row, record.source_sqt,
+                                record.departure_date, allocation_order,
+                            ),
+                        )
+                        allocation_order += 1
+            self._update_multi_source_aggregate(connection, group_id, timestamp)
+            self._recalculate(connection, group_id, timestamp)
+            self._event(
+                connection,
+                group_id,
+                "BK_MULTI_SNAPSHOT",
+                {"sheets": [snapshot.bk_sheet for snapshot in snapshots]},
+                timestamp,
+            )
+        result = self.get_group(group_id)
+        assert result is not None
+        return result
+
+    def select_container_occurrence(
+        self,
+        group_id: int,
+        container: str,
+        *,
+        source_sheet: str,
+        source_row: int,
+    ) -> ReconciliationGroup:
+        timestamp = _now()
+        with self.database.transaction(immediate=True) as connection:
+            occurrence = connection.execute(
+                """
+                SELECT * FROM sea_freight_container_occurrences
+                WHERE group_id = ? AND container = ? AND source_sheet = ? AND source_row = ?
+                """,
+                (group_id, container, source_sheet, source_row),
+            ).fetchone()
+            if occurrence is None:
+                raise ValueError("Vị trí container đã chọn không còn hợp lệ.")
+            connection.execute(
+                "UPDATE sea_freight_container_occurrences "
+                "SET selected = 0, manually_selected = 0 "
+                "WHERE group_id = ? AND container = ?",
+                (group_id, container),
+            )
+            connection.execute(
+                "UPDATE sea_freight_container_occurrences "
+                "SET selected = 1, manually_selected = 1 WHERE id = ?",
+                (int(occurrence["id"]),),
+            )
+            connection.execute(
+                "DELETE FROM sea_freight_group_containers WHERE group_id = ? AND container = ?",
+                (group_id, container),
+            )
+            next_order = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(allocation_order), -1) + 1 "
+                    "FROM sea_freight_group_containers WHERE group_id = ?",
+                    (group_id,),
+                ).fetchone()[0]
+            )
+            connection.execute(
+                """
+                INSERT INTO sea_freight_group_containers(
+                    group_id, container, source_sheet, source_row,
+                    source_sqt, departure_date, allocation_order
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    group_id, occurrence["container"], occurrence["source_sheet"],
+                    occurrence["source_row"], occurrence["source_sqt"],
+                    occurrence["departure_date"], next_order,
+                ),
+            )
+            self._update_multi_source_aggregate(connection, group_id, timestamp)
+            self._recalculate(connection, group_id, timestamp)
+        result = self.get_group(group_id)
+        assert result is not None
+        return result
+
     def managed_source_indices(self, batch_id: int) -> set[int]:
         return {
             int(row["source_item_index"])
@@ -1273,8 +1517,11 @@ class SeaFreightRepository:
         ).fetchone()
         received = int(totals["received"])
         bk_count = int(group["bk_container_count"])
+        bk_issue = str(group["bk_issue"] or "")
         if bk_count == 0:
             status = GroupStatus.BK_NOT_FOUND
+        elif bk_issue in {"SOURCE_UNRESOLVED", "DUPLICATE_UNRESOLVED"}:
+            status = GroupStatus.METADATA_CONFLICT
         elif invoice_conflict is not None and not bool(group["invoice_conflict_accepted"]):
             status = GroupStatus.METADATA_CONFLICT
         elif received < bk_count:
@@ -1292,6 +1539,110 @@ class SeaFreightRepository:
             WHERE id = ?
             """,
             (received, int(totals["total_amount"]), status.value, timestamp, group_id),
+        )
+
+    @staticmethod
+    def _update_multi_source_aggregate(
+        connection: Any,
+        group_id: int,
+        timestamp: str,
+    ) -> None:
+        selected_rows = connection.execute(
+            """
+            SELECT o.container
+            FROM sea_freight_container_occurrences AS o
+            JOIN sea_freight_reconciliation_sources AS s ON s.id = o.source_id
+            WHERE o.group_id = ? AND o.selected = 1
+            ORDER BY s.source_order, o.source_row, o.container
+            """,
+            (group_id,),
+        ).fetchall()
+        for order, row in enumerate(selected_rows):
+            connection.execute(
+                "UPDATE sea_freight_group_containers SET allocation_order = ? "
+                "WHERE group_id = ? AND container = ?",
+                (order, group_id, row["container"]),
+            )
+        sources = connection.execute(
+            "SELECT * FROM sea_freight_reconciliation_sources "
+            "WHERE group_id = ? ORDER BY source_order, id",
+            (group_id,),
+        ).fetchall()
+        occurrences = connection.execute(
+            "SELECT container, source_sheet, source_row, selected "
+            "FROM sea_freight_container_occurrences WHERE group_id = ? "
+            "ORDER BY container, source_sheet, source_row",
+            (group_id,),
+        ).fetchall()
+        distinct_count = len({str(row["container"]) for row in occurrences})
+        unresolved_duplicates = connection.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT container
+                FROM sea_freight_container_occurrences
+                WHERE group_id = ?
+                GROUP BY container
+                HAVING COUNT(*) > 1 AND SUM(selected) = 0
+            )
+            """,
+            (group_id,),
+        ).fetchone()[0]
+        unresolved_source = any(
+            str(row["resolution_kind"]) in {"AMBIGUOUS", "NOT_FOUND"}
+            for row in sources
+        )
+        issue = (
+            "SOURCE_UNRESOLVED"
+            if unresolved_source
+            else "DUPLICATE_UNRESOLVED"
+            if int(unresolved_duplicates)
+            else None
+        )
+        payload = {
+            "sources": [
+                (row["bk_sheet"], row["combined_key"], row["snapshot_hash"])
+                for row in sources
+            ],
+            "selected": [
+                (row["container"], row["source_sheet"], row["source_row"])
+                for row in occurrences
+                if bool(row["selected"])
+            ],
+        }
+        snapshot_hash = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        first = sources[0] if sources else None
+        internal_duplicates = sum(int(row["duplicate_container_count"]) for row in sources)
+        cross_duplicates = max(0, len(occurrences) - distinct_count)
+        connection.execute(
+            """
+            UPDATE sea_freight_reconciliation_groups
+            SET bk_container_count = ?, container_snapshot_hash = ?, bk_issue = ?,
+                bk_invalid_container_count = ?, bk_duplicate_container_count = ?,
+                bk_sheet = COALESCE(?, bk_sheet),
+                reconciliation_month = COALESCE(?, reconciliation_month),
+                reconciliation_year = COALESCE(?, reconciliation_year),
+                vessel_voyage_raw = COALESCE(?, vessel_voyage_raw),
+                vessel_key = COALESCE(?, vessel_key),
+                voyage_key = COALESCE(?, voyage_key),
+                combined_key = COALESCE(?, combined_key),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                distinct_count, snapshot_hash, issue,
+                sum(int(row["invalid_container_count"]) for row in sources),
+                internal_duplicates + cross_duplicates,
+                first["bk_sheet"] if first is not None else None,
+                first["reconciliation_month"] if first is not None else None,
+                first["reconciliation_year"] if first is not None else None,
+                first["vessel_voyage_raw"] if first is not None else None,
+                first["vessel_key"] if first is not None else None,
+                first["voyage_key"] if first is not None else None,
+                first["combined_key"] if first is not None else None,
+                timestamp, group_id,
+            ),
         )
 
     @staticmethod
@@ -1344,6 +1695,28 @@ class SeaFreightRepository:
             is_current=bool(row["is_current"]),
             primary_source_batch_id=row["primary_source_batch_id"],
             primary_source_item_index=row["primary_source_item_index"],
+        )
+
+    @staticmethod
+    def _source(row: Any) -> ReconciliationSource:
+        return ReconciliationSource(
+            id=int(row["id"]),
+            group_id=int(row["group_id"]),
+            bk_sheet=str(row["bk_sheet"]),
+            reconciliation_month=row["reconciliation_month"],
+            reconciliation_year=row["reconciliation_year"],
+            vessel_voyage_raw=str(row["vessel_voyage_raw"]),
+            vessel_name=str(row["vessel_name"]),
+            voyage_no=str(row["voyage_no"]),
+            vessel_key=str(row["vessel_key"]),
+            voyage_key=str(row["voyage_key"]),
+            combined_key=str(row["combined_key"]),
+            resolution_kind=VesselVoyageResolutionKind(str(row["resolution_kind"])),
+            container_count=int(row["container_count"]),
+            invalid_container_count=int(row["invalid_container_count"]),
+            duplicate_container_count=int(row["duplicate_container_count"]),
+            snapshot_hash=row["snapshot_hash"],
+            source_order=int(row["source_order"]),
         )
 
     @staticmethod

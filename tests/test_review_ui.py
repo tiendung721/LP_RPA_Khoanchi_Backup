@@ -280,6 +280,20 @@ def test_reconciliation_period_uses_existing_bk_sheets_without_default_selection
     assert dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
 
 
+def test_reconciliation_period_allows_multiple_sheet_selection(qtbot) -> None:
+    dialog = ReconciliationPeriodDialog(
+        sheet_names=("T07 26", "T08 26", "T09 26")
+    )
+    qtbot.addWidget(dialog)
+
+    dialog.table.selectRow(0)
+    dialog.table.selectRow(1)
+
+    assert dialog.table.selectionMode() is QAbstractItemView.SelectionMode.MultiSelection
+    assert dialog.selected_sheet_names == ["T09 26", "T08 26"]
+    assert dialog.selected_sheet_name is None
+
+
 def test_delete_selected_row_requires_confirmation(qtbot, monkeypatch) -> None:
     window = ReviewWindow(_review_payload())
     qtbot.addWidget(window)

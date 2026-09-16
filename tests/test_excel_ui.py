@@ -2564,6 +2564,7 @@ def test_expense_conflict_dialog_shows_source_vessel_voyage_only_for_posting(
         "conflict_id": "occupied",
         "type": "TARGET_CELL_OCCUPIED",
         "vessel_voyage": "NEW VISION 2610S",
+        "sqt": 688,
         "allowed_actions": ["KEEP_EXISTING", "OVERWRITE"],
     }
     posting = ConflictResolutionDialog([conflict], operation="posting")
@@ -2571,9 +2572,11 @@ def test_expense_conflict_dialog_shows_source_vessel_voyage_only_for_posting(
     qtbot.addWidget(posting)
     qtbot.addWidget(daily)
     column = posting.COLUMNS.index("Tàu / chuyến nguồn")
+    sqt_column = posting.COLUMNS.index("SQT")
 
     assert not posting.table.isColumnHidden(column)
     assert posting.table.item(0, column).text() == "NEW VISION 2610S"
+    assert posting.table.item(0, sqt_column).text() == "688"
     assert daily.table.isColumnHidden(column)
 
 
