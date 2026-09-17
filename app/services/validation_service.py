@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date
@@ -55,6 +56,17 @@ def normalize_bl(value: str | None) -> str | None:
         raise TypeError("B/L phải là chuỗi hoặc để trống.")
     normalized = _COLLAPSE_WHITESPACE_RE.sub(" ", value.strip()).upper()
     return normalized or None
+
+
+def normalize_bl_key(value: str | None) -> str | None:
+    """Tạo khóa B/L ổn định để đối chiếu mà không đổi giá trị hiển thị."""
+
+    normalized = normalize_bl(value)
+    if normalized is None:
+        return None
+    normalized = unicodedata.normalize("NFKC", normalized)
+    key = re.sub(r"[^A-Z0-9]", "", normalized.upper())
+    return key or None
 
 
 def normalize_fee(value: str) -> str:

@@ -17,7 +17,11 @@ from openpyxl.utils import get_column_letter
 
 from app.constants import FEE_CODES, RULE_CODES
 from app.services.json_codec import JsonCodec, JsonCodecError
-from app.services.validation_service import normalize_bl, normalize_container
+from app.services.validation_service import (
+    normalize_bl,
+    normalize_bl_key,
+    normalize_container,
+)
 
 from .headers import HeaderResolution, HeaderResolutionError, HeaderResolver, normalize_header
 from .carrier import (
@@ -76,6 +80,7 @@ BASE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "sqt": ("SQT PM", "SQT", "Số thứ tự PM"),
     "closing_date": ("Ngày Đóng", "Ngày đóng hàng"),
     "container": ("Số Container", "Container", "Số cont"),
+    "bl": SOURCE_HEADER_ALIASES["bl"],
     "cargo_type": ("Loại hàng", "Tên hàng"),
     "closing_place": SOURCE_HEADER_ALIASES["closing_place"],
     "vessel": ("Tên tàu", "Tàu"),
@@ -173,6 +178,23 @@ def _unique_invoice_values(values: Sequence[Any]) -> list[str]:
         seen.add(key)
         result.append(text)
     return result
+
+
+def _bl_keys(value: Any) -> tuple[str, ...]:
+    """Tách một ô nhiều B/L và tạo các khóa match không chứa dấu phân cách."""
+
+    if value in (None, ""):
+        return ()
+    parts = re.split(r"[,;\r\n]+", str(value))
+    result: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        key = normalize_bl_key(part)
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+    return tuple(result)
 
 
 def _period_offset(month: int, year: int, offset: int) -> tuple[int, int]:
@@ -936,6 +958,7 @@ class ExpensePostingService:
                 item.selected_source_sheet = str(
                     selected_source_sheet or selected_sheet
                 )
+                item.match_reason = "MANUAL"
                 item.target_row = None
                 item.invoice_action = None
             elif action in {
@@ -2787,6 +2810,14 @@ class ExpensePostingService:
                     if field in columns
                 )
             )
+            raw_bl = (
+                worksheet.cell(row, columns["bl"]).value
+                if "bl" in columns
+                else None
+            )
+            candidate_bl = normalize_bl(
+                str(raw_bl) if raw_bl not in (None, "") else None
+            )
             result[container].append(
                 RowCandidate(
                     row=row,
@@ -2794,6 +2825,8 @@ class ExpensePostingService:
                         worksheet.cell(row, columns["sqt"]).value
                     ),
                     container=container,
+                    bl=candidate_bl,
+                    bl_keys=_bl_keys(candidate_bl),
                     source_sheet=worksheet.title,
                     source_row=row,
                     plan_values=plan_values,
@@ -2851,7 +2884,12 @@ class ExpensePostingService:
         self,
         workbook: Any,
         target_sheet: str,
-    ) -> tuple[dict[str, list[RowCandidate]], list[RowCandidate], list[str]]:
+    ) -> tuple[
+        dict[str, list[RowCandidate]],
+        dict[str, list[RowCandidate]],
+        list[RowCandidate],
+        list[str],
+    ]:
         parsed_target = self.months.parse_target_sheet(target_sheet)
         if parsed_target is None:
             raise ExpensePostingError(f"Sheet {target_sheet!r} không có dạng TMM YY.")
@@ -2873,6 +2911,7 @@ class ExpensePostingService:
         ]
 
         combined: dict[str, list[RowCandidate]] = defaultdict(list)
+        by_bl: dict[str, list[RowCandidate]] = defaultdict(list)
         all_candidates: list[RowCandidate] = []
         for name in window_names:
             worksheet = workbook[name]
@@ -2889,7 +2928,10 @@ class ExpensePostingService:
             for container, candidates in sheet_index.items():
                 combined[container].extend(candidates)
                 all_candidates.extend(candidates)
-        return dict(combined), all_candidates, window_names
+                for candidate in candidates:
+                    for bl_key in candidate.bl_keys:
+                        by_bl[bl_key].append(candidate)
+        return dict(combined), dict(by_bl), all_candidates, window_names
 
     def _sheet_candidates(
         self,
@@ -2944,7 +2986,7 @@ class ExpensePostingService:
         *,
         batch_hash: str,
     ) -> tuple[list[PostingItem], list[PostingConflict]]:
-        index, manual_candidates, window_names = self._source_window_index(
+        index, bl_index, manual_candidates, window_names = self._source_window_index(
             workbook, target_sheet
         )
         window_order = {name: position for position, name in enumerate(window_names)}
@@ -2955,6 +2997,17 @@ class ExpensePostingService:
                 candidate.row,
             ),
         )
+
+        def candidate_identity(candidate: RowCandidate) -> tuple[str, int]:
+            return candidate.source_sheet, candidate.row
+
+        def ordered_candidates(values: Iterable[RowCandidate]) -> list[RowCandidate]:
+            identities = {candidate_identity(candidate) for candidate in values}
+            return [
+                candidate
+                for candidate in manual_candidates
+                if candidate_identity(candidate) in identities
+            ]
         layouts: dict[
             str,
             tuple[Any, dict[str, int], dict[str, int], dict[str, int]],
@@ -3037,10 +3090,24 @@ class ExpensePostingService:
                         f"Dòng nguồn {selected_source_sheet or target_sheet}!"
                         f"{selected_source_row} không còn hợp lệ."
                     )
-                if item.container and manually_selected.container != item.container:
+                if (
+                    item.container
+                    and manually_selected.container != item.container
+                    and item.match_reason not in {"BL_ONLY", "MANUAL"}
+                ):
                     raise ExpensePostingError(
                         f"Dòng nguồn {manually_selected.source_sheet}!{manually_selected.row} "
                         f"không còn chứa container {item.container}."
+                    )
+                source_bl_keys = set(_bl_keys(item.bl))
+                if (
+                    source_bl_keys
+                    and item.match_reason in {"BOTH_MATCH", "BL_ONLY"}
+                    and source_bl_keys.isdisjoint(manually_selected.bl_keys)
+                ):
+                    raise ExpensePostingError(
+                        f"B/L của dòng {manually_selected.source_sheet}!"
+                        f"{manually_selected.row} đã thay đổi."
                     )
                 if (
                     item.source_sqt is not None
@@ -3052,47 +3119,100 @@ class ExpensePostingService:
                         f"sheet {manually_selected.source_sheet}."
                     )
 
-            if item.container is None and manually_selected is None:
+            container_candidates = list(index.get(item.container or "", ()))
+            source_bl_keys = _bl_keys(item.bl)
+            bl_candidates = ordered_candidates(
+                candidate
+                for bl_key in source_bl_keys
+                for candidate in bl_index.get(bl_key, ())
+            )
+            selected = manually_selected
+            candidates: list[RowCandidate] = (
+                [manually_selected] if manually_selected is not None else []
+            )
+            conflict_type: ConflictType | None = None
+            conflict_message = ""
+
+            if selected is None and container_candidates and bl_candidates:
+                bl_identities = {
+                    candidate_identity(candidate) for candidate in bl_candidates
+                }
+                common = [
+                    candidate
+                    for candidate in container_candidates
+                    if candidate_identity(candidate) in bl_identities
+                ]
+                if len(common) == 1:
+                    selected = common[0]
+                    candidates = common
+                    item.match_reason = "BOTH_MATCH"
+                elif len(common) > 1:
+                    candidates = ordered_candidates(common)
+                    conflict_type = ConflictType.MULTIPLE_CONTAINER_MATCH
+                    conflict_message = (
+                        "Container và B/L cùng khớp nhiều dòng; hãy chọn đúng "
+                        "sheet, dòng và SQT."
+                    )
+                else:
+                    candidates = ordered_candidates(
+                        [*container_candidates, *bl_candidates]
+                    )
+                    conflict_type = ConflictType.PARTIAL_KEY_MATCH
+                    conflict_message = (
+                        "Container và B/L đang chỉ tới các dòng BK khác nhau; "
+                        "hãy chọn dòng chính xác."
+                    )
+            elif selected is None and container_candidates:
+                candidates = ordered_candidates(container_candidates)
+                if len(candidates) == 1:
+                    selected = candidates[0]
+                    item.match_reason = "CONTAINER_ONLY"
+                else:
+                    conflict_type = ConflictType.MULTIPLE_CONTAINER_MATCH
+                    conflict_message = (
+                        f"Container {item.container} có nhiều dòng trong phạm vi "
+                        f"{', '.join(window_names)}; hãy chọn đúng sheet, dòng và SQT."
+                    )
+            elif selected is None and bl_candidates:
+                candidates = bl_candidates
+                if len(candidates) == 1:
+                    selected = candidates[0]
+                    item.match_reason = "BL_ONLY"
+                else:
+                    conflict_type = ConflictType.MULTIPLE_CONTAINER_MATCH
+                    conflict_message = (
+                        f"B/L {item.bl} có nhiều dòng trong phạm vi "
+                        f"{', '.join(window_names)}; hãy chọn đúng sheet, dòng và SQT."
+                    )
+
+            item.row_candidates = candidates
+            if selected is None and conflict_type is None:
                 item_index = len(analyzed_items)
                 analyzed_items.append(item)
-                conflict_type = (
+                missing_type = (
                     ConflictType.BL_ONLY_NO_CONTAINER
-                    if item.bl and item.selected_fee == "CB"
+                    if item.container is None and item.bl
                     else ConflictType.CONTAINER_NOT_FOUND
                 )
-                conflicts.append(
-                    self._item_conflict(
-                        batch_hash,
-                        item_index,
-                        item,
-                        conflict_type,
-                        "Khoản chi chưa có container; hãy chọn đúng dòng kế hoạch.",
-                        (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
-                        row_candidates=manual_candidates,
-                    )
+                missing_subject = (
+                    f"B/L {item.bl}"
+                    if item.container is None and item.bl
+                    else f"container {item.container or 'trống'}"
                 )
-                continue
-
-            candidates = (
-                [manually_selected]
-                if manually_selected is not None
-                else list(index.get(item.container or "", ()))
-            )
-            item.row_candidates = candidates
-            selected = manually_selected or self._automatic_row(candidates)
-            if not candidates:
-                item_index = len(analyzed_items)
-                analyzed_items.append(item)
                 conflicts.append(
                     self._item_conflict(
                         batch_hash,
                         item_index,
                         item,
-                        ConflictType.CONTAINER_NOT_FOUND,
-                        f"Không tìm thấy container {item.container} trong "
+                        missing_type,
+                        f"Không tìm thấy {missing_subject} trong "
                         f"{', '.join(window_names)}.",
                         (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
                         row_candidates=manual_candidates,
+                        details={
+                            "source_bl_keys": list(source_bl_keys),
+                            "match_reason": "NOT_FOUND",
+                        },
                     )
                 )
                 continue
@@ -3104,11 +3224,14 @@ class ExpensePostingService:
                         batch_hash,
                         item_index,
                         item,
-                        ConflictType.MULTIPLE_CONTAINER_MATCH,
-                        f"Container {item.container} có nhiều dòng trong phạm vi "
-                        f"{', '.join(window_names)}; hãy chọn đúng sheet, dòng và SQT.",
+                        conflict_type or ConflictType.MULTIPLE_CONTAINER_MATCH,
+                        conflict_message,
                         (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
                         row_candidates=candidates,
+                        details={
+                            "source_bl_keys": list(source_bl_keys),
+                            "match_reason": "AMBIGUOUS",
+                        },
                     )
                 )
                 continue
@@ -3692,6 +3815,7 @@ class ExpensePostingService:
                 batch_hash,
                 item.source_indices,
                 item.container,
+                item.bl,
                 item.selected_fee,
                 item.sheet_name,
                 target_cell,
@@ -4163,6 +4287,8 @@ class ExpensePostingService:
         return {
             "source_indices": list(item.source_indices),
             "container": item.container,
+            "bl": item.bl,
+            "match_reason": item.match_reason,
             "fee_original": item.original_fee,
             "fee_selected": fee,
             "sheet_name": item.sheet_name,
@@ -4207,6 +4333,7 @@ class ExpensePostingService:
                     ),
                     "container": source.get("container", item.container),
                     "bl": source.get("bl", item.bl),
+                    "match_reason": action.get("match_reason"),
                     "fee_original": source.get("fee", item.original_fee),
                     "fee_selected": action["fee_selected"],
                     "rule": source.get("rule", item.rule),

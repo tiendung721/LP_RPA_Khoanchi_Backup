@@ -2705,6 +2705,7 @@ def test_manual_row_picker_returns_source_sheet_and_workbook_row(qtbot) -> None:
                 "row_number": 12,
                 "sqt": 700,
                 "container": "DRYU3026167",
+                "bl": "VS26071443",
                 "goods_type": "Gạo",
                 "closing_date": "28/07/2026",
                 "closing_place": "Kho A",
@@ -2721,12 +2722,14 @@ def test_manual_row_picker_returns_source_sheet_and_workbook_row(qtbot) -> None:
 
     assert dialog.selected_row == 12
     assert dialog.selected_source_sheet == "T06 26"
-    assert dialog.table.columnCount() == 10
-    assert dialog.table.horizontalHeaderItem(5).text() == "Nơi đóng hàng"
-    assert dialog.table.item(0, 5).text() == "Kho A"
-    assert dialog.table.horizontalHeaderItem(7).text() == "Ngày tàu chạy"
-    assert dialog.table.item(0, 7).text() == "30/07/2026"
-    assert dialog.table.item(0, 9).text() == "Vận tải ABC"
+    assert dialog.table.columnCount() == 11
+    assert dialog.table.horizontalHeaderItem(3).text() == "B/L"
+    assert dialog.table.item(0, 3).text() == "VS26071443"
+    assert dialog.table.horizontalHeaderItem(6).text() == "Nơi đóng hàng"
+    assert dialog.table.item(0, 6).text() == "Kho A"
+    assert dialog.table.horizontalHeaderItem(8).text() == "Ngày tàu chạy"
+    assert dialog.table.item(0, 8).text() == "30/07/2026"
+    assert dialog.table.item(0, 10).text() == "Vận tải ABC"
     assert "Cột" not in [
         dialog.table.horizontalHeaderItem(column).text()
         for column in range(dialog.table.columnCount())

@@ -25,6 +25,9 @@ from .contracts import (
 _NON_ALNUM = re.compile(r"[^A-Z0-9]+")
 _VOYAGE_KEY = re.compile(r"^(?P<prefix>[A-Z]*)(?P<number>\d+)(?P<suffix>[A-Z]*)$")
 _INVALID_BK_VALUES = frozenset({"TP", "GND", "CUOCBO", "CUOC BO", "NM", "KBB"})
+_SEA_FREIGHT_REQUIRED_FIELDS = tuple(
+    field for field in SYNC_FIELDS if field != "bl"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,7 +204,7 @@ class BkVesselMatcher:
             header = self.headers.resolve(
                 worksheet,
                 SOURCE_HEADER_ALIASES,
-                required=SYNC_FIELDS,
+                required=_SEA_FREIGHT_REQUIRED_FIELDS,
             )
             return self._resolve_worksheet(
                 worksheet,
@@ -347,7 +350,7 @@ class BkVesselMatcher:
             header = self.headers.resolve(
                 worksheet,
                 SOURCE_HEADER_ALIASES,
-                required=SYNC_FIELDS,
+                required=_SEA_FREIGHT_REQUIRED_FIELDS,
             )
             resolution = self._resolve_worksheet(
                 worksheet,
@@ -466,7 +469,7 @@ class BkVesselMatcher:
             header = self.headers.resolve(
                 worksheet,
                 SOURCE_HEADER_ALIASES,
-                required=SYNC_FIELDS,
+                required=_SEA_FREIGHT_REQUIRED_FIELDS,
             )
             displays: dict[str, str] = {}
             containers: dict[str, set[str]] = {}

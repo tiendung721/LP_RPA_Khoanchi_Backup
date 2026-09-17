@@ -33,6 +33,7 @@ _UPDATABLE_COLUMNS = frozenset(
     {
         "container",
         "bl",
+        "match_reason",
         "fee_original",
         "fee_selected",
         "rule",
@@ -119,6 +120,7 @@ class ExpensePostingItemRecord:
     source_item_index: int
     container: str | None
     bl: str | None
+    match_reason: str | None
     fee_original: str
     fee_selected: str | None
     rule: str | None
@@ -186,6 +188,7 @@ class ExpensePostingRepository:
         status: object = "PLANNED",
         container: str | None = None,
         bl: str | None = None,
+        match_reason: str | None = None,
         fee_selected: object | None = None,
         rule: object | None = None,
         sheet_name: str | None = None,
@@ -220,6 +223,7 @@ class ExpensePostingRepository:
                 "source_item_index": source_item_index,
                 "container": container,
                 "bl": bl,
+                "match_reason": match_reason,
                 "fee_original": fee_original,
                 "fee_selected": fee_selected,
                 "rule": rule,
@@ -675,6 +679,7 @@ class ExpensePostingRepository:
             """
             INSERT INTO expense_posting_items (
                 run_id, batch_id, batch_hash, source_item_index, container, bl,
+                match_reason,
                 fee_original, fee_selected, rule, amount, sheet_name,
                 target_row, target_column, target_cell, value_before,
                 value_after, action, invoice_no, invoice_selected,
@@ -686,7 +691,7 @@ class ExpensePostingRepository:
                 status, created_at
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             tuple(
@@ -698,6 +703,7 @@ class ExpensePostingRepository:
                     "source_item_index",
                     "container",
                     "bl",
+                    "match_reason",
                     "fee_original",
                     "fee_selected",
                     "rule",
@@ -796,6 +802,7 @@ class ExpensePostingRepository:
             "source_item_index": source_item_index,
             "container": _optional_text(payload.get("container")),
             "bl": _optional_text(payload.get("bl")),
+            "match_reason": _optional_text(payload.get("match_reason")),
             "fee_original": fee_original,
             "fee_selected": _optional_text(payload.get("fee_selected")),
             "rule": _optional_text(payload.get("rule")),
@@ -836,6 +843,7 @@ class ExpensePostingRepository:
             source_item_index=int(row["source_item_index"]),
             container=row["container"],
             bl=row["bl"],
+            match_reason=row["match_reason"],
             fee_original=str(row["fee_original"]),
             fee_selected=row["fee_selected"],
             rule=row["rule"],

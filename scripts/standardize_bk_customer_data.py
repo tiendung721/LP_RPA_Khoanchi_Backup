@@ -35,7 +35,6 @@ from app.services.excel.carrier import DETAIL_HEADERS, ensure_bk_detail_sheet
 from app.services.excel.daily_sync import (
     SOURCE_HEADER_ALIASES,
     SYNC_FIELDS,
-    TARGET_EXPECTED_COLUMNS,
 )
 from app.services.excel.headers import HeaderResolver, normalize_header
 from app.services.excel.posting import (
@@ -369,7 +368,7 @@ def _validate_workbook(
                 SOURCE_HEADER_ALIASES,
                 required=SYNC_FIELDS,
             )
-            if resolution.columns != TARGET_EXPECTED_COLUMNS:
+            if set(resolution.columns) != set(SYNC_FIELDS):
                 raise RuntimeError(
                     f"Daily-sync columns differ in {worksheet.title!r}: "
                     f"{resolution.columns!r}."

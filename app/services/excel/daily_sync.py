@@ -11,11 +11,17 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl.cell.cell import MergedCell
+from openpyxl.formula.translate import Translator, TranslatorError
 from openpyxl.worksheet.worksheet import Worksheet
 
 from app.services.file_stability import FileStabilityChecker
 
-from .headers import HeaderResolution, HeaderResolutionError, HeaderResolver
+from .headers import (
+    HeaderResolution,
+    HeaderResolutionError,
+    HeaderResolver,
+    normalize_header,
+)
 from .models import (
     ConflictType,
     ExcelOperation,
@@ -75,6 +81,7 @@ SYNC_FIELDS: tuple[str, ...] = (
     "recipient",
     "sea_transport",
     "transport",
+    "bl",
 )
 
 SOURCE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
@@ -90,14 +97,8 @@ SOURCE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "recipient": ("Người nhận", "Khách hàng"),
     "sea_transport": ("VT biển", "Vận tải biển"),
     "transport": ("Vận chuyển", "Đơn vị vận chuyển", "VT bộ"),
+    "bl": ("Số B/L", "B/L", "Số BL", "Số Bill", "Bill"),
 }
-
-TARGET_EXPECTED_COLUMNS: dict[str, int] = {
-    **{field: index for index, field in enumerate(SYNC_FIELDS[:11], 1)},
-    "transport": 16,
-}
-SYNC_TARGET_COLUMNS = frozenset(TARGET_EXPECTED_COLUMNS.values())
-
 
 class DailySyncError(RuntimeError):
     pass
@@ -316,6 +317,7 @@ class DailySyncService:
                 existing_names = {name for _year, name in existing_targets}
                 for target_year, target_name in target_options:
                     target_rows: list[SyncRow] = []
+                    target_header: HeaderResolution | None = None
                     if target_name in existing_names:
                         target_sheet = target_book[target_name]
                         target_header = self._resolve_target_headers(target_sheet)
@@ -332,6 +334,7 @@ class DailySyncService:
                             if target_name in existing_names
                             else None
                         ),
+                        target_header=target_header,
                     )
                     actions_by_target[target_name] = actions
                     inserts = [
@@ -540,7 +543,7 @@ class DailySyncService:
                 fingerprint_after=plan.target_fingerprint,
                 run_id=plan.run_id,
                 message=(
-                    "Dữ liệu A–K/P đã đồng bộ; không có ô nào cần ghi."
+                    "Các cột nghiệp vụ BK đã đồng bộ; không có ô nào cần ghi."
                 ),
                 item_outcomes=_execution_outcomes(plan, (target_name,)),
             )
@@ -576,8 +579,9 @@ class DailySyncService:
                 plan.target_path, run_id=plan.run_id
             )
             workbook = self.gateway.load(working_path, read_only=False)
-            expected_cells: dict[tuple[int, int], Any] = {}
+            expected_cells: dict[tuple[int, str], Any] = {}
             protected_cells: dict[tuple[int, int], Any] = {}
+            formula_cells: dict[tuple[int, int], Any] = {}
             try:
                 created = target_name not in workbook.sheetnames
                 if created:
@@ -602,6 +606,7 @@ class DailySyncService:
                         worksheet,
                         action.target_row,
                         action.source.values,
+                        header,
                         expected_cells,
                     )
                     for column, value in action.protected_values.items():
@@ -618,16 +623,24 @@ class DailySyncService:
                 max_style_column = self._actual_max_column(worksheet)
                 for offset, action in enumerate(insert_actions):
                     target_row = append_at + offset
-                    self._copy_row_style(
-                        worksheet,
-                        template_row,
-                        target_row,
-                        max_column=max_style_column,
-                    )
+                    for column, value in self._protected_values(
+                        worksheet, target_row, header
+                    ).items():
+                        protected_cells[(target_row, column)] = value
+                    if target_row != template_row:
+                        self._copy_row_template(
+                            worksheet,
+                            worksheet,
+                            template_row,
+                            target_row,
+                            managed_columns=set(header.columns.values()),
+                            max_column=max_style_column,
+                        )
                     self._write_sync_values(
                         worksheet,
                         target_row,
                         action.source.values,
+                        header,
                         expected_cells,
                     )
                 from .payment_sync import (
@@ -637,6 +650,12 @@ class DailySyncService:
 
                 if find_summary_start(worksheet) is not None:
                     refresh_bk_summary_formulas(worksheet)
+                self._record_formula_cells(
+                    worksheet,
+                    (append_at + offset for offset in range(len(insert_actions))),
+                    managed_columns=set(header.columns.values()),
+                    expected=formula_cells,
+                )
                 self.gateway.save(workbook, working_path)
             finally:
                 workbook.close()
@@ -647,6 +666,7 @@ class DailySyncService:
                 target_name,
                 expected_cells,
                 protected_cells,
+                formula_cells,
             )
             _progress(progress_callback, "Đang cập nhật backup gần nhất…")
             backup_path = self.backups.create_backup(plan.target_path)
@@ -765,8 +785,9 @@ class DailySyncService:
                 plan.target_path, run_id=plan.run_id
             )
             workbook = self.gateway.load(working_path, read_only=False)
-            expected_by_sheet: dict[str, dict[tuple[int, int], Any]] = {}
+            expected_by_sheet: dict[str, dict[tuple[int, str], Any]] = {}
             protected_by_sheet: dict[str, dict[tuple[int, int], Any]] = {}
+            formulas_by_sheet: dict[str, dict[tuple[int, int], Any]] = {}
             try:
                 for position, target_name in enumerate(ordered_targets, start=1):
                     _progress(
@@ -783,10 +804,12 @@ class DailySyncService:
                         )
                     )
                     header = self._resolve_target_headers(worksheet)
-                    expected: dict[tuple[int, int], Any] = {}
+                    expected: dict[tuple[int, str], Any] = {}
                     protected: dict[tuple[int, int], Any] = {}
+                    formulas: dict[tuple[int, int], Any] = {}
                     expected_by_sheet[target_name] = expected
                     protected_by_sheet[target_name] = protected
+                    formulas_by_sheet[target_name] = formulas
                     for action in actions:
                         if (
                             action.action is SyncActionType.UPDATE
@@ -794,7 +817,11 @@ class DailySyncService:
                             and action.target_row is not None
                         ):
                             self._write_sync_values(
-                                worksheet, action.target_row, action.source.values, expected
+                                worksheet,
+                                action.target_row,
+                                action.source.values,
+                                header,
+                                expected,
                             )
                             for column, value in action.protected_values.items():
                                 protected[(action.target_row, column)] = value
@@ -809,19 +836,36 @@ class DailySyncService:
                     max_style_column = self._actual_max_column(worksheet)
                     for offset, action in enumerate(insert_actions):
                         target_row = append_at + offset
-                        self._copy_row_style(
-                            worksheet,
-                            template_row,
-                            target_row,
-                            max_column=max_style_column,
-                        )
+                        for column, value in self._protected_values(
+                            worksheet, target_row, header
+                        ).items():
+                            protected[(target_row, column)] = value
+                        if target_row != template_row:
+                            self._copy_row_template(
+                                worksheet,
+                                worksheet,
+                                template_row,
+                                target_row,
+                                managed_columns=set(header.columns.values()),
+                                max_column=max_style_column,
+                            )
                         self._write_sync_values(
-                            worksheet, target_row, action.source.values, expected
+                            worksheet,
+                            target_row,
+                            action.source.values,
+                            header,
+                            expected,
                         )
                     from .payment_sync import find_summary_start, refresh_bk_summary_formulas
 
                     if find_summary_start(worksheet) is not None:
                         refresh_bk_summary_formulas(worksheet)
+                    self._record_formula_cells(
+                        worksheet,
+                        (append_at + offset for offset in range(len(insert_actions))),
+                        managed_columns=set(header.columns.values()),
+                        expected=formulas,
+                    )
                 self.gateway.save(workbook, working_path)
             finally:
                 workbook.close()
@@ -831,6 +875,7 @@ class DailySyncService:
                     target_name,
                     expected_by_sheet[target_name],
                     protected_by_sheet[target_name],
+                    formulas_by_sheet[target_name],
                 )
             backup_path = self.backups.create_backup(plan.target_path)
             after = self.gateway.atomic_replace(
@@ -958,6 +1003,7 @@ class DailySyncService:
         source_fingerprint: str,
         target_sheet: str,
         target_worksheet: Worksheet | None,
+        target_header: HeaderResolution | None,
     ) -> tuple[list[SyncAction], list[SyncConflict]]:
         source_groups: dict[int, list[SyncRow]] = defaultdict(list)
         target_groups: dict[int, list[SyncRow]] = defaultdict(list)
@@ -1029,6 +1075,7 @@ class DailySyncService:
                         protected_values=self._protected_values(
                             target_worksheet,
                             target_item.source_row,
+                            target_header,
                         ),
                     )
                 )
@@ -1057,15 +1104,18 @@ class DailySyncService:
 
     @staticmethod
     def _protected_values(
-        worksheet: Worksheet | None, row: int
+        worksheet: Worksheet | None,
+        row: int,
+        header: HeaderResolution | None,
     ) -> dict[int, Any]:
-        if worksheet is None:
+        if worksheet is None or header is None:
             return {}
+        managed_columns = set(header.columns.values())
         return {
             column: cell.value
             for (cell_row, column), cell in worksheet._cells.items()
             if cell_row == row
-            and column not in SYNC_TARGET_COLUMNS
+            and column not in managed_columns
             and cell.value is not None
         }
 
@@ -1082,18 +1132,26 @@ class DailySyncService:
         resolution = self.headers.resolve(
             worksheet, SOURCE_HEADER_ALIASES, required=SYNC_FIELDS
         )
-        wrong = {
-            field: (resolution.columns[field], expected)
-            for field, expected in TARGET_EXPECTED_COLUMNS.items()
-            if resolution.columns[field] != expected
-        }
-        if wrong:
-            details = ", ".join(
-                f"{field}: cột {actual}, cần {expected}"
-                for field, (actual, expected) in wrong.items()
-            )
+        duplicate_fields: list[str] = []
+        for field, aliases in SOURCE_HEADER_ALIASES.items():
+            alias_keys = {
+                normalize_header(value)
+                for value in (*aliases, field)
+                if normalize_header(value)
+            }
+            matched_columns = {
+                column
+                for row in range(resolution.row_start, resolution.row_end + 1)
+                for column in range(1, int(worksheet.max_column or 0) + 1)
+                if normalize_header(worksheet.cell(row, column).value) in alias_keys
+            }
+            if len(matched_columns) > 1:
+                duplicate_fields.append(field)
+        if duplicate_fields:
             raise HeaderResolutionError(
-                f"Header sheet BK không đúng vị trí A–K/P ({details})."
+                "Có nhiều cột BK cùng tiêu đề nghiệp vụ: "
+                + ", ".join(duplicate_fields),
+                ambiguous=duplicate_fields,
             )
         return resolution
 
@@ -1139,7 +1197,7 @@ class DailySyncService:
     ) -> int:
         rows = cls._populated_rows(
             worksheet,
-            tuple(TARGET_EXPECTED_COLUMNS.values()),
+            tuple(header.columns[field] for field in SYNC_FIELDS),
             min_row=header.row_end + 1,
         )
         return rows[-1] if rows else header.row_end
@@ -1152,7 +1210,7 @@ class DailySyncService:
             for (_row, column), cell in cells.items()
             if cell.value is not None or cell.has_style
         ]
-        return max(used, default=max(TARGET_EXPECTED_COLUMNS.values()))
+        return max(used, default=1)
 
     def _create_month_sheet(
         self, workbook: Any, month: int, year: int, target_name: str
@@ -1216,14 +1274,14 @@ class DailySyncService:
 
         template_target_row = header.row_end + 1
         max_column = self._actual_max_column(template)
-        if data_row in template.row_dimensions:
-            worksheet.row_dimensions[template_target_row] = copy.copy(
-                template.row_dimensions[data_row]
-            )
-        for column in range(1, max_column + 1):
-            source = template.cell(data_row, column)
-            target = worksheet.cell(template_target_row, column)
-            self._copy_cell(source, target, copy_value=False)
+        self._copy_row_template(
+            template,
+            worksheet,
+            data_row,
+            template_target_row,
+            managed_columns=set(header.columns.values()),
+            max_column=max_column,
+        )
         from .bang_ke import BangKeColumnError, ensure_bang_ke_fee_columns
 
         try:
@@ -1249,52 +1307,98 @@ class DailySyncService:
         target.value = source.value if copy_value else None
 
     @classmethod
-    def _copy_row_style(
+    def _copy_row_template(
         cls,
-        worksheet: Worksheet,
+        source_worksheet: Worksheet,
+        target_worksheet: Worksheet,
         source_row: int,
         target_row: int,
         *,
+        managed_columns: set[int],
         max_column: int | None = None,
     ) -> None:
         if source_row <= 0:
             return
-        worksheet.row_dimensions[target_row].height = (
-            worksheet.row_dimensions[source_row].height
+        target_worksheet.row_dimensions[target_row].height = (
+            target_worksheet.row_dimensions[target_row].height
+            if target_worksheet.row_dimensions[target_row].height is not None
+            else source_worksheet.row_dimensions[source_row].height
         )
         for column in range(
-            1, (max_column or cls._actual_max_column(worksheet)) + 1
+            1, (max_column or cls._actual_max_column(source_worksheet)) + 1
         ):
-            source = worksheet.cell(source_row, column)
-            target = worksheet.cell(target_row, column)
+            source = source_worksheet.cell(source_row, column)
+            target = target_worksheet.cell(target_row, column)
+            if column not in managed_columns and target.value is not None:
+                continue
             cls._copy_cell(source, target, copy_value=False)
+            if column in managed_columns or not cls._is_formula(source):
+                continue
+            try:
+                target.value = Translator(
+                    str(source.value), origin=source.coordinate
+                ).translate_formula(target.coordinate)
+            except TranslatorError as exc:
+                raise DailySyncError(
+                    f"Không thể dịch công thức {source.coordinate} sang "
+                    f"{target.coordinate} trên sheet {target_worksheet.title}."
+                ) from exc
+
+    @staticmethod
+    def _is_formula(cell: Any) -> bool:
+        value = getattr(cell, "value", None)
+        return getattr(cell, "data_type", None) == "f" or (
+            isinstance(value, str) and value.startswith("=")
+        )
+
+    @classmethod
+    def _record_formula_cells(
+        cls,
+        worksheet: Worksheet,
+        rows: Iterable[int],
+        *,
+        managed_columns: set[int],
+        expected: dict[tuple[int, int], Any],
+    ) -> None:
+        max_column = cls._actual_max_column(worksheet)
+        for row in rows:
+            for column in range(1, max_column + 1):
+                if column in managed_columns:
+                    continue
+                cell = worksheet.cell(row, column)
+                if cls._is_formula(cell):
+                    expected[(row, column)] = cell.value
 
     @staticmethod
     def _write_sync_values(
         worksheet: Worksheet,
         target_row: int,
         values: Sequence[Any],
-        expected: dict[tuple[int, int], Any],
+        header: HeaderResolution,
+        expected: dict[tuple[int, str], Any],
     ) -> None:
         for index, field in enumerate(SYNC_FIELDS):
-            column = TARGET_EXPECTED_COLUMNS[field]
+            column = header.columns[field]
             value = values[index]
             worksheet.cell(target_row, column).value = value
-            expected[(target_row, column)] = value
+            expected[(target_row, field)] = value
 
     def _verify_saved_sync(
         self,
         path: Path,
         sheet_name: str,
-        expected_cells: Mapping[tuple[int, int], Any],
+        expected_cells: Mapping[tuple[int, str], Any],
         protected_cells: Mapping[tuple[int, int], Any],
+        formula_cells: Mapping[tuple[int, int], Any],
     ) -> None:
         workbook = self.gateway.load(path, read_only=False)
         try:
             if sheet_name not in workbook.sheetnames:
                 raise DailySyncError("Bản lưu thiếu sheet đích.")
             worksheet = workbook[sheet_name]
-            for (row, column), value in expected_cells.items():
+            header = self._resolve_target_headers(worksheet)
+            for (row, field), value in expected_cells.items():
+                column = header.columns[field]
                 if worksheet.cell(row, column).value != value:
                     raise DailySyncError(
                         f"Ô {worksheet.cell(row, column).coordinate} "
@@ -1305,6 +1409,12 @@ class DailySyncService:
                     raise DailySyncError(
                         f"Ô được bảo vệ {worksheet.cell(row, column).coordinate} "
                         "đã bị thay đổi."
+                    )
+            for (row, column), value in formula_cells.items():
+                if worksheet.cell(row, column).value != value:
+                    raise DailySyncError(
+                        f"Công thức tại {worksheet.cell(row, column).coordinate} "
+                        "không được lưu đúng."
                     )
         finally:
             workbook.close()

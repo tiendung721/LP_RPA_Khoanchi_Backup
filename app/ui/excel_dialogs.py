@@ -717,13 +717,14 @@ class ManualRowPickerDialog(AppDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
 
-        self.table = QTableWidget(0, 10)
+        self.table = QTableWidget(0, 11)
         self.table.setObjectName("manualRowCandidateTable")
         self.table.setHorizontalHeaderLabels(
             [
                 "Sheet tìm thấy",
                 "SQT",
                 "Container",
+                "B/L",
                 "Loại hàng",
                 "Ngày đóng",
                 "Nơi đóng hàng",
@@ -754,6 +755,7 @@ class ManualRowPickerDialog(AppDialog):
                 _value(candidate, "source_sheet", "sheet_name", "sheet"),
                 _value(candidate, "sqt", "sequence_number"),
                 _value(candidate, "container", "container_number"),
+                _value(candidate, "bl", "bill", "bill_of_lading"),
                 _value(candidate, "cargo_type", "goods_type", "loai_hang"),
                 _value(candidate, "closing_date", "ngay_dong"),
                 _value(
@@ -777,7 +779,7 @@ class ManualRowPickerDialog(AppDialog):
             for column, value in enumerate(values):
                 display = (
                     _format_date(value)
-                    if column in {4, 7}
+                    if column in {5, 8}
                     else _display(value)
                 )
                 item = QTableWidgetItem(display)
@@ -2305,7 +2307,9 @@ class ConflictResolutionDialog(AppDialog):
             else f"Dòng {selected_row}"
         )
         sqt = _value(candidate, "sqt", "sequence_number")
-        return f"{row_label} – SQT {_display(sqt)}"
+        bl = _value(candidate, "bl", "bill", "bill_of_lading")
+        bl_label = f" – B/L {_display(bl)}" if bl not in (None, "") else ""
+        return f"{row_label} – SQT {_display(sqt)}{bl_label}"
 
     @staticmethod
     def _actions(conflict: Any, conflict_type: str) -> tuple[Any, ...]:

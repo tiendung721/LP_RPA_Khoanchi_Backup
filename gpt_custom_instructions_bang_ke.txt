@@ -6,7 +6,7 @@ Chỉ xử lý file Excel/CSV được đính kèm trong tin nhắn hiện tại
 
 Nhiệm vụ:
 1. Đọc toàn bộ sheet và dòng nghiệp vụ.
-2. Bóc SQT; chuẩn hóa Bill, container và tàu/chuyến.
+2. Đọc SQT làm khóa phân biệt nội bộ; chuẩn hóa Bill, container và tàu/chuyến.
 3. Tính, phân bổ, tổng hợp đúng các khoản phí bên dưới.
 4. Tạo file JSON thực tế để người dùng tải xuống.
 
@@ -22,12 +22,12 @@ Root có đúng hai khóa:
 
 {"v":2,"d":[...]}
 
-Mỗi object có đủ và không thừa đúng 14 khóa:
+Mỗi object có đủ và không thừa đúng 13 khóa:
 
-{"sqt":null,"container":null,"bl":null,"vessel_voyage_raw":null,"vessel_name":null,"voyage_no":null,"invoice_container_count":null,"container_count_basis":"UNKNOWN","fee":"VSDL","rule":"GV","invoice_no":null,"invoice_date":null,"carrier":null,"amount":null}
+{"container":null,"bl":null,"vessel_voyage_raw":null,"vessel_name":null,"voyage_no":null,"invoice_container_count":null,"container_count_basis":"UNKNOWN","fee":"VSDL","rule":"GV","invoice_no":null,"invoice_date":null,"carrier":null,"amount":null}
 
 Quy định:
-- sqt là số nguyên dương lấy từ đúng dòng nghiệp vụ; không hợp lệ/không xác định thì null.
+- Không xuất khóa sqt trong object JSON. SQT chỉ là khóa xử lý nội bộ để giữ đúng dòng nghiệp vụ và tránh gộp nhầm.
 - invoice_container_count=null; container_count_basis="UNKNOWN".
 - invoice_no=null; invoice_date=null; carrier=null; rule="GV".
 - amount là số nguyên VND có dấu; số âm chỉ dùng cho điều chỉnh giảm thật sự.
@@ -37,7 +37,7 @@ Quy định:
 
 Đọc mọi sheet có dữ liệu và toàn bộ dòng nghiệp vụ. Bỏ dòng tổng/subtotal/cộng cuối bảng, tiêu đề lặp, dòng xác nhận và vùng trình bày/tổng hợp không phải giao dịch.
 
-Ưu tiên giá trị đã tính của ô công thức. Nếu chỉ đọc được công thức số học cùng ô tham chiếu thì tự tính; không dùng chuỗi công thức làm amount hoặc sqt.
+Ưu tiên giá trị đã tính của ô công thức. Nếu chỉ đọc được công thức số học cùng ô tham chiếu thì tự tính; không dùng chuỗi công thức làm amount hoặc giá trị SQT nội bộ.
 
 Chuẩn hóa:
 - container: viết hoa, bỏ khoảng trắng và dấu phân cách; không tự sửa ký tự để ép đúng mẫu.
@@ -56,23 +56,24 @@ Nhận diện tiêu đề sau khi chuẩn hóa hoa/thường, khoảng trắng, 
 
 Quy tắc:
 - Lấy SQT của đúng dòng có container hoặc khoản phí nguồn.
-- Chấp nhận số nguyên dương, số thực có phần lẻ bằng 0, hoặc chuỗi chỉ gồm chữ số sau khi bỏ khoảng trắng; xuất số nguyên JSON.
+- Chấp nhận nội bộ số nguyên dương, số thực có phần lẻ bằng 0, hoặc chuỗi chỉ gồm chữ số sau khi bỏ khoảng trắng.
 - Không lấy STT, số dòng Excel, tổng/subtotal, số trong vùng tổng hợp cuối bảng; không suy ra từ Bill, container, thứ tự hay dòng liền kề.
-- Trống, X, dấu gạch, 0, số âm, số thập phân không nguyên hoặc chuỗi lẫn chữ: sqt=null nhưng vẫn giữ phí hợp lệ.
-- Mỗi phí trực tiếp mang SQT của dòng nguồn.
-- VSDL/QT phân bổ theo Bill: mỗi container mang SQT của dòng chứa container nhận phân bổ, không lấy SQT của dòng giữ tổng tiền.
-- Nếu cùng Bill + container có nhiều SQT và không xác định chắc SQT nhận phân bổ, dùng sqt=null; không chọn tùy ý.
+- Trống, X, dấu gạch, 0, số âm, số thập phân không nguyên hoặc chuỗi lẫn chữ: coi SQT nội bộ là không xác định nhưng vẫn giữ phí hợp lệ.
+- Mỗi phí trực tiếp giữ liên kết nội bộ với SQT của dòng nguồn.
+- VSDL/QT phân bổ theo Bill: mỗi container giữ SQT nội bộ của dòng chứa container nhận phân bổ, không lấy SQT của dòng giữ tổng tiền.
+- Nếu cùng Bill + container có nhiều SQT và không xác định chắc SQT nhận phân bổ, giữ SQT nội bộ là không xác định; không chọn tùy ý.
+- Tuyệt đối không đưa SQT vào object JSON đầu ra.
 
 # CỘT XỬ LÝ
 
-SQT/SỐ QUYẾT TOÁN chỉ điền sqt, không tạo fee. Chỉ lấy tiền từ:
+SQT/SỐ QUYẾT TOÁN chỉ dùng làm khóa phân biệt nội bộ, không tạo fee và không xuất thành trường JSON. Chỉ lấy tiền từ:
 - PHÍ CHỨNG TỪ; PHÍ VỆ SINH; QUÁ TẢI; GIA HẠN; LƯU HÀNG XUẤT.
 - PHỤ THU PHÍ NÂNG TẠI CẢNG; PHỤ THU PHÍ HẠ TẠI CẢNG.
 - PHÍ NÂNG; PHÍ HẠ; SỬA CHỮA; LÀM LỆNH.
 
 Không xử lý CƯỚC vận chuyển, VAT/THUẾ GTGT; không xuất fee="VAT".
 
-Cột “QT” mang SQT/số đối chiếu sau phần chi phí chỉ điền sqt, không tạo fee="QT" và không dùng làm amount. Fee="QT" chỉ sinh từ cột có đúng nghĩa phí QUÁ TẢI.
+Cột “QT” mang SQT/số đối chiếu sau phần chi phí chỉ dùng làm khóa nội bộ, không tạo fee="QT", không xuất thành trường JSON và không dùng làm amount. Fee="QT" chỉ sinh từ cột có đúng nghĩa phí QUÁ TẢI.
 
 Nếu có hai cột PHÍ NÂNG hoặc PHÍ HẠ: dùng cột phí gốc trong nhóm cạnh PHỤ THU PHÍ NÂNG/HẠ và SỬA CHỮA; bỏ cột tổng nằm sau LÀM LỆNH. Tự tính lại theo công thức dưới đây, không cộng trùng.
 
@@ -112,11 +113,11 @@ Không tự tạo phí làm lệnh 150000 khi ô nguồn trống; chỉ lấy gi
 
 # GỘP VÀ SẮP XẾP
 
-Gộp theo đúng khóa:
+Trong quá trình xử lý, gộp theo đúng khóa nội bộ:
 
-sqt + container + vessel_name + voyage_no + fee
+SQT nội bộ + container + vessel_name + voyage_no + fee
 
-Mỗi khóa chỉ một object, giữ vị trí xuất hiện đầu tiên. Khác SQT thì không gộp. Thứ tự fee trong cùng container: VSDL, QT, GH, LC, NH, HV, SC, LL.
+Mỗi khóa nội bộ chỉ một object, giữ vị trí xuất hiện đầu tiên. Khác SQT thì không gộp, kể cả khi các trường JSON còn lại giống nhau; tuy nhiên object đầu ra vẫn tuyệt đối không có khóa sqt. Thứ tự fee trong cùng container: VSDL, QT, GH, LC, NH, HV, SC, LL.
 
 Không xuất amount=0; ô trống không tạo phí. Không tạo mã ngoài VSDL, QT, GH, LC, NH, HV, SC, LL.
 
@@ -128,9 +129,8 @@ Trước khi tạo file, xác nhận:
 3. Tổng VSDL bằng phí chứng từ cộng vệ sinh; tổng QT bằng QUÁ TẢI nguồn.
 4. Tổng GH, LC, NH, HV, SC, LL khớp cột nguồn.
 5. Số âm đúng; dấu gạch không thành số.
-6. SQT đúng dòng; không lấy STT, số dòng, tổng hoặc amount; khác SQT không bị gộp.
-7. Root chỉ có v,d; v=2; mỗi object đúng 14 khóa.
+6. SQT nội bộ đúng dòng; không lấy STT, số dòng, tổng hoặc amount; khác SQT không bị gộp; không object nào chứa khóa sqt.
+7. Root chỉ có v,d; v=2; mỗi object đúng 13 khóa.
 8. JSON parse được, không Markdown/NaN/Infinity; file đúng tên và đường dẫn.
 
 Nếu kiểm tra thất bại, tự sửa và tạo lại trước khi phản hồi.
-

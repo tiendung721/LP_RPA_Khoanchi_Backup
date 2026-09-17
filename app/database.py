@@ -146,7 +146,11 @@ class Database:
                 self._migration_20(connection)
                 connection.execute("PRAGMA user_version = 20")
                 current_version = 20
-            self._ensure_schema_20(connection)
+            if current_version < 21:
+                self._migration_21(connection)
+                connection.execute("PRAGMA user_version = 21")
+                current_version = 21
+            self._ensure_schema_21(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -259,6 +263,7 @@ class Database:
                 source_item_index INTEGER NOT NULL CHECK (source_item_index >= 0),
                 container TEXT,
                 bl TEXT,
+                match_reason TEXT,
                 fee_original TEXT NOT NULL,
                 fee_selected TEXT,
                 rule TEXT,
@@ -1293,6 +1298,26 @@ class Database:
             connection.execute(
                 "ALTER TABLE sea_freight_container_occurrences "
                 "ADD COLUMN manually_selected INTEGER NOT NULL DEFAULT 0"
+            )
+
+    @staticmethod
+    def _migration_21(connection: sqlite3.Connection) -> None:
+        """Lưu căn cứ Container/B/L đã dùng để chọn dòng BK."""
+
+        Database._ensure_schema_21(connection)
+
+    @staticmethod
+    def _ensure_schema_21(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_20(connection)
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(expense_posting_items)"
+            ).fetchall()
+        }
+        if columns and "match_reason" not in columns:
+            connection.execute(
+                "ALTER TABLE expense_posting_items ADD COLUMN match_reason TEXT"
             )
 
     @contextmanager

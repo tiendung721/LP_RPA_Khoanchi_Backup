@@ -141,6 +141,7 @@ def test_posting_repository_round_trips_items_and_filters_successful_sources(
                 "source_item_index": 0,
                 "container": "ABCD1234567",
                 "bl": None,
+                "match_reason": "CONTAINER_ONLY",
                 "fee_original": "CB",
                 "fee_selected": "CB",
                 "rule": "HD",
@@ -186,6 +187,7 @@ def test_posting_repository_round_trips_items_and_filters_successful_sources(
 
     assert len(records) == 2
     assert records[0].target_cell == "Q42"
+    assert records[0].match_reason == "CONTAINER_ONLY"
     assert records[0].value_before == {"kind": "empty", "value": None}
     assert records[0].invoice_no == "INV-001"
     assert records[0].invoice_selected == "INV-001"

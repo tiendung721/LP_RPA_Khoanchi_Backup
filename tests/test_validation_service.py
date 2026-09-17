@@ -7,6 +7,7 @@ from app.services.validation_service import (
     AmountParseError,
     ValidationService,
     normalize_bl,
+    normalize_bl_key,
     normalize_container,
     normalize_optional_text,
     parse_amount,
@@ -74,6 +75,8 @@ def test_normalization_never_guesses_ocr_characters() -> None:
     assert normalize_container(" oolu-0o1 i8b7 ") == "OOLU0O1I8B7"
     assert normalize_container("   ") is None
     assert normalize_bl("  hbl /  2026-01  ") == "HBL / 2026-01"
+    assert normalize_bl_key("  hbl /  2026-01  ") == "HBL202601"
+    assert normalize_bl_key("vs 2607-1443") == "VS26071443"
     assert normalize_bl("") is None
     assert normalize_optional_text("  000130 / HD  ") == "000130 / HD"
     assert normalize_optional_text("   ") is None

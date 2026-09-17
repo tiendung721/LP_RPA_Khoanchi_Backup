@@ -200,7 +200,7 @@ def sync_outcomes(
                 reason = "Dòng chỉ có ở BK được giữ theo chính sách đồng bộ."
             source = action.source
             field = FieldWriteOutcome(
-                field_name="Dòng đồng bộ A–K/P",
+                field_name="Dòng đồng bộ các cột nghiệp vụ BK",
                 source_value=source.values if source is not None else None,
                 target_value_before=action.target_values,
                 target_value_after=(

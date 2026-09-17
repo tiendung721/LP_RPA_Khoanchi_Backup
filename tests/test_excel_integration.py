@@ -22,6 +22,7 @@ from app.services.excel.daily_sync import (
     DailySyncService,
     parse_sqt,
 )
+from app.services.excel.headers import HeaderResolutionError
 from app.services.excel.models import (
     ConflictType,
     ExcelRunStatus,
@@ -165,6 +166,7 @@ def _sync_row(
     cargo_type: str = "Gạo",
     closing_place: str = "Kho A",
     transport: str = "Xe A",
+    bl: str | None = None,
 ) -> list[Any]:
     return [
         sqt,
@@ -179,6 +181,7 @@ def _sync_row(
         "Công ty B",
         "VTB",
         transport,
+        bl,
     ]
 
 
@@ -210,11 +213,13 @@ def _populate_target_sheet(
     sheet["O1"] = "Chi phí O"
     sheet["P1"] = SYNC_HEADERS[11]
     sheet["Q1"] = "Hóa đơn"
+    sheet["V1"] = SYNC_HEADERS[12]
     for row_number, source_row in enumerate(rows, 2):
         source_values = list(source_row)
         for column, value in enumerate(source_values[:11], 1):
             sheet.cell(row_number, column).value = value
         sheet.cell(row_number, 16).value = source_values[11]
+        sheet.cell(row_number, 22).value = source_values[12]
 
 
 def _save_target(
@@ -229,6 +234,19 @@ def _save_target(
     _populate_target_sheet(sheet, rows)
     workbook.save(path)
     workbook.close()
+
+
+def _populate_dynamic_target_sheet(
+    sheet: Any,
+    rows: Iterable[Iterable[Any]],
+    columns: dict[str, int],
+) -> None:
+    for field, aliases in SOURCE_HEADER_ALIASES.items():
+        sheet.cell(1, columns[field]).value = aliases[0]
+    for row_number, source_row in enumerate(rows, 2):
+        values = list(source_row)
+        for index, field in enumerate(SOURCE_HEADER_ALIASES):
+            sheet.cell(row_number, columns[field]).value = values[index]
 
 
 def _save_ready(path: Path, rows: Iterable[Iterable[Any]]) -> None:
@@ -320,6 +338,7 @@ def _new_full_posting_sheet(workbook: Workbook, name: str) -> Any:
     for column, header in enumerate(SYNC_HEADERS[:11], 1):
         sheet.cell(1, column).value = header
     sheet.cell(1, 16).value = SYNC_HEADERS[11]
+    sheet.cell(1, 40).value = SYNC_HEADERS[12]
     for fee, (amount_column, invoice_column) in FULL_POSTING_LAYOUT.items():
         sheet.cell(1, amount_column).value = FEE_HEADER_ALIASES[fee][0]
         if invoice_column is not None:
@@ -335,11 +354,13 @@ def _add_full_plan_row(
     sqt: int,
     container: str,
     closing_date: str,
+    bl: str | None = None,
 ) -> list[Any]:
-    values = _sync_row(sqt, container, closing_date=closing_date)
+    values = _sync_row(sqt, container, closing_date=closing_date, bl=bl)
     for column, value in enumerate(values[:11], 1):
         sheet.cell(row, column).value = value
     sheet.cell(row, 16).value = values[11]
+    sheet.cell(row, 40).value = values[12]
     return values
 
 
@@ -705,8 +726,9 @@ def test_daily_sync_updates_existing_rows_and_preserves_bk_only_columns(
         weight=28,
         closing_place="Kho mới",
         transport="Xe mới",
+        bl="BL-699-NEW",
     )
-    inserted = _sync_row(700, "NEWA0000002")
+    inserted = _sync_row(700, "NEWA0000002", bl="BL-700-NEW")
     _save_daily(daily, [updated, inserted])
     _save_target(
         target,
@@ -749,6 +771,7 @@ def test_daily_sync_updates_existing_rows_and_preserves_bk_only_columns(
         assert sheet["D3"].value == 28
         assert sheet["F3"].value == "Kho mới"
         assert sheet["P3"].value == "Xe mới"
+        assert sheet["V3"].value == "BL-699-NEW"
         assert [sheet.cell(3, column).value for column in range(12, 16)] == [
             125_000,
             "=1+1",
@@ -758,8 +781,106 @@ def test_daily_sync_updates_existing_rows_and_preserves_bk_only_columns(
         assert sheet["Q3"].value == "INV-001"
         assert sheet["A4"].value == 700
         assert sheet["C4"].value == "NEWA0000002"
+        assert sheet["V4"].value == "BL-700-NEW"
     finally:
         workbook.close()
+
+
+def test_daily_sync_resolves_reordered_target_columns_and_copies_custom_formula(
+    tmp_path: Path,
+) -> None:
+    daily = tmp_path / "Hàng ngày 2026.xlsx"
+    target = tmp_path / "BK 2026.xlsx"
+    runtime_dir = tmp_path / "Excel"
+    updated = _sync_row(699, "UPDATED00001", weight=28, transport="Xe mới")
+    inserted = _sync_row(700, "INSERTED0001", weight=30, transport="Xe mới 2")
+    _save_daily(daily, [updated, inserted])
+
+    columns = {
+        "sqt": 5,
+        "closing_date": 2,
+        "container": 8,
+        "weight": 1,
+        "cargo_type": 10,
+        "closing_place": 3,
+        "vessel": 12,
+        "departure_date": 6,
+        "estimated_delivery": 14,
+        "recipient": 4,
+        "sea_transport": 16,
+        "transport": 7,
+        "bl": 21,
+    }
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "T07 26"
+    _populate_dynamic_target_sheet(
+        sheet,
+        [_sync_row(699, "OLDU0000001", weight=20, transport="Xe cũ")],
+        columns,
+    )
+    sheet["R1"] = "Công thức riêng"
+    sheet["S1"] = "Giá trị thủ công"
+    sheet["R2"] = "=A2+1"
+    sheet["R2"].fill = PatternFill("solid", fgColor="FFF2CC")
+    sheet["S2"] = "không được đổi"
+    sheet["T1"] = "Giá trị có sẵn ở dòng mới"
+    sheet["T3"] = "phải được giữ"
+    workbook.save(target)
+    workbook.close()
+
+    service = _sync_service(daily, target, runtime_dir)
+    result = service.apply(
+        service.analyze(source_sheet_name="Tháng 7"),
+        {},
+    )
+
+    assert result.updated_rows == 1
+    assert result.inserted_rows == 1
+    workbook = load_workbook(target, data_only=False)
+    try:
+        sheet = workbook["T07 26"]
+        assert sheet.cell(2, columns["container"]).value == "UPDATED00001"
+        assert sheet.cell(2, columns["weight"]).value == 28
+        assert sheet.cell(2, columns["transport"]).value == "Xe mới"
+        assert sheet.cell(2, columns["bl"]).value is None
+        assert sheet["R2"].value == "=A2+1"
+        assert sheet["S2"].value == "không được đổi"
+        assert sheet.cell(3, columns["sqt"]).value == 700
+        assert sheet.cell(3, columns["container"]).value == "INSERTED0001"
+        assert sheet.cell(3, columns["transport"]).value == "Xe mới 2"
+        assert sheet.cell(3, columns["bl"]).value is None
+        assert sheet["R3"].value == "=A3+1"
+        assert sheet["R3"].fill.fgColor.rgb == sheet["R2"].fill.fgColor.rgb
+        assert sheet["S3"].value is None
+        assert sheet["T3"].value == "phải được giữ"
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize("broken", ["missing", "duplicate"])
+def test_daily_sync_rejects_missing_or_duplicate_target_header_before_backup(
+    tmp_path: Path,
+    broken: str,
+) -> None:
+    daily = tmp_path / "Hàng ngày 2026.xlsx"
+    target = tmp_path / "BK 2026.xlsx"
+    runtime_dir = tmp_path / "Excel"
+    _save_daily(daily, [_sync_row(700)])
+    _save_target(target, [_sync_row(699)], month=7)
+    workbook = load_workbook(target)
+    sheet = workbook["T07 26"]
+    if broken == "missing":
+        sheet["C1"] = "Cột tùy chỉnh"
+    else:
+        sheet["R1"] = SOURCE_HEADER_ALIASES["container"][0]
+    workbook.save(target)
+    workbook.close()
+
+    service = _sync_service(daily, target, runtime_dir)
+    with pytest.raises(HeaderResolutionError):
+        service.analyze(source_sheet_name="Tháng 7")
+    assert not (runtime_dir / "Backup").exists()
 
 
 def test_daily_sync_blocks_mismatched_duplicate_sqt_without_backup(
@@ -913,6 +1034,10 @@ def test_daily_sync_creates_new_month_from_previous_nonempty_template(
     template["R1"] = "Thông tin mẫu"
     template["C2"].fill = PatternFill("solid", fgColor="FFF2CC")
     template["C2"].comment = Comment("old row", "test")
+    template["T1"] = "Công thức riêng"
+    template["T2"] = "=D2*2"
+    template["U1"] = "Giá trị thủ công"
+    template["U2"] = "không sao chép"
     validation = DataValidation(type="list", formula1='"A,B"')
     template.add_data_validation(validation)
     validation.add("C2:C100")
@@ -948,6 +1073,8 @@ def test_daily_sync_creates_new_month_from_previous_nonempty_template(
         assert len(created.conditional_formatting) == 1
         assert created["L2"].value is None
         assert created["Q2"].value is None
+        assert created["T2"].value == "=D2*2"
+        assert created["U2"].value is None
     finally:
         workbook.close()
 
@@ -1405,6 +1532,116 @@ def test_posting_duplicate_container_across_lookup_months_requires_source_row(
         ).value is None
     finally:
         workbook.close()
+
+
+def test_posting_uses_bl_to_disambiguate_duplicate_container(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready.json"
+    target = tmp_path / "BK 2026.xlsx"
+    container = "DRYU3026167"
+    _save_ready(ready, [[container, "vs 2607-1443", "VSDL", "ST", 100]])
+    workbook = Workbook()
+    july = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(
+        july,
+        2,
+        sqt=701,
+        container=container,
+        closing_date="2026-07-10",
+        bl="VS26070001",
+    )
+    _add_full_plan_row(
+        july,
+        3,
+        sqt=702,
+        container=container,
+        closing_date="2026-07-11",
+        bl="VS26071443",
+    )
+    workbook.save(target)
+    workbook.close()
+
+    plan = _posting_service(ready, target, tmp_path / "Excel").analyze(
+        sheet_name="T07 26"
+    )
+
+    assert not plan.conflicts
+    assert plan.items[0].target_row == 3
+    assert plan.items[0].source_sqt == 702
+    assert plan.items[0].match_reason == "BOTH_MATCH"
+    assert plan.items[0].row_candidates[0].bl == "VS26071443"
+
+
+def test_posting_accepts_unique_bl_when_container_is_not_found(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready.json"
+    target = tmp_path / "BK 2026.xlsx"
+    _save_ready(ready, [["WRONG000001", "VS26071443", "VSDL", "ST", 100]])
+    workbook = Workbook()
+    july = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(
+        july,
+        2,
+        sqt=701,
+        container="DRYU3026167",
+        closing_date="2026-07-10",
+        bl="VS26071443",
+    )
+    workbook.save(target)
+    workbook.close()
+
+    plan = _posting_service(ready, target, tmp_path / "Excel").analyze(
+        sheet_name="T07 26"
+    )
+
+    assert not plan.conflicts
+    assert plan.items[0].target_row == 2
+    assert plan.items[0].source_sqt == 701
+    assert plan.items[0].match_reason == "BL_ONLY"
+
+
+def test_posting_blocks_container_and_bl_that_point_to_different_rows(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready.json"
+    target = tmp_path / "BK 2026.xlsx"
+    _save_ready(ready, [["DRYU3026167", "VS26071443", "VSDL", "ST", 100]])
+    workbook = Workbook()
+    july = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(
+        july,
+        2,
+        sqt=701,
+        container="DRYU3026167",
+        closing_date="2026-07-10",
+        bl="VS26070001",
+    )
+    _add_full_plan_row(
+        july,
+        3,
+        sqt=702,
+        container="MSCU1234567",
+        closing_date="2026-07-11",
+        bl="VS26071443",
+    )
+    workbook.save(target)
+    workbook.close()
+
+    plan = _posting_service(ready, target, tmp_path / "Excel").analyze(
+        sheet_name="T07 26"
+    )
+    conflict = next(
+        value
+        for value in plan.conflicts
+        if value.conflict_type is ConflictType.PARTIAL_KEY_MATCH
+    )
+
+    assert [(c.row, c.bl) for c in conflict.row_candidates] == [
+        (2, "VS26070001"),
+        (3, "VS26071443"),
+    ]
 
 
 def test_posting_keeps_normalized_duplicate_expenses_separate(
@@ -2311,6 +2548,7 @@ def test_posting_history_preserves_keep_action_and_cell_value(
     assert postings.items[0]["action"] is action
     assert postings.items[0]["value_before"] == existing
     assert postings.items[0]["value_after"] == existing
+    assert postings.items[0]["match_reason"] == "CONTAINER_ONLY"
     assert postings.metadata["batch_id"] == 71
     assert not (runtime_dir / "Backup").exists()
 
@@ -2909,7 +3147,26 @@ def test_daily_sync_applies_two_selected_months_with_one_backup(tmp_path: Path) 
     june_target.title = "T06 26"
     _populate_target_sheet(june_target, [_sync_row(600, "OLDJUNE0001")])
     july_target = workbook.create_sheet("T07 26")
-    _populate_target_sheet(july_target, [_sync_row(700, "OLDJULY0001")])
+    july_columns = {
+        "sqt": 4,
+        "closing_date": 1,
+        "container": 7,
+        "weight": 2,
+        "cargo_type": 9,
+        "closing_place": 3,
+        "vessel": 11,
+        "departure_date": 5,
+        "estimated_delivery": 13,
+        "recipient": 6,
+        "sea_transport": 15,
+        "transport": 18,
+        "bl": 21,
+    }
+    _populate_dynamic_target_sheet(
+        july_target,
+        [_sync_row(700, "OLDJULY0001")],
+        july_columns,
+    )
     workbook.save(target)
     workbook.close()
     service = _sync_service(daily, target, runtime)
@@ -2927,6 +3184,10 @@ def test_daily_sync_applies_two_selected_months_with_one_backup(tmp_path: Path) 
     workbook = load_workbook(target, data_only=False)
     try:
         assert workbook["T06 26"]["A3"].value == 601
-        assert workbook["T07 26"]["A3"].value == 701
+        assert workbook["T07 26"].cell(3, july_columns["sqt"]).value == 701
+        assert (
+            workbook["T07 26"].cell(3, july_columns["container"]).value
+            == "JULY0000001"
+        )
     finally:
         workbook.close()

@@ -345,6 +345,7 @@ def test_daily_sync_real_data_boundary_ignores_phantom_max_row() -> None:
         if column <= 11:
             sheet.cell(1, column).value = aliases[0]
     sheet["P1"] = SOURCE_HEADER_ALIASES["transport"][0]
+    sheet["V1"] = SOURCE_HEADER_ALIASES["bl"][0]
     sheet["A2"] = 700
     sheet["A65000"].fill = PatternFill("solid", fgColor="FFFFFF")
     resolution = HeaderResolver().resolve(

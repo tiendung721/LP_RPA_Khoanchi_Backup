@@ -432,6 +432,8 @@ class RowCandidate:
     recipient: Any = None
     carrier: Any = None
     is_ron: bool = False
+    bl: str | None = None
+    bl_keys: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -452,6 +454,7 @@ class PostingItem:
     source_sqt: int | None = None
     plan_values: tuple[Any, ...] = ()
     source_signature: str = ""
+    match_reason: str | None = None
     carry_forward_required: bool = False
     target_row: int | None = None
     target_column: int | None = None
