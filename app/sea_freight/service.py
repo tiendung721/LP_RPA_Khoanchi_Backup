@@ -12,6 +12,7 @@ from app.models import DataRow
 from .contracts import (
     BkContainerSnapshot,
     GroupStatus,
+    InvoiceContribution,
     InvoiceHistoryMatch,
     InvoiceHistoryMatchKind,
     ReconciliationGroup,
@@ -576,8 +577,8 @@ class SeaFreightReconciliationService:
         source_item_index: int,
         source_sha256: str,
         source_kind: str,
-    ) -> None:
-        self.repository.add_contribution(
+    ) -> InvoiceContribution:
+        return self.repository.add_contribution(
             group_id,
             self._row_payload(
                 row,
@@ -852,15 +853,24 @@ class SeaFreightReconciliationService:
         *,
         source_batch_id: int | None,
         source_sha256: str,
+        source_item_indices: Iterable[int] | None = None,
     ) -> SupplementImportResult:
+        rows = list(rows)
+        indices = (
+            list(range(len(rows)))
+            if source_item_indices is None
+            else [int(value) for value in source_item_indices]
+        )
+        if len(indices) != len(rows):
+            raise ValueError("Số vị trí dòng nguồn không khớp dữ liệu hóa đơn.")
         group = self._require_group(group_id)
         if not group.is_current or group.status in {
             GroupStatus.ALLOCATED, GroupStatus.POSTED, GroupStatus.CANCELLED
         }:
-            return SupplementImportResult(0, (), sum(1 for _ in rows), ("Hồ sơ đã hoàn tất.",))
+            return SupplementImportResult(0, (), len(rows), ("Hồ sơ đã hoàn tất.",))
         contributions = self.repository.list_contributions(group_id)
-        existing_keys = {
-            self._invoice_key(item.invoice_no)
+        existing_by_key = {
+            self._invoice_key(item.invoice_no): item
             for item in contributions
             if self._invoice_key(item.invoice_no)
         }
@@ -878,7 +888,10 @@ class SeaFreightReconciliationService:
         skipped = 0
         added = 0
         added_invoices: list[str] = []
-        for index, row in enumerate(rows):
+        updated = 0
+        updated_invoices: list[str] = []
+        linked = 0
+        for position, (source_item_index, row) in enumerate(zip(indices, rows)):
             if row.fee != "CB" or row.cont not in (None, ""):
                 skipped += 1
                 continue
@@ -892,33 +905,126 @@ class SeaFreightReconciliationService:
                 continue
             invoice_key = self._invoice_key(row.invoice_no)
             if not invoice_key:
-                errors.append(f"Dòng {index + 1} chưa có số HĐ.")
+                errors.append(f"Dòng {position + 1} chưa có số HĐ.")
                 continue
-            if invoice_key in existing_keys:
-                duplicates.append(str(row.invoice_no).strip())
+            canonical_row = row.copy_with(
+                vessel_name=canonical_vessel_name,
+                voyage_no=canonical_voyage_no,
+            )
+            existing = existing_by_key.get(invoice_key)
+            if existing is not None:
+                invoice_no = str(row.invoice_no).strip()
+                payload = self._row_payload(
+                    canonical_row,
+                    source_batch_id=source_batch_id,
+                    source_item_index=source_item_index,
+                    source_sha256=source_sha256,
+                    source_kind="SUPPLEMENT",
+                )
+                try:
+                    self._require_candidate(canonical_row)
+                    if not self._history_differences(canonical_row, existing):
+                        duplicates.append(invoice_no)
+                        if source_batch_id is not None:
+                            payload["source_kind"] = "DUPLICATE_REFERENCE"
+                            self.repository.upsert_duplicate_reference(group_id, payload)
+                            linked += 1
+                        continue
+                    replaced = self.repository.replace_contribution(
+                        group_id,
+                        existing.id,
+                        payload,
+                    )
+                except (DuplicateContributionError, SeaFreightMatchError, ValueError) as exc:
+                    errors.append(f"Dòng {position + 1}: {exc}")
+                    continue
+                existing_by_key[invoice_key] = replaced
+                updated += 1
+                updated_invoices.append(invoice_no)
                 continue
             try:
-                self._require_candidate(row)
-                self._add_row(
+                self._require_candidate(canonical_row)
+                contribution = self._add_row(
                     group_id,
-                    row.copy_with(
-                        vessel_name=canonical_vessel_name,
-                        voyage_no=canonical_voyage_no,
-                    ),
+                    canonical_row,
                     source_batch_id=source_batch_id,
-                    source_item_index=index,
+                    source_item_index=source_item_index,
                     source_sha256=source_sha256,
                     source_kind="SUPPLEMENT",
                 )
             except (DuplicateContributionError, SeaFreightMatchError, ValueError) as exc:
-                errors.append(f"Dòng {index + 1}: {exc}")
+                errors.append(f"Dòng {position + 1}: {exc}")
                 continue
-            existing_keys.add(invoice_key)
+            existing_by_key[invoice_key] = contribution
             added += 1
             added_invoices.append(str(row.invoice_no).strip())
         return SupplementImportResult(
-            added, tuple(duplicates), skipped, tuple(errors), tuple(added_invoices)
+            added,
+            tuple(duplicates),
+            skipped,
+            tuple(errors),
+            tuple(added_invoices),
+            updated,
+            tuple(updated_invoices),
+            linked,
         )
+
+    def create_revision_with_supplement(
+        self,
+        group_id: int,
+        rows: Iterable[tuple[int, DataRow]],
+        *,
+        source_batch_id: int | None,
+        source_sha256: str,
+    ) -> tuple[ReconciliationGroup, SupplementImportResult]:
+        """Tạo revision và đưa ngay các dòng của batch đang xem vào phiên mới."""
+
+        selected = list(rows)
+        if not selected:
+            raise SeaFreightReconciliationError("Chưa chọn hóa đơn để đối soát lại.")
+        current = self._require_group(group_id)
+        contributions = self.repository.list_contributions(group_id)
+        first = contributions[0] if contributions else None
+        canonical_vessel_name = (
+            str(getattr(first, "vessel_name", "") or "").strip()
+            or current.vessel_key
+        )
+        canonical_voyage_no = (
+            str(getattr(first, "voyage_no", "") or "").strip()
+            or current.voyage_key
+        )
+        for _, row in selected:
+            self._require_candidate(row)
+            if not vessel_voyage_alias_equivalent(
+                row.vessel_name,
+                row.voyage_no,
+                canonical_vessel_name,
+                canonical_voyage_no,
+            ):
+                raise SeaFreightReconciliationError(
+                    "Hóa đơn không cùng tàu/chuyến với hồ sơ cần đối soát lại."
+                )
+
+        created = self.create_revision(group_id)
+        result = self.import_supplement(
+            created.id,
+            [row for _, row in selected],
+            source_batch_id=source_batch_id,
+            source_sha256=source_sha256,
+            source_item_indices=[source_index for source_index, _ in selected],
+        )
+        if result.errors or result.skipped_count or result.handled_count != len(selected):
+            detail = "; ".join(result.errors) or "Có dòng chưa được đưa vào revision mới."
+            raise SeaFreightReconciliationError(detail)
+        refreshed = self._require_group(created.id)
+        LOGGER.info(
+            "Đã tạo revision #%s từ hồ sơ #%s và liên kết %s dòng của batch %s",
+            refreshed.id,
+            group_id,
+            result.handled_count,
+            source_batch_id,
+        )
+        return refreshed, result
 
     def prepare_allocation(self, group_id: int) -> list[DataRow]:
         group = self._require_group(group_id)

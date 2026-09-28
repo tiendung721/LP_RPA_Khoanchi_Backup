@@ -762,7 +762,10 @@ class SeaFreightReconciliationDialog(AppDialog):
 
     def supplement_received(self, result: Any) -> None:
         self.load_group(self.group_id)
-        new_keys = {str(value).strip().casefold() for value in result.added_invoices}
+        new_keys = {
+            str(value).strip().casefold()
+            for value in (*result.added_invoices, *result.updated_invoices)
+        }
         self._loading = True
         try:
             for row in range(self.invoice_table.rowCount()):
@@ -778,9 +781,11 @@ class SeaFreightReconciliationDialog(AppDialog):
         parts: list[str] = []
         if result.added_count:
             parts.append(f"Đã nhận thêm {result.added_count} HĐ")
+        if result.updated_count:
+            parts.append(f"Đã cập nhật {result.updated_count} HĐ từ file mới")
         if result.duplicate_invoices:
-            parts.append("HĐ đã có: " + ", ".join(result.duplicate_invoices))
-        if not result.added_count and not result.duplicate_invoices:
+            parts.append("HĐ đã có và đã liên kết file mới: " + ", ".join(result.duplicate_invoices))
+        if not result.handled_count and not result.duplicate_invoices:
             parts.append("File mới không có HĐ thuộc tàu/chuyến này")
         if result.errors:
             parts.append("; ".join(result.errors))

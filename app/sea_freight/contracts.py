@@ -207,6 +207,15 @@ class SupplementImportResult:
     skipped_count: int
     errors: tuple[str, ...]
     added_invoices: tuple[str, ...] = ()
+    updated_count: int = 0
+    updated_invoices: tuple[str, ...] = ()
+    linked_count: int = 0
+
+    @property
+    def handled_count(self) -> int:
+        """Số dòng đã được tiếp nhận hoặc liên kết với hồ sơ hiện tại."""
+
+        return self.added_count + self.updated_count + self.linked_count
 
 
 GROUP_STATUS_LABELS = {

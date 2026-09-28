@@ -1095,6 +1095,9 @@ class ReviewWindow(QMainWindow):
             if not self.save_working():
                 return False
             deletion_saved = True
+        # Trạng thái hồ sơ có thể vừa thay đổi ở cửa sổ đối soát. Đọc lại từ DB
+        # trước khi chặn lưu để không dựa vào presentation đã cache lúc mở batch.
+        self._restore_reconciliation_presentations()
         stats = self.model.stats
         unmanaged = [
             index
@@ -1276,6 +1279,7 @@ class ReviewWindow(QMainWindow):
         }
         self._pending_deleted_source_indices.clear()
         self._next_source_item_index = self.model.rowCount()
+        self._restore_reconciliation_presentations()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self.model.dirty:
@@ -1712,13 +1716,50 @@ class ReviewWindow(QMainWindow):
                 7000,
             )
 
-        if bool(getattr(outcome, "requires_revision", False)):
-            QMessageBox.information(
+        requires_revision = bool(getattr(outcome, "requires_revision", False))
+        if requires_revision:
+            answer = QMessageBox.question(
                 self,
                 "Hồ sơ đã hoàn tất",
-                "Tàu/chuyến này đã có hồ sơ hoàn tất. Hãy mở hồ sơ, bấm "
-                "Đối soát lại rồi thêm HĐ mới bằng Trợ lý ảo hoặc thêm tay.",
+                "Tàu/chuyến này đã có hồ sơ hoàn tất. Tạo lần đối soát mới và "
+                "dùng ngay dữ liệu hóa đơn của file đang xem?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
             )
+            if answer == QMessageBox.StandardButton.Yes:
+                try:
+                    group, _imported = service.create_revision_with_supplement(
+                        group.id,
+                        [
+                            (
+                                self._source_index_by_runtime.get(
+                                    self.model.runtime_id_at(index), index
+                                ),
+                                DataRow.from_mapping(
+                                    self.model.row_at(index).to_object()
+                                ),
+                            )
+                            for index in selected_indices
+                        ],
+                        source_batch_id=(
+                            int(self._batch_id) if self._batch_id is not None else None
+                        ),
+                        source_sha256=str(
+                            _value(self._metadata, "sha256", default="") or ""
+                        ),
+                    )
+                except Exception as exc:
+                    QMessageBox.warning(
+                        self,
+                        "Không thể tạo lần đối soát mới",
+                        str(exc),
+                    )
+                    return False
+                requires_revision = False
+                self.statusBar().showMessage(
+                    f"Đã tạo lần đối soát {group.revision_no} từ file hiện tại.",
+                    8000,
+                )
 
         for index in selected_indices:
             selected_row = self.model.row_at(index)
@@ -1726,13 +1767,13 @@ class ReviewWindow(QMainWindow):
                 selected_row.runtime_id,
                 status=(
                     "REQUIRES_REVISION"
-                    if getattr(outcome, "requires_revision", False)
+                    if requires_revision
                     else group.status.value
                 ),
                 message=group_status_text(group),
                 session_id=str(group.id),
             )
-        if not bool(getattr(outcome, "requires_revision", False)):
+        if not requires_revision:
             self.reconciliationChanged.emit()
         self.reconciliationOpenRequested.emit(group.id)
         return True

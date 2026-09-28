@@ -26,6 +26,7 @@ from app.repositories.batch_repository import BatchRepository
 from app.sea_freight.contracts import (
     BkContainerSnapshot,
     ContainerRecord,
+    GroupStatus,
     VesselVoyageSuggestion,
 )
 from app.sea_freight.repository import SeaFreightRepository
@@ -767,6 +768,91 @@ def test_save_button_writes_once_and_shows_simple_success_message(
         assert messages == [("Lưu thành công", "Đã lưu thành công.")]
         assert window.status_value.text() == "Đã xác nhận"
         assert not window.model.dirty
+    finally:
+        window.model.mark_clean()
+        window.close()
+
+
+def test_confirm_refreshes_reconciliation_state_before_blocking_save(
+    qtbot, monkeypatch
+) -> None:
+    payload = {
+        "metadata": {
+            "id": 81,
+            "source_filename": "new.json",
+            "sha256": "9" * 64,
+            "status": "REVIEWING",
+        },
+        "document": {
+            "v": 3,
+            "d": [
+                DataRow(
+                    cont=None,
+                    bl="BL-1",
+                    fee="CB",
+                    rule="HD",
+                    amount=6_850_000,
+                    invoice_no="INV-REFRESH",
+                    carrier="HÃNG TÀU",
+                    vessel_voyage_raw="PROSPER 2625S",
+                    vessel_name="PROSPER",
+                    voyage_no="2625S",
+                    invoice_container_count=1,
+                    container_count_basis="EXPLICIT",
+                    invoice_date="2026-07-01",
+                ).to_object()
+            ],
+        },
+    }
+    completed_group = SimpleNamespace(
+        id=92,
+        status=GroupStatus.ALLOCATED,
+        bk_container_count=1,
+        revision_no=2,
+    )
+    reads = 0
+
+    def groups_for_source_batch(_batch_id: int) -> dict[int, Any]:
+        nonlocal reads
+        reads += 1
+        return {} if reads == 1 else {0: completed_group}
+
+    service = SimpleNamespace(
+        sync_batch_history=lambda *_args, **_kwargs: {},
+        repository=SimpleNamespace(groups_for_source_batch=groups_for_source_batch),
+    )
+    confirmed: list[int] = []
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Ok,
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warnings.append(str(args[2])),
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+    window = ReviewWindow(
+        payload,
+        sea_freight_service=service,
+        confirm_handler=lambda batch_id, _document: confirmed.append(batch_id),
+    )
+    qtbot.addWidget(window)
+
+    try:
+        assert not window.model.lookup_presentation(
+            window.model.runtime_id_at(0)
+        ).session_id
+        assert window.confirm_batch()
+        assert confirmed == [81]
+        assert warnings == []
+        assert reads >= 2
     finally:
         window.model.mark_clean()
         window.close()

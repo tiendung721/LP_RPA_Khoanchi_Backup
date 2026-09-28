@@ -1272,6 +1272,180 @@ def test_deleting_batch_row_removes_invoice_and_reindexes_remaining_source(
     database.close()
 
 
+def test_matching_supplement_links_same_invoice_to_new_source_batch(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "state.db")
+    batch_repository = BatchRepository(database)
+    old_batch = batch_repository.create_batch(
+        source_filename="old.json",
+        source_output_path=tmp_path / "old.json",
+        original_archive_path=tmp_path / "old.json",
+        working_path=tmp_path / "old.json",
+        sha256="1" * 64,
+    )
+    new_batch = batch_repository.create_batch(
+        source_filename="new.json",
+        source_output_path=tmp_path / "new.json",
+        original_archive_path=tmp_path / "new.json",
+        working_path=tmp_path / "new.json",
+        sha256="2" * 64,
+    )
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=1))
+    )
+    invoice = _row(1, 6_850_000, "INV-SAME")
+    group = service.open_or_create(
+        invoice,
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=old_batch.id,
+        source_item_index=0,
+        source_sha256=old_batch.sha256,
+    )
+
+    imported = service.import_supplement(
+        group.id,
+        [invoice.copy_with()],
+        source_batch_id=new_batch.id,
+        source_sha256=new_batch.sha256,
+    )
+
+    assert imported.added_count == 0
+    assert imported.updated_count == 0
+    assert imported.linked_count == 1
+    assert imported.handled_count == 1
+    assert imported.duplicate_invoices == ("INV-SAME",)
+    assert repository.groups_for_source_batch(new_batch.id)[0].id == group.id
+    assert [item.status for item in repository.list_contribution_history(group.id)] == [
+        "ACTIVE",
+        "DUPLICATE",
+    ]
+    assert repository.get_group(group.id).total_amount == 6_850_000
+    database.close()
+
+
+def test_matching_supplement_replaces_same_invoice_in_current_revision(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "state.db")
+    batch_repository = BatchRepository(database)
+    old_batch = batch_repository.create_batch(
+        source_filename="old.json",
+        source_output_path=tmp_path / "old.json",
+        original_archive_path=tmp_path / "old.json",
+        working_path=tmp_path / "old.json",
+        sha256="3" * 64,
+    )
+    new_batch = batch_repository.create_batch(
+        source_filename="new.json",
+        source_output_path=tmp_path / "new.json",
+        original_archive_path=tmp_path / "new.json",
+        working_path=tmp_path / "new.json",
+        sha256="4" * 64,
+    )
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=1))
+    )
+    original = _row(1, 6_850_000, "INV-REVISED")
+    completed = service.open_or_create(
+        original,
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=old_batch.id,
+        source_item_index=0,
+        source_sha256=old_batch.sha256,
+    )
+    repository.mark_allocated(completed.id)
+    revision = service.create_revision(completed.id)
+    changed = original.copy_with(amount=7_000_000, bl="BL-NEW")
+
+    imported = service.import_supplement(
+        revision.id,
+        [changed],
+        source_batch_id=new_batch.id,
+        source_sha256=new_batch.sha256,
+    )
+
+    assert imported.added_count == 0
+    assert imported.updated_count == 1
+    assert imported.updated_invoices == ("INV-REVISED",)
+    assert imported.handled_count == 1
+    current = repository.list_contributions(revision.id)
+    assert len(current) == 1
+    assert current[0].amount == 7_000_000
+    assert current[0].bl == "BL-NEW"
+    assert current[0].source_batch_id == new_batch.id
+    assert repository.groups_for_source_batch(new_batch.id)[0].id == revision.id
+    old = repository.list_contributions(completed.id)
+    assert len(old) == 1
+    assert old[0].amount == 6_850_000
+    database.close()
+
+
+def test_completed_profile_creates_revision_from_current_batch_row(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "state.db")
+    batch_repository = BatchRepository(database)
+    old_batch = batch_repository.create_batch(
+        source_filename="old.json",
+        source_output_path=tmp_path / "old.json",
+        original_archive_path=tmp_path / "old.json",
+        working_path=tmp_path / "old.json",
+        sha256="5" * 64,
+    )
+    current_batch = batch_repository.create_batch(
+        source_filename="current.json",
+        source_output_path=tmp_path / "current.json",
+        original_archive_path=tmp_path / "current.json",
+        working_path=tmp_path / "current.json",
+        sha256="6" * 64,
+    )
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(
+        repository, matcher=_Matcher(_snapshot(tmp_path, count=1))
+    )
+    original = _row(1, 6_850_000, "INV-CURRENT").copy_with(bl="BL-OLD")
+    completed = service.open_or_create(
+        original,
+        bk_path=tmp_path / "BK.xlsx",
+        month=7,
+        year=2026,
+        source_batch_id=old_batch.id,
+        source_item_index=0,
+        source_sha256=old_batch.sha256,
+    )
+    repository.mark_allocated(completed.id)
+    changed = original.copy_with(bl="BL-NEW", amount=7_000_000)
+
+    revision, imported = service.create_revision_with_supplement(
+        completed.id,
+        [(3, changed)],
+        source_batch_id=current_batch.id,
+        source_sha256=current_batch.sha256,
+    )
+
+    assert revision.revision_no == 2
+    assert revision.supersedes_group_id == completed.id
+    assert imported.updated_count == 1
+    current = repository.list_contributions(revision.id)
+    assert len(current) == 1
+    assert current[0].bl == "BL-NEW"
+    assert current[0].amount == 7_000_000
+    assert current[0].source_batch_id == current_batch.id
+    assert current[0].source_item_index == 3
+    assert repository.groups_for_source_batch(current_batch.id)[3].id == revision.id
+    historical = repository.list_contributions(completed.id)
+    assert historical[0].bl == "BL-OLD"
+    assert historical[0].amount == 6_850_000
+    database.close()
+
+
 def test_deleting_last_invoice_cancels_profile_and_allows_reconciliation_again(
     tmp_path: Path,
 ) -> None:

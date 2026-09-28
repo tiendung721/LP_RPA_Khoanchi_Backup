@@ -472,6 +472,220 @@ class SeaFreightRepository:
         assert contribution is not None
         return contribution
 
+    def replace_contribution(
+        self,
+        group_id: int,
+        contribution_id: int,
+        payload: dict[str, Any],
+    ) -> InvoiceContribution:
+        """Thay dữ liệu một HĐ trong phiên hiện hành và giữ nguyên lịch sử phiên cũ."""
+
+        timestamp = _now()
+        with self.database.transaction(immediate=True) as connection:
+            group = connection.execute(
+                "SELECT status, is_current FROM sea_freight_reconciliation_groups WHERE id = ?",
+                (group_id,),
+            ).fetchone()
+            if group is None:
+                raise KeyError("Không tìm thấy hồ sơ đối soát.")
+            if not bool(group["is_current"]) or str(group["status"]) in {
+                "ALLOCATED",
+                "POSTED",
+                "CANCELLED",
+            }:
+                raise ValueError("Hồ sơ đã hoàn tất, không thể sửa.")
+            current = connection.execute(
+                """
+                SELECT id FROM sea_freight_invoice_contributions
+                WHERE id = ? AND group_id = ? AND status = 'ACTIVE'
+                """,
+                (contribution_id, group_id),
+            ).fetchone()
+            if current is None:
+                raise KeyError("Không tìm thấy hóa đơn đang dùng trong hồ sơ.")
+            duplicate = connection.execute(
+                """
+                SELECT id FROM sea_freight_invoice_contributions
+                WHERE group_id = ? AND fingerprint = ? AND status != 'REMOVED' AND id != ?
+                LIMIT 1
+                """,
+                (group_id, payload["fingerprint"], contribution_id),
+            ).fetchone()
+            if duplicate is not None:
+                raise DuplicateContributionError(
+                    "Hóa đơn này đã được thêm vào đối soát."
+                )
+
+            source_batch_id = payload.get("source_batch_id")
+            source_item_index = int(payload["source_item_index"])
+            if source_batch_id is not None:
+                connection.execute(
+                    """
+                    UPDATE sea_freight_invoice_contributions
+                    SET status = 'REMOVED', removed_at = ?, updated_at = ?
+                    WHERE source_batch_id = ? AND source_item_index = ?
+                      AND status = 'DUPLICATE' AND id != ?
+                    """,
+                    (
+                        timestamp,
+                        timestamp,
+                        int(source_batch_id),
+                        source_item_index,
+                        contribution_id,
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE sea_freight_invoice_contributions
+                SET source_batch_id = ?, source_item_index = ?, source_sha256 = ?,
+                    source_document_id = ?, source_document_name = ?,
+                    invoice_no = ?, invoice_date = ?, bl = ?,
+                    vessel_voyage_raw = ?, vessel_name = ?, voyage_no = ?,
+                    invoice_container_count = ?, container_count_basis = ?,
+                    carrier = ?, amount = ?, fingerprint = ?, source_kind = ?,
+                    removed_at = NULL, updated_at = ?
+                WHERE id = ? AND group_id = ? AND status = 'ACTIVE'
+                """,
+                (
+                    source_batch_id,
+                    source_item_index,
+                    payload["source_sha256"],
+                    payload["source_document_id"],
+                    payload["source_document_name"],
+                    payload.get("invoice_no"),
+                    payload.get("invoice_date"),
+                    payload.get("bl"),
+                    payload["vessel_voyage_raw"],
+                    payload["vessel_name"],
+                    payload["voyage_no"],
+                    payload["invoice_container_count"],
+                    payload["container_count_basis"],
+                    payload.get("carrier"),
+                    payload["amount"],
+                    payload["fingerprint"],
+                    payload.get("source_kind", "SUPPLEMENT"),
+                    timestamp,
+                    contribution_id,
+                    group_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE sea_freight_reconciliation_groups "
+                "SET invoice_conflict_accepted = 0 WHERE id = ?",
+                (group_id,),
+            )
+            self._recalculate(connection, group_id, timestamp)
+            self._event(
+                connection,
+                group_id,
+                "CONTRIBUTION_REPLACED",
+                {
+                    "contribution_id": contribution_id,
+                    "invoice_no": payload.get("invoice_no"),
+                    "source_batch_id": source_batch_id,
+                    "source_item_index": source_item_index,
+                },
+                timestamp,
+            )
+        contribution = self.get_contribution(contribution_id)
+        assert contribution is not None
+        return contribution
+
+    def upsert_duplicate_reference(
+        self,
+        group_id: int,
+        payload: dict[str, Any],
+    ) -> None:
+        """Liên kết một dòng batch với HĐ đã có mà không cộng lại tiền/số cont."""
+
+        source_batch_id = payload.get("source_batch_id")
+        if source_batch_id is None:
+            return
+        source_item_index = int(payload["source_item_index"])
+        timestamp = _now()
+        with self.database.transaction(immediate=True) as connection:
+            already_active = connection.execute(
+                """
+                SELECT 1
+                FROM sea_freight_invoice_contributions AS c
+                JOIN sea_freight_reconciliation_groups AS g ON g.id = c.group_id
+                WHERE c.source_batch_id = ? AND c.source_item_index = ?
+                  AND c.status = 'ACTIVE' AND g.is_current = 1
+                  AND g.status != 'CANCELLED'
+                LIMIT 1
+                """,
+                (int(source_batch_id), source_item_index),
+            ).fetchone()
+            if already_active is not None:
+                return
+
+            existing = connection.execute(
+                """
+                SELECT c.id, c.group_id, c.fingerprint
+                FROM sea_freight_invoice_contributions AS c
+                JOIN sea_freight_reconciliation_groups AS g ON g.id = c.group_id
+                WHERE c.source_batch_id = ? AND c.source_item_index = ?
+                  AND c.status = 'DUPLICATE' AND g.is_current = 1
+                  AND g.status != 'CANCELLED'
+                ORDER BY c.id
+                """,
+                (int(source_batch_id), source_item_index),
+            ).fetchall()
+            retained = False
+            for row in existing:
+                keep = (
+                    not retained
+                    and int(row["group_id"]) == group_id
+                    and str(row["fingerprint"]) == str(payload["fingerprint"])
+                )
+                if keep:
+                    retained = True
+                    continue
+                connection.execute(
+                    """
+                    UPDATE sea_freight_invoice_contributions
+                    SET status = 'REMOVED', removed_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (timestamp, timestamp, int(row["id"])),
+                )
+            if retained:
+                return
+            connection.execute(
+                """
+                INSERT INTO sea_freight_invoice_contributions(
+                    group_id, source_batch_id, source_item_index, source_sha256,
+                    source_document_id, source_document_name,
+                    invoice_no, invoice_date, bl, vessel_voyage_raw,
+                    vessel_name, voyage_no, invoice_container_count,
+                    container_count_basis, carrier, amount, fingerprint,
+                    source_kind, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          'DUPLICATE_REFERENCE', 'DUPLICATE', ?, ?)
+                """,
+                (
+                    group_id,
+                    int(source_batch_id),
+                    source_item_index,
+                    payload["source_sha256"],
+                    payload["source_document_id"],
+                    payload["source_document_name"],
+                    payload.get("invoice_no"),
+                    payload.get("invoice_date"),
+                    payload.get("bl"),
+                    payload["vessel_voyage_raw"],
+                    payload["vessel_name"],
+                    payload["voyage_no"],
+                    payload["invoice_container_count"],
+                    payload["container_count_basis"],
+                    payload.get("carrier"),
+                    payload["amount"],
+                    payload["fingerprint"],
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
     def add_contributions(
         self, group_id: int, payloads: list[dict[str, Any]]
     ) -> list[InvoiceContribution]:

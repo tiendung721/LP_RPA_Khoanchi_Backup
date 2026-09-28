@@ -2491,7 +2491,14 @@ class MainWindow(QMainWindow):
                 ):
                     dialog.supplement_received(import_result)
                 self._refresh_reconciliation_groups()
-                if int(_attribute(import_result, "added_count", default=0) or 0) > 0:
+                if int(
+                    _attribute(
+                        import_result,
+                        "handled_count",
+                        default=_attribute(import_result, "added_count", default=0),
+                    )
+                    or 0
+                ) > 0:
                     self._complete_assistant_session(session)
             else:
                 self._open_new_download(review)
