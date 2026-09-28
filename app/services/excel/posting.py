@@ -2190,6 +2190,24 @@ class ExpensePostingService:
                 raise ExpensePostingError(
                     f"Không tìm thấy hồ sơ đối soát #{reconciliation_group_id}."
                 )
+            reconciliation_bk = str(
+                Path(reconciliation.bk_path).expanduser().resolve()
+            ).casefold()
+            current_bk = str(self.bk_path.expanduser().resolve()).casefold()
+            if reconciliation_bk != current_bk:
+                action = (
+                    "Đối soát lại"
+                    if str(
+                        getattr(reconciliation.status, "value", reconciliation.status)
+                    )
+                    in {"ALLOCATED", "POSTED"}
+                    else "Đọc lại BK"
+                )
+                raise ExpensePostingError(
+                    f"Hồ sơ cước biển #{reconciliation_group_id} đang sử dụng file "
+                    f"{Path(reconciliation.bk_path).name}, khác với BK hiện tại "
+                    f"{self.bk_path.name}. Hãy {action} trước khi nhập khoản chi."
+                )
             group_id = f"SEA_RECON_{reconciliation_group_id}_R{reconciliation.revision_no}"
             if source_sheet:
                 group_id += "_" + re.sub(r"[^A-Za-z0-9]+", "_", source_sheet).strip("_")

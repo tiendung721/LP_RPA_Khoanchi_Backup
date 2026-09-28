@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from app.models import DataRow
 from app.repositories.batch_repository import BatchRepository
 from app.services.batch_service import BatchDataError, BatchService
 from app.services.reviewed_batch_provider import ReviewedBatchProvider
-from app.services.excel.posting import ExpensePostingService
+from app.services.excel.posting import ExpensePostingError, ExpensePostingService
 from app.sea_freight import (
     BkContainerSnapshot,
     BkVesselMatcher,
@@ -74,6 +75,26 @@ class _MultiMatcher:
 
     def sheet_names(self, _path) -> tuple[str, ...]:
         return tuple(self.snapshots)
+
+
+class _WorkbookAwareMatcher:
+    def __init__(
+        self,
+        snapshots: dict[str, BkContainerSnapshot],
+    ) -> None:
+        self.snapshots = {
+            str(Path(path).expanduser().resolve()).casefold(): snapshot
+            for path, snapshot in snapshots.items()
+        }
+        self.requested_paths: list[str] = []
+
+    def snapshot(self, path, _sheet, **_kwargs) -> BkContainerSnapshot:
+        resolved = str(Path(path).expanduser().resolve())
+        self.requested_paths.append(resolved)
+        return self.snapshots[resolved.casefold()]
+
+    def sheet_names(self, _path) -> tuple[str, ...]:
+        return ("T07 26",)
 
 
 def _row(count: int, amount: int, invoice: str, carrier: str = "HÃNG TÀU") -> DataRow:
@@ -1072,7 +1093,11 @@ def test_duplicate_invoice_number_is_rejected_on_save(tmp_path: Path) -> None:
 
 
 def test_reconciliation_dialog_has_only_the_six_confirmed_actions(qtbot, tmp_path: Path) -> None:
-    settings = AppSettings(data_root=tmp_path, output_dir=tmp_path / "Output")
+    settings = AppSettings(
+        data_root=tmp_path,
+        output_dir=tmp_path / "Output",
+        bk_workbook_path=str(tmp_path / "BK current.xlsx"),
+    )
     database = Database(settings.paths.database_path)
     repository = SeaFreightRepository(database)
     service = SeaFreightReconciliationService(
@@ -1088,6 +1113,7 @@ def test_reconciliation_dialog_has_only_the_six_confirmed_actions(qtbot, tmp_pat
         batch_service=batch_service,
         open_assistant=lambda: None,
         group_id=group.id,
+        settings=settings,
     )
     qtbot.addWidget(dialog)
     dialog.show()
@@ -1111,6 +1137,13 @@ def test_reconciliation_dialog_has_only_the_six_confirmed_actions(qtbot, tmp_pat
         assert not hasattr(dialog, "source_table")
         assert dialog.manage_sources_button.text() == "Quản lý nguồn"
         assert dialog.source_summary_label.text().startswith("1 tháng  •  2 cont")
+        assert dialog.bk_path_warning_label.isVisible()
+        assert "BK.xlsx" in dialog.bk_path_warning_label.text()
+        assert "BK current.xlsx" in dialog.bk_path_warning_label.text()
+        assert (
+            dialog.refresh_sources_button.text()
+            in dialog.bk_path_warning_label.text()
+        )
         assert dialog.sources_box.height() < dialog.invoice_table.height()
     finally:
         dialog.close()
@@ -1548,6 +1581,112 @@ def test_deleting_invoice_from_completed_profile_preserves_old_revision(
     database.close()
 
 
+def test_refresh_group_moves_editable_profile_to_current_bk(tmp_path: Path) -> None:
+    old_bk = tmp_path / "BK old.xlsx"
+    current_bk = tmp_path / "BK current.xlsx"
+    old_snapshot = replace(
+        _snapshot(tmp_path, count=2, fingerprint="old-fp"),
+        bk_path=str(old_bk.resolve()),
+        containers=(
+            ContainerRecord(_container(1), "T07 26", 64, 918, None),
+            ContainerRecord(_container(2), "T07 26", 65, 919, None),
+        ),
+    )
+    current_snapshot = replace(
+        old_snapshot,
+        bk_path=str(current_bk.resolve()),
+        workbook_fingerprint="current-fp",
+        snapshot_hash="current-snapshot",
+        containers=(
+            ContainerRecord(_container(1), "T07 26", 63, 918, None),
+            ContainerRecord(_container(2), "T07 26", 64, 919, None),
+        ),
+    )
+    matcher = _WorkbookAwareMatcher(
+        {str(old_bk): old_snapshot, str(current_bk): current_snapshot}
+    )
+    database = Database(tmp_path / "state.db")
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(repository, matcher=matcher)
+    group = service.open_or_create(
+        _row(2, 101, "INV-MOVE-DRAFT"),
+        bk_path=old_bk,
+        month=7,
+        year=2026,
+        source_batch_id=None,
+        source_item_index=0,
+        source_sha256="source",
+    )
+
+    refreshed = service.refresh_group(group.id, bk_path=current_bk)
+
+    assert refreshed.id == group.id
+    assert refreshed.bk_path == str(current_bk.resolve())
+    assert refreshed.bk_fingerprint == "current-fp"
+    assert [row["source_row"] for row in repository.list_container_rows(group.id)] == [
+        63,
+        64,
+    ]
+    assert matcher.requested_paths[-1] == str(current_bk.resolve())
+    database.close()
+
+
+def test_completed_group_revision_uses_current_bk_without_old_row_mapping(
+    tmp_path: Path,
+) -> None:
+    old_bk = tmp_path / "BK old.xlsx"
+    current_bk = tmp_path / "BK current.xlsx"
+    old_snapshot = replace(
+        _snapshot(tmp_path, count=2, fingerprint="old-fp"),
+        bk_path=str(old_bk.resolve()),
+        containers=(
+            ContainerRecord(_container(1), "T07 26", 64, 918, None),
+            ContainerRecord(_container(2), "T07 26", 65, 919, None),
+        ),
+    )
+    current_snapshot = replace(
+        old_snapshot,
+        bk_path=str(current_bk.resolve()),
+        workbook_fingerprint="current-fp",
+        snapshot_hash="current-snapshot",
+        containers=(
+            ContainerRecord(_container(1), "T07 26", 63, 918, None),
+            ContainerRecord(_container(2), "T07 26", 64, 919, None),
+        ),
+    )
+    matcher = _WorkbookAwareMatcher(
+        {str(old_bk): old_snapshot, str(current_bk): current_snapshot}
+    )
+    database = Database(tmp_path / "state.db")
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(repository, matcher=matcher)
+    group = service.open_or_create(
+        _row(2, 101, "INV-MOVE-REVISION"),
+        bk_path=old_bk,
+        month=7,
+        year=2026,
+        source_batch_id=None,
+        source_item_index=0,
+        source_sha256="source",
+    )
+    repository.mark_allocated(group.id)
+
+    revised = service.create_revision(group.id, bk_path=current_bk)
+
+    previous = repository.get_group(group.id)
+    assert previous is not None and not previous.is_current
+    assert previous.bk_path == str(old_bk.resolve())
+    assert revised.is_current and revised.revision_no == 2
+    assert revised.bk_path == str(current_bk.resolve())
+    assert revised.bk_fingerprint == "current-fp"
+    assert [row["source_row"] for row in repository.list_container_rows(revised.id)] == [
+        63,
+        64,
+    ]
+    assert matcher.requested_paths[-1] == str(current_bk.resolve())
+    database.close()
+
+
 def test_completed_group_can_create_immutable_revision(tmp_path: Path) -> None:
     settings = AppSettings(data_root=tmp_path, output_dir=tmp_path / "Output")
     database = Database(settings.paths.database_path)
@@ -1656,4 +1795,13 @@ def test_posting_bundle_keeps_normal_rows_and_replaces_managed_sea_freight(
         row.get("invoice_no") != "SEA" or row["container"]
         for row in bundle["rows"]
     )
+    posting.bk_path = tmp_path / "BK current.xlsx"
+    with pytest.raises(ExpensePostingError, match="khác với BK hiện tại"):
+        posting._build_posting_source_groups(
+            bundle["rows"],
+            ["T07 26"],
+            group_target_sheets=None,
+            legacy_sheet=None,
+            split_document_ids=set(),
+        )
     database.close()

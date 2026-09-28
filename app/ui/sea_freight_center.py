@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
@@ -187,6 +188,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         batch_service: Any,
         open_assistant: Any,
         group_id: int,
+        settings: Any | None = None,
         parent: Any | None = None,
     ) -> None:
         super().__init__(parent)
@@ -194,6 +196,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         self.service = service
         self.batch_service = batch_service
         self.open_assistant = open_assistant
+        self.settings = settings
         self.group_id = group_id
         self._loading = False
         self._dirty = False
@@ -306,6 +309,19 @@ class SeaFreightReconciliationDialog(AppDialog):
         sources_layout.addWidget(self.refresh_sources_button)
         root.addWidget(self.sources_box)
 
+        self.bk_path_warning_label = QLabel()
+        self.bk_path_warning_label.setObjectName("bkPathWarning")
+        self.bk_path_warning_label.setWordWrap(True)
+        self.bk_path_warning_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.bk_path_warning_label.setStyleSheet(
+            "font-weight: 600; color: #92400E; background: #FFF7D6; "
+            "border: 1px solid #F4D58A; border-radius: 6px; padding: 8px 10px;"
+        )
+        self.bk_path_warning_label.hide()
+        root.addWidget(self.bk_path_warning_label)
+
         invoices_box = QGroupBox("Danh sách HĐ trong hồ sơ")
         invoices_layout = QVBoxLayout(invoices_box)
         self.invoice_table = QTableWidget(0, len(self.INVOICE_HEADERS))
@@ -375,6 +391,48 @@ class SeaFreightReconciliationDialog(AppDialog):
         self.manage_sources_button.clicked.connect(self.manage_sources)
         self.refresh_sources_button.clicked.connect(self.refresh_sources)
 
+    def _current_bk_path(self) -> str | None:
+        if self.settings is None:
+            return None
+        if isinstance(self.settings, dict):
+            raw_path = self.settings.get("bk_workbook_path")
+        else:
+            raw_path = getattr(self.settings, "bk_workbook_path", None)
+        text = str(raw_path or "").strip()
+        if not text:
+            return None
+        return str(Path(text).expanduser().resolve())
+
+    @staticmethod
+    def _same_bk_path(left: str, right: str) -> bool:
+        return str(Path(left).expanduser().resolve()).casefold() == str(
+            Path(right).expanduser().resolve()
+        ).casefold()
+
+    def _refresh_bk_path_warning(self, group: Any) -> None:
+        current_path = self._current_bk_path()
+        if current_path is None or self._same_bk_path(group.bk_path, current_path):
+            self.bk_path_warning_label.clear()
+            self.bk_path_warning_label.setToolTip("")
+            self.bk_path_warning_label.hide()
+            return
+
+        action = (
+            "Đối soát lại"
+            if group.status in {GroupStatus.ALLOCATED, GroupStatus.POSTED}
+            else "Đọc lại BK"
+        )
+        old_name = Path(group.bk_path).name or str(group.bk_path)
+        current_name = Path(current_path).name or current_path
+        self.bk_path_warning_label.setText(
+            f"⚠ Hồ sơ được lập từ {old_name}, nhưng BK hiện tại là {current_name}. "
+            f"Bấm {action} để cập nhật theo BK hiện tại."
+        )
+        self.bk_path_warning_label.setToolTip(
+            f"BK của hồ sơ: {group.bk_path}\nBK hiện tại: {current_path}"
+        )
+        self.bk_path_warning_label.show()
+
     def load_group(self, group_id: int) -> None:
         group = self.service.repository.get_group(group_id)
         if group is None:
@@ -402,6 +460,7 @@ class SeaFreightReconciliationDialog(AppDialog):
             self._load_sources(group, sources)
             self._load_containers(self.service.repository.list_container_rows(group_id))
             self._refresh_summary(group)
+            self._refresh_bk_path_warning(group)
             locked = (
                 not group.is_current
                 or group.status in {GroupStatus.ALLOCATED, GroupStatus.POSTED, GroupStatus.CANCELLED}
@@ -625,7 +684,10 @@ class SeaFreightReconciliationDialog(AppDialog):
 
     def refresh_sources(self) -> None:
         try:
-            group = self.service.refresh_group(self.group_id)
+            group = self.service.refresh_group(
+                self.group_id,
+                bk_path=self._current_bk_path(),
+            )
         except Exception as exc:
             QMessageBox.warning(self, "Không đọc lại được BK", str(exc))
             return
@@ -749,7 +811,10 @@ class SeaFreightReconciliationDialog(AppDialog):
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            created = self.service.create_revision(group.id)
+            created = self.service.create_revision(
+                group.id,
+                bk_path=self._current_bk_path(),
+            )
         except Exception as exc:
             QMessageBox.warning(self, "Không thể đối soát lại", str(exc))
             return

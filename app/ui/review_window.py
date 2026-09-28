@@ -1747,6 +1747,7 @@ class ReviewWindow(QMainWindow):
                         source_sha256=str(
                             _value(self._metadata, "sha256", default="") or ""
                         ),
+                        bk_path=bk_path,
                     )
                 except Exception as exc:
                     QMessageBox.warning(

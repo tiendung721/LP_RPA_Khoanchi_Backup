@@ -618,8 +618,22 @@ class SeaFreightReconciliationService:
                 "source_kind": source_kind,
             }
 
-    def refresh_group(self, group_id: int) -> ReconciliationGroup:
+    def refresh_group(
+        self,
+        group_id: int,
+        *,
+        bk_path: str | Path | None = None,
+    ) -> ReconciliationGroup:
         group = self._require_group(group_id)
+        target_bk_path = bk_path if bk_path not in (None, "") else group.bk_path
+        if not group.is_current or group.status in {
+            GroupStatus.ALLOCATED,
+            GroupStatus.POSTED,
+            GroupStatus.CANCELLED,
+        }:
+            raise SeaFreightReconciliationError(
+                "Hồ sơ đã hoàn tất; hãy dùng Đối soát lại để đọc BK hiện tại."
+            )
         contributions = self.repository.list_contributions(group_id)
         if not contributions:
             raise SeaFreightReconciliationError("Hồ sơ chưa có HĐ.")
@@ -630,7 +644,7 @@ class SeaFreightReconciliationService:
             snapshots = list(
                 self.inspect_sources(
                     row,
-                    bk_path=group.bk_path,
+                    bk_path=target_bk_path,
                     selections=[
                         ReconciliationSourceSelection(
                             item.bk_sheet, item.vessel_name, item.voyage_no
@@ -647,10 +661,17 @@ class SeaFreightReconciliationService:
         if month is None or year is None:
             raise SeaFreightReconciliationError("Chưa xác định được tháng đối soát.")
         snapshot, issue = self._snapshot_for_period(
-            row, bk_path=group.bk_path, month=month, year=year
+            row, bk_path=target_bk_path, month=month, year=year
         )
-        return self.repository.upsert_snapshot(
-            snapshot, month=month, year=year, bk_issue=issue
+        if issue is not None:
+            raise SeaFreightReconciliationError(
+                "Không tìm thấy dữ liệu đối soát phù hợp trong BK hiện tại."
+            )
+        return self.repository.replace_group_snapshot(
+            group_id,
+            snapshot,
+            vessel_name=snapshot.canonical_vessel_name or first.vessel_name,
+            voyage_no=snapshot.canonical_voyage_no or first.voyage_no,
         )
 
     def update_sources(
@@ -976,6 +997,7 @@ class SeaFreightReconciliationService:
         *,
         source_batch_id: int | None,
         source_sha256: str,
+        bk_path: str | Path | None = None,
     ) -> tuple[ReconciliationGroup, SupplementImportResult]:
         """Tạo revision và đưa ngay các dòng của batch đang xem vào phiên mới."""
 
@@ -1005,7 +1027,7 @@ class SeaFreightReconciliationService:
                     "Hóa đơn không cùng tàu/chuyến với hồ sơ cần đối soát lại."
                 )
 
-        created = self.create_revision(group_id)
+        created = self.create_revision(group_id, bk_path=bk_path)
         result = self.import_supplement(
             created.id,
             [row for _, row in selected],
@@ -1080,10 +1102,16 @@ class SeaFreightReconciliationService:
             raise SeaFreightReconciliationError("BK đã thay đổi – cần kiểm tra lại.")
         return self.allocation_rows(group_id)
 
-    def create_revision(self, group_id: int) -> ReconciliationGroup:
+    def create_revision(
+        self,
+        group_id: int,
+        *,
+        bk_path: str | Path | None = None,
+    ) -> ReconciliationGroup:
         """Đọc lại BK và tạo một phiên mới từ hồ sơ đã hoàn tất."""
 
         group = self._require_group(group_id)
+        target_bk_path = bk_path if bk_path not in (None, "") else group.bk_path
         if not group.is_current:
             raise SeaFreightReconciliationError(
                 "Chỉ có thể đối soát lại từ phiên hiện hành."
@@ -1102,7 +1130,7 @@ class SeaFreightReconciliationService:
                 snapshots = list(
                     self.inspect_sources(
                         self._contribution_row(first),
-                        bk_path=group.bk_path,
+                        bk_path=target_bk_path,
                         selections=[
                             ReconciliationSourceSelection(
                                 item.bk_sheet, item.vessel_name, item.voyage_no
@@ -1119,7 +1147,7 @@ class SeaFreightReconciliationService:
             return self.repository.replace_group_sources(created.id, snapshots)
         try:
             snapshot = self.matcher.snapshot(
-                group.bk_path,
+                target_bk_path,
                 group.bk_sheet,
                 vessel_voyage_raw=first.vessel_voyage_raw,
                 vessel_name=first.vessel_name,

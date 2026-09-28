@@ -2607,6 +2607,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Chưa thể mở", "Dịch vụ đối soát chưa được khởi tạo.")
             return
         dialog = self._sea_freight_dialog
+        if dialog is not None:
+            dialog.settings = self._settings
         if dialog is not None and dialog.isVisible():
             dialog.showNormal()
             dialog.raise_()
@@ -2626,6 +2628,7 @@ class MainWindow(QMainWindow):
                     self._sea_freight_dialog.group_id
                 ),
                 group_id=group_id,
+                settings=self._settings,
                 parent=self,
             )
             dialog.changed.connect(self._refresh_reconciliation_groups)
@@ -2758,6 +2761,15 @@ class MainWindow(QMainWindow):
                 new_settings = result
             self._settings = new_settings
             self._paths = _attribute(new_settings, "paths", default=self._paths)
+            for review_window in self._review_windows.values():
+                review_window._settings = new_settings
+            if self._sea_freight_dialog is not None:
+                self._sea_freight_dialog.settings = new_settings
+                group = self._sea_freight_service.repository.get_group(
+                    self._sea_freight_dialog.group_id
+                )
+                if group is not None:
+                    self._sea_freight_dialog._refresh_bk_path_warning(group)
             self.settings_page.mark_saved(new_settings)
             self.workflow_page.set_configuration(new_settings)
             update_launcher = getattr(self._assistant_launcher, "update_settings", None)

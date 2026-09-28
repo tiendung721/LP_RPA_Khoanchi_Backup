@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from app.database import Database
@@ -1028,6 +1029,13 @@ class SeaFreightRepository:
 
         if not snapshots:
             raise ValueError("Hồ sơ phải có ít nhất một sheet đối soát.")
+        bk_paths = {
+            str(Path(item.bk_path).expanduser().resolve()).casefold()
+            for item in snapshots
+        }
+        if len(bk_paths) != 1:
+            raise ValueError("Các nguồn đối soát phải thuộc cùng một file BK.")
+        primary_snapshot = snapshots[0]
         timestamp = _now()
         with self.database.transaction(immediate=True) as connection:
             group = connection.execute(
@@ -1144,13 +1152,29 @@ class SeaFreightRepository:
                             ),
                         )
                         allocation_order += 1
+            connection.execute(
+                """
+                UPDATE sea_freight_reconciliation_groups
+                SET bk_path = ?, bk_fingerprint = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    primary_snapshot.bk_path,
+                    primary_snapshot.workbook_fingerprint,
+                    timestamp,
+                    group_id,
+                ),
+            )
             self._update_multi_source_aggregate(connection, group_id, timestamp)
             self._recalculate(connection, group_id, timestamp)
             self._event(
                 connection,
                 group_id,
                 "BK_MULTI_SNAPSHOT",
-                {"sheets": [snapshot.bk_sheet for snapshot in snapshots]},
+                {
+                    "bk_path": primary_snapshot.bk_path,
+                    "sheets": [snapshot.bk_sheet for snapshot in snapshots],
+                },
                 timestamp,
             )
         result = self.get_group(group_id)
