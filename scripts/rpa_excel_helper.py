@@ -17,6 +17,8 @@ from app.rpa_expense.status import (
     RpaExpenseStatusError,
     RpaExpenseStatusService,
 )
+from app.database import Database
+from app.repositories.rpa_tracking_repository import RpaTrackingRepository
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,14 +43,20 @@ def _write(stream: object, payload: dict[str, object]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    database: Database | None = None
     try:
         args = build_parser().parse_args(argv)
         if args.command != "mark-imported":
             raise RpaExpenseStatusError(
                 f"Command không được hỗ trợ: {args.command}"
             )
+        selection_path = Path(args.selection)
+        selection = json.loads(selection_path.read_text(encoding="utf-8-sig"))
+        project_root = Path(str(selection.get("project_root") or PROJECT_ROOT))
+        database = Database(project_root / "Database" / "app_state.db")
         service = RpaExpenseStatusService(
-            backup_dir=Path(args.backup_dir) if args.backup_dir else None
+            backup_dir=Path(args.backup_dir) if args.backup_dir else None,
+            tracking_repository=RpaTrackingRepository(database),
         )
         result = service.mark_imported(args.selection, args.sqt)
         _write(sys.stdout, result)
@@ -73,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
             },
         )
         return 1
+    finally:
+        if database is not None:
+            database.close()
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ from app.repositories.batch_repository import local_now_iso
 from app.repositories.excel_draft_repository import ExcelDraftRepository
 from app.repositories.excel_run_repository import ExcelRunRepository
 from app.repositories.expense_posting_repository import ExpensePostingRepository
+from app.repositories.rpa_tracking_repository import RpaTrackingRepository
 from app.services.batch_service import BatchService
 from app.services.assistant_bat_launcher import AssistantBatLauncher
 from app.sea_freight import SeaFreightReconciliationService, SeaFreightRepository
@@ -103,6 +104,7 @@ class ApplicationRuntime:
         self.excel_draft_repository = ExcelDraftRepository(self.database)
         self.excel_draft_service = ExcelDraftService(self.excel_draft_repository)
         self.expense_posting_repository = ExpensePostingRepository(self.database)
+        self.rpa_tracking_repository = RpaTrackingRepository(self.database)
         self.sea_freight_repository = SeaFreightRepository(self.database)
         self.sea_freight_service = SeaFreightReconciliationService(
             self.sea_freight_repository
@@ -120,7 +122,10 @@ class ApplicationRuntime:
             payment_sync_service=self.payment_sync_service,
             draft_service=self.excel_draft_service,
         )
-        self.rpa_expense_service = RpaExpenseService(self.settings)
+        self.rpa_expense_service = RpaExpenseService(
+            self.settings,
+            tracking_repository=self.rpa_tracking_repository,
+        )
         self.rpa_choice_service = RpaChoiceService(self.excel_draft_repository)
         self.rpa_expense_launcher = RpaExpenseBatLauncher(self.settings)
         self.rpa_expense_controller = RpaExpenseController(
@@ -164,6 +169,7 @@ class ApplicationRuntime:
             posting_repository=self.expense_posting_repository,
             sea_freight_repository=self.sea_freight_repository,
             sea_freight_service=self.sea_freight_service,
+            rpa_tracking_repository=self.rpa_tracking_repository,
         )
         self.payment_sync_service = PaymentSyncService(
             settings,
@@ -205,7 +211,10 @@ class ApplicationRuntime:
                 expense_posting_service=self.expense_posting_service,
                 payment_sync_service=self.payment_sync_service,
             )
-        self.rpa_expense_service = RpaExpenseService(settings)
+        self.rpa_expense_service = RpaExpenseService(
+            settings,
+            tracking_repository=self.rpa_tracking_repository,
+        )
         self.rpa_expense_launcher = RpaExpenseBatLauncher(settings)
         if rpa_controller is not None:
             rpa_controller.update_services(

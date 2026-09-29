@@ -22,6 +22,7 @@ from app.services.excel.workbook import (
 from .contracts import (
     RPA_EXPENSE_OPERATION,
     RPA_STATUS_IMPORTED,
+    RPA_STATUS_NOT_IMPORTED,
 )
 from .service import STATUS_HEADER, SUMMARY_HEADERS, normalize_sqt
 
@@ -37,10 +38,12 @@ class RpaExpenseStatusService:
         backup_dir: str | Path | None = None,
         gateway: WorkbookGateway | None = None,
         lock_service: ExcelLockService | None = None,
+        tracking_repository: Any | None = None,
     ) -> None:
         self.backup_dir = Path(backup_dir) if backup_dir else None
         self.gateway = gateway or WorkbookGateway()
         self.lock_service = lock_service or ExcelLockService()
+        self.tracking_repository = tracking_repository
 
     def mark_imported(
         self,
@@ -69,6 +72,35 @@ class RpaExpenseStatusService:
             raise RpaExpenseStatusError(f"Không tìm thấy file BK: {target}")
         sheet_name = str(selection["sheet_name"])
         run_id = str(selection["run_id"])
+        raw_revision = item.get("pending_revision")
+        try:
+            expected_revision = (
+                int(raw_revision) if raw_revision is not None else None
+            )
+        except (TypeError, ValueError):
+            expected_revision = None
+        if self.tracking_repository is not None:
+            current_revision = self.tracking_repository.pending_revision(
+                target,
+                sheet_name,
+                target_sqt,
+            )
+            if current_revision is not None and current_revision != expected_revision:
+                return {
+                    "success": True,
+                    "operation": RPA_EXPENSE_OPERATION,
+                    "run_id": run_id,
+                    "bk_file": str(target),
+                    "sheet_name": sheet_name,
+                    "sqt": target_sqt,
+                    "source_rows": rows,
+                    "status": RPA_STATUS_NOT_IMPORTED,
+                    "pending_cleared": False,
+                    "stale_selection": True,
+                    "message": (
+                        "BK đã thay đổi sau khi gửi PAD; giữ SQT trong nhóm chờ."
+                    ),
+                }
 
         # Chỉ dùng khóa Windows như bước preflight. Phải nhả khóa trước khi
         # copy/replace vì Windows không cho sao chép file đang bị khóa byte.
@@ -117,6 +149,14 @@ class RpaExpenseStatusService:
             if workbook is not None:
                 workbook.close()
             working.unlink(missing_ok=True)
+        pending_cleared = False
+        if self.tracking_repository is not None:
+            pending_cleared = self.tracking_repository.mark_pad_succeeded(
+                target,
+                sheet_name,
+                target_sqt,
+                expected_revision=expected_revision,
+            )
         return {
             "success": True,
             "operation": RPA_EXPENSE_OPERATION,
@@ -127,6 +167,7 @@ class RpaExpenseStatusService:
             "source_rows": rows,
             "status": RPA_STATUS_IMPORTED,
             "backup_path": str(backup),
+            "pending_cleared": pending_cleared,
         }
 
     @staticmethod

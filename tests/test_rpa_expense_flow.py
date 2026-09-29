@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import QPushButton
 from app.config import AppSettings
 from app.database import Database
 from app.repositories.excel_draft_repository import ExcelDraftRepository
+from app.repositories.rpa_tracking_repository import RpaTrackingRepository
 from app.rpa_expense import (
     RPA_STATUS_IMPORTED,
     RPA_STATUS_NOT_IMPORTED,
@@ -19,6 +21,14 @@ from app.rpa_expense import (
 )
 from app.rpa_expense.launcher import RpaExpenseBatLauncher
 from app.rpa_expense.service import STATUS_HEADER, SUMMARY_HEADERS
+from app.services.excel.models import (
+    ExcelRunStatus,
+    FieldWriteOutcome,
+    ItemWriteOutcome,
+    OutcomeStatus,
+    PostingResult,
+)
+from app.services.excel.posting import ExpensePostingService
 from app.ui.rpa_expense_controller import RpaExpenseController
 from app.ui.rpa_expense_dialog import RpaLatestDataDialog, RpaSqtSelectionDialog
 
@@ -450,3 +460,182 @@ def test_rpa_controller_keeps_choices_when_launch_fails(qtbot, tmp_path: Path) -
     finally:
         controller.shutdown()
         database.close()
+
+
+def test_rpa_tracking_accumulates_pending_and_replaces_latest_pad(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "app.db")
+    tracking = RpaTrackingRepository(database)
+    bk = tmp_path / "BK.xlsx"
+    try:
+        tracking.mark_bk_changed(bk, "T07 26", ["101", "102"])
+        tracking.mark_bk_changed(bk, "T07 26", ["102", "103"])
+        snapshot = tracking.snapshot(bk, "T07 26")
+
+        assert snapshot.pending_revisions == {"101": 1, "102": 2, "103": 1}
+
+        tracking.record_latest_pad(
+            bk,
+            "T07 26",
+            ["90", "101"],
+            run_id="run-1",
+        )
+        tracking.record_latest_pad(
+            bk,
+            "T07 26",
+            ["102"],
+            run_id="run-2",
+        )
+        assert tracking.snapshot(bk, "T07 26").latest_pad_sqt == ("102",)
+    finally:
+        database.close()
+
+
+def test_pad_success_clears_only_matching_pending_revision(tmp_path: Path) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    settings = _settings(tmp_path, bk)
+    database = Database(tmp_path / "app.db")
+    tracking = RpaTrackingRepository(database)
+    try:
+        tracking.mark_bk_changed(bk, "T07 26", ["101"])
+        service = RpaExpenseService(settings, tracking_repository=tracking)
+        plan = service.analyze_sheet("T07 26")
+        prepared = service.prepare_selection(plan, ["101"])
+        payload = json.loads(prepared.selection_path.read_text(encoding="utf-8"))
+        assert payload["items"][0]["pending_revision"] == 1
+
+        # BK lại thay đổi trong lúc payload cũ đang được PAD xử lý.
+        tracking.mark_bk_changed(bk, "T07 26", ["101"])
+        result = RpaExpenseStatusService(
+            backup_dir=settings.paths.excel_backup_dir,
+            tracking_repository=tracking,
+        ).mark_imported(prepared.selection_path, "101")
+
+        assert result["stale_selection"] is True
+        assert tracking.snapshot(bk, "T07 26").pending_revisions == {"101": 2}
+        workbook = load_workbook(bk, data_only=False)
+        try:
+            status_column = 3 + len(SUMMARY_HEADERS)
+            assert workbook["T07 26"].cell(2, status_column).value is None
+        finally:
+            workbook.close()
+    finally:
+        database.close()
+
+
+def test_pad_success_clears_pending_and_records_latest_launch(tmp_path: Path) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    settings = _settings(tmp_path, bk)
+    database = Database(tmp_path / "app.db")
+    tracking = RpaTrackingRepository(database)
+    try:
+        tracking.mark_bk_changed(bk, "T07 26", ["101"])
+        service = RpaExpenseService(settings, tracking_repository=tracking)
+        prepared = service.prepare_selection(
+            service.analyze_sheet("T07 26"),
+            ["101"],
+        )
+        service.record_launched(prepared)
+        assert tracking.snapshot(bk, "T07 26").latest_pad_sqt == ("101",)
+
+        result = RpaExpenseStatusService(
+            backup_dir=settings.paths.excel_backup_dir,
+            tracking_repository=tracking,
+        ).mark_imported(prepared.selection_path, "101")
+
+        assert result["pending_cleared"] is True
+        assert tracking.snapshot(bk, "T07 26").pending_revisions == {}
+    finally:
+        database.close()
+
+
+def test_dialog_selects_and_filters_rpa_groups(qtbot, tmp_path: Path) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    base_plan = RpaExpenseService(_settings(tmp_path, bk)).analyze_sheet("T07 26")
+    plan = replace(
+        base_plan,
+        pending_revisions=(("101", 1),),
+        latest_pad_sqt=("102",),
+    )
+    dialog = RpaSqtSelectionDialog(plan)
+    qtbot.addWidget(dialog)
+
+    assert set(dialog.selected_sqt) == {"101", "102"}
+    assert dialog.group_filter_buttons["pending"].isChecked()
+    visible = {
+        dialog.table.item(row, 1).text()
+        for row in range(dialog.table.rowCount())
+        if not dialog.table.isRowHidden(row)
+    }
+    assert visible == {"101"}
+    assert dialog.table.item(0, 3).text() == "Chờ nhập QT"
+
+    dialog.findChild(QPushButton, "selectLatestRpaGroupButton").click()
+    assert dialog.selected_sqt == ["102"]
+    dialog.findChild(QPushButton, "selectBothRpaGroupsButton").click()
+    assert set(dialog.selected_sqt) == {"101", "102"}
+
+
+def test_posting_result_adds_only_written_amounts_to_pending(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    tracking = RpaTrackingRepository(database)
+    bk = tmp_path / "BK.xlsx"
+    service = ExpensePostingService(
+        provider=object(),
+        bk_path=bk,
+        rpa_tracking_repository=tracking,
+    )
+    try:
+        service._finish_result(
+            PostingResult(
+                status=ExcelRunStatus.SUCCEEDED,
+                target_path=bk,
+                item_outcomes=[
+                    ItemWriteOutcome(
+                        item_id="posting:1",
+                        sqt=101,
+                        target_sheet="T07 26",
+                        fields=[
+                            FieldWriteOutcome(
+                                field_name="Số tiền",
+                                status=OutcomeStatus.WRITTEN,
+                            )
+                        ],
+                    ),
+                    ItemWriteOutcome(
+                        item_id="posting:2",
+                        sqt=102,
+                        target_sheet="T07 26",
+                        fields=[
+                            FieldWriteOutcome(
+                                field_name="Số tiền",
+                                status=OutcomeStatus.USER_KEPT,
+                            )
+                        ],
+                    ),
+                ],
+            )
+        )
+
+        assert tracking.snapshot(bk, "T07 26").pending_revisions == {"101": 1}
+    finally:
+        database.close()
+
+
+def test_posting_amount_change_resets_existing_rpa_status() -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.cell(1, 5).value = STATUS_HEADER
+    sheet.cell(2, 5).value = RPA_STATUS_IMPORTED
+
+    ExpensePostingService._reset_rpa_statuses(
+        sheet,
+        [{"amount_write": True, "target_row": 2}],
+    )
+
+    assert sheet.cell(2, 5).value == RPA_STATUS_NOT_IMPORTED
+    workbook.close()

@@ -110,10 +110,12 @@ class RpaExpenseService:
         gateway: WorkbookGateway | None = None,
         lock_service: ExcelLockService | None = None,
         month_service: MonthSheetService | None = None,
+        tracking_repository: Any | None = None,
     ) -> None:
         self.gateway = gateway or WorkbookGateway()
         self.lock_service = lock_service or ExcelLockService()
         self.months = month_service or MonthSheetService()
+        self.tracking_repository = tracking_repository
         self.update_settings(settings)
 
     def update_settings(self, settings: Any) -> None:
@@ -238,7 +240,20 @@ class RpaExpenseService:
             progress_callback,
             f"Đã đọc {len(items)} SQT; {sum(item.can_run for item in items)} SQT có thể chạy.",
         )
-        return RpaExpensePlan(target, sheet_name, fingerprint, items)
+        pending_revisions: tuple[tuple[str, int], ...] = ()
+        latest_pad_sqt: tuple[str, ...] = ()
+        if self.tracking_repository is not None:
+            snapshot = self.tracking_repository.snapshot(target, sheet_name)
+            pending_revisions = tuple(snapshot.pending_revisions.items())
+            latest_pad_sqt = tuple(snapshot.latest_pad_sqt)
+        return RpaExpensePlan(
+            target,
+            sheet_name,
+            fingerprint,
+            items,
+            pending_revisions=pending_revisions,
+            latest_pad_sqt=latest_pad_sqt,
+        )
 
     def prepare_selection(
         self,
@@ -292,7 +307,17 @@ class RpaExpenseService:
             "bk_file": str(plan.bk_path.resolve()),
             "sheet_name": plan.sheet_name,
             "source_fingerprint": plan.fingerprint.to_dict(),
-            "items": [lookup[value].to_payload() for value in selected],
+            "items": [
+                {
+                    **lookup[value].to_payload(),
+                    **(
+                        {"pending_revision": revision}
+                        if (revision := plan.pending_revision(value)) is not None
+                        else {}
+                    ),
+                }
+                for value in selected
+            ],
             "status_callback": {
                 "when": "AFTER_WEB_SAVE_SUCCESS",
                 "status": RPA_STATUS_IMPORTED,
@@ -329,11 +354,18 @@ class RpaExpenseService:
         """Chỉ thay snapshot xem lại sau khi BAT/PAD đã khởi chạy thành công."""
 
         payload = dict(prepared.payload)
-        payload["launched_at"] = datetime.now().astimezone().isoformat(
-            timespec="seconds"
-        )
+        launched_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        payload["launched_at"] = launched_at
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self._write_json_atomic(self.latest_launched_path, payload)
+        if self.tracking_repository is not None:
+            self.tracking_repository.record_latest_pad(
+                payload["bk_file"],
+                str(payload["sheet_name"]),
+                (item.get("sqt") for item in payload["items"]),
+                run_id=str(payload["run_id"]),
+                launched_at=launched_at,
+            )
         return self.latest_launched_path.resolve()
 
     def load_latest_launched(self) -> dict[str, Any] | None:

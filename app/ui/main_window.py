@@ -748,8 +748,14 @@ class MainWindow(QMainWindow):
         loader = getattr(self._rpa_expense, "remembered_selection", None)
         if callable(loader):
             restore = loader(plan)
-        selected_sqt = tuple(
-            _attribute(restore, "selected_sqt", default=()) or ()
+        pending_sqt = tuple(_attribute(plan, "pending_sqt", default=()) or ())
+        latest_pad_sqt = tuple(
+            _attribute(plan, "latest_pad_sqt", default=()) or ()
+        )
+        selected_sqt = (
+            ()
+            if pending_sqt or latest_pad_sqt
+            else tuple(_attribute(restore, "selected_sqt", default=()) or ())
         )
         restore_info = {
             "found": bool(_attribute(restore, "found", default=False)),

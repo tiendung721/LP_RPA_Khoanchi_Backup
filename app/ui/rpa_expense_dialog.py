@@ -32,6 +32,8 @@ from .app_dialog import AppDialog
 
 
 STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
+PENDING_ROLE = Qt.ItemDataRole.UserRole + 2
+LATEST_PAD_ROLE = Qt.ItemDataRole.UserRole + 3
 
 
 class _SortableTableWidgetItem(QTableWidgetItem):
@@ -59,6 +61,7 @@ class RpaSqtSelectionDialog(AppDialog):
         "Chọn",
         "SQT",
         "Trạng thái RPA",
+        "Nhóm",
         "Dòng BK",
         "Cước MB",
         "N.hạ MB",
@@ -85,22 +88,45 @@ class RpaSqtSelectionDialog(AppDialog):
         self._initial_selected_sqt = {
             str(value) for value in initial_selected_sqt
         }
+        self._pending_sqt = {
+            str(value) for value in getattr(plan, "pending_sqt", ())
+        }
+        self._latest_pad_sqt = {
+            str(value) for value in getattr(plan, "latest_pad_sqt", ())
+        }
+        available_sqt = {str(item.sqt) for item in self.plan.items}
+        runnable_sqt = {
+            str(item.sqt) for item in self.plan.items if bool(item.can_run)
+        }
+        self._pending_sqt.intersection_update(available_sqt)
+        self._latest_pad_sqt.intersection_update(available_sqt)
+        self._selectable_pending_sqt = self._pending_sqt & runnable_sqt
+        self._selectable_latest_pad_sqt = self._latest_pad_sqt & runnable_sqt
+        self._initial_selected_sqt.update(self._selectable_pending_sqt)
+        self._initial_selected_sqt.update(self._selectable_latest_pad_sqt)
         self.restore_info = dict(restore_info or {})
         self._skipped_sqt = {
             str(value) for value in self.restore_info.get("skipped_sqt", ())
         }
         self._clear_saved_callback = clear_saved_callback
         self._checks: list[QTableWidgetItem] = []
-        self._active_filter: str | None = None
+        self._active_group_filter = (
+            "pending"
+            if self._pending_sqt
+            else "latest"
+            if self._latest_pad_sqt
+            else "all"
+        )
+        self._active_status_filter: str | None = None
         self._sort_options = {
             "status_asc": (2, Qt.SortOrder.AscendingOrder),
             "status_desc": (2, Qt.SortOrder.DescendingOrder),
             "sqt_asc": (1, Qt.SortOrder.AscendingOrder),
             "sqt_desc": (1, Qt.SortOrder.DescendingOrder),
-            "total_desc": (11, Qt.SortOrder.DescendingOrder),
-            "total_asc": (11, Qt.SortOrder.AscendingOrder),
-            "rows_asc": (3, Qt.SortOrder.AscendingOrder),
-            "rows_desc": (3, Qt.SortOrder.DescendingOrder),
+            "total_desc": (12, Qt.SortOrder.DescendingOrder),
+            "total_asc": (12, Qt.SortOrder.AscendingOrder),
+            "rows_asc": (4, Qt.SortOrder.AscendingOrder),
+            "rows_desc": (4, Qt.SortOrder.DescendingOrder),
         }
         self.setObjectName("rpaSqtSelectionDialog")
         self.setWindowTitle("Chọn số quyết toán chạy RPA")
@@ -144,7 +170,26 @@ class RpaSqtSelectionDialog(AppDialog):
         note.setProperty("muted", True)
         layout.addWidget(note)
 
-        if self.restore_info.get("found"):
+        if self._pending_sqt or self._latest_pad_sqt:
+            overlap = len(
+                self._selectable_pending_sqt & self._selectable_latest_pad_sqt
+            )
+            selected_count = len(
+                self._selectable_pending_sqt | self._selectable_latest_pad_sqt
+            )
+            self.group_summary_label = QLabel(
+                f"Đã chọn sẵn {selected_count} SQT: "
+                f"{len(self._selectable_pending_sqt)} chờ nhập QT + "
+                f"{len(self._selectable_latest_pad_sqt)} thuộc lượt PAD gần nhất"
+                + (f" − {overlap} trùng nhau." if overlap else ".")
+            )
+            self.group_summary_label.setWordWrap(True)
+            self.group_summary_label.setProperty("status", "info")
+            layout.addWidget(self.group_summary_label)
+
+        if self.restore_info.get("found") and not (
+            self._pending_sqt or self._latest_pad_sqt
+        ):
             restored = int(self.restore_info.get("restored_count", 0) or 0)
             saved = int(self.restore_info.get("saved_count", 0) or 0)
             skipped = max(0, saved - restored)
@@ -163,9 +208,59 @@ class RpaSqtSelectionDialog(AppDialog):
                 restore_row.addWidget(clear_saved)
             layout.addLayout(restore_row)
 
+        group_filters = QHBoxLayout()
+        group_filters.setSpacing(7)
+        group_filters.addWidget(QLabel("Nhóm hiển thị:"))
+        self.group_filter_group = QButtonGroup(self)
+        self.group_filter_group.setExclusive(True)
+        group_specs = (
+            ("Tất cả", "all", len(self.plan.items), "allRpaGroupFilterButton"),
+            (
+                "Chờ nhập QT",
+                "pending",
+                len(self._pending_sqt),
+                "pendingRpaGroupFilterButton",
+            ),
+            (
+                "Lượt PAD gần nhất",
+                "latest",
+                len(self._latest_pad_sqt),
+                "latestRpaGroupFilterButton",
+            ),
+        )
+        self.group_filter_buttons: dict[str, QPushButton] = {}
+        for label, group_name, count, object_name in group_specs:
+            button = QPushButton(f"{label} ({count})")
+            button.setObjectName(object_name)
+            button.setProperty("filterChip", True)
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda checked, value=group_name: checked
+                and self._set_group_filter(value)
+            )
+            self.group_filter_group.addButton(button)
+            self.group_filter_buttons[group_name] = button
+            group_filters.addWidget(button)
+        self.group_filter_buttons[self._active_group_filter].setChecked(True)
+        group_filters.addStretch()
+        group_filters.addWidget(QLabel("Sắp xếp:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.setObjectName("rpaSortCombo")
+        self.sort_combo.addItem("Trạng thái: Chưa nhập trước", "status_asc")
+        self.sort_combo.addItem("Trạng thái: Đã nhập trước", "status_desc")
+        self.sort_combo.addItem("SQT tăng dần", "sqt_asc")
+        self.sort_combo.addItem("SQT giảm dần", "sqt_desc")
+        self.sort_combo.addItem("Tổng tiền giảm dần", "total_desc")
+        self.sort_combo.addItem("Tổng tiền tăng dần", "total_asc")
+        self.sort_combo.addItem("Dòng BK tăng dần", "rows_asc")
+        self.sort_combo.addItem("Dòng BK giảm dần", "rows_desc")
+        self.sort_combo.currentIndexChanged.connect(self._apply_sort)
+        group_filters.addWidget(self.sort_combo)
+        layout.addLayout(group_filters)
+
         filters = QHBoxLayout()
         filters.setSpacing(7)
-        filters.addWidget(QLabel("Hiển thị:"))
+        filters.addWidget(QLabel("Trạng thái RPA:"))
         self.filter_group = QButtonGroup(self)
         self.filter_group.setExclusive(True)
         imported_count = sum(
@@ -193,52 +288,67 @@ class RpaSqtSelectionDialog(AppDialog):
             button.setProperty("filterChip", True)
             button.setCheckable(True)
             button.clicked.connect(
-                lambda checked, value=status: checked and self._set_filter(value)
+                lambda checked, value=status: checked
+                and self._set_status_filter(value)
             )
             self.filter_group.addButton(button)
             self.filter_buttons[status] = button
             filters.addWidget(button)
         self.filter_buttons[None].setChecked(True)
         filters.addStretch()
-        filters.addWidget(QLabel("Sắp xếp:"))
-        self.sort_combo = QComboBox()
-        self.sort_combo.setObjectName("rpaSortCombo")
-        self.sort_combo.addItem("Trạng thái: Chưa nhập trước", "status_asc")
-        self.sort_combo.addItem("Trạng thái: Đã nhập trước", "status_desc")
-        self.sort_combo.addItem("SQT tăng dần", "sqt_asc")
-        self.sort_combo.addItem("SQT giảm dần", "sqt_desc")
-        self.sort_combo.addItem("Tổng tiền giảm dần", "total_desc")
-        self.sort_combo.addItem("Tổng tiền tăng dần", "total_asc")
-        self.sort_combo.addItem("Dòng BK tăng dần", "rows_asc")
-        self.sort_combo.addItem("Dòng BK giảm dần", "rows_desc")
-        self.sort_combo.currentIndexChanged.connect(self._apply_sort)
-        filters.addWidget(self.sort_combo)
         layout.addLayout(filters)
 
         selection = QHBoxLayout()
-        select_visible = QPushButton("Chọn các SQT đang hiển thị")
+        select_both = QPushButton(
+            "Chọn cả hai nhóm "
+            f"({len(self._selectable_pending_sqt | self._selectable_latest_pad_sqt)})"
+        )
+        select_pending = QPushButton(
+            f"Chỉ chọn Chờ nhập QT ({len(self._selectable_pending_sqt)})"
+        )
+        select_latest = QPushButton(
+            "Chỉ chọn Lượt PAD gần nhất "
+            f"({len(self._selectable_latest_pad_sqt)})"
+        )
+        select_visible = QPushButton("Chọn đang hiển thị")
         clear_visible = QPushButton("Bỏ chọn đang hiển thị")
+        clear_all = QPushButton("Bỏ chọn tất cả")
+        select_both.setObjectName("selectBothRpaGroupsButton")
+        select_pending.setObjectName("selectPendingRpaGroupButton")
+        select_latest.setObjectName("selectLatestRpaGroupButton")
         select_visible.setObjectName("selectVisibleRpaSqtButton")
         clear_visible.setObjectName("clearVisibleRpaSqtButton")
+        clear_all.setObjectName("clearAllRpaSqtButton")
+        select_both.clicked.connect(
+            lambda: self._select_only(
+                self._selectable_pending_sqt | self._selectable_latest_pad_sqt
+            )
+        )
+        select_pending.clicked.connect(
+            lambda: self._select_only(self._selectable_pending_sqt)
+        )
+        select_latest.clicked.connect(
+            lambda: self._select_only(self._selectable_latest_pad_sqt)
+        )
         select_visible.clicked.connect(
             lambda: self._set_visible(Qt.CheckState.Checked)
         )
         clear_visible.clicked.connect(
             lambda: self._set_visible(Qt.CheckState.Unchecked)
         )
-        select_all = QPushButton("Chọn tất cả có thể chạy")
-        clear_all = QPushButton("Bỏ chọn tất cả")
-        select_all.setObjectName("selectAllRpaSqtButton")
-        clear_all.setObjectName("clearAllRpaSqtButton")
-        select_all.clicked.connect(
-            lambda: self._set_all(Qt.CheckState.Checked)
-        )
         clear_all.clicked.connect(
             lambda: self._set_all(Qt.CheckState.Unchecked)
         )
+        select_both.setEnabled(
+            bool(self._selectable_pending_sqt or self._selectable_latest_pad_sqt)
+        )
+        select_pending.setEnabled(bool(self._selectable_pending_sqt))
+        select_latest.setEnabled(bool(self._selectable_latest_pad_sqt))
+        selection.addWidget(select_both)
+        selection.addWidget(select_pending)
+        selection.addWidget(select_latest)
         selection.addWidget(select_visible)
         selection.addWidget(clear_visible)
-        selection.addWidget(select_all)
         selection.addWidget(clear_all)
         selection.addStretch()
         self.selection_summary = QLabel()
@@ -259,7 +369,7 @@ class RpaSqtSelectionDialog(AppDialog):
             QHeaderView.ResizeMode.ResizeToContents
         )
         self.table.horizontalHeader().setSectionResizeMode(
-            12, QHeaderView.ResizeMode.Stretch
+            13, QHeaderView.ResizeMode.Stretch
         )
         layout.addWidget(self.table, 1)
 
@@ -302,6 +412,10 @@ class RpaSqtSelectionDialog(AppDialog):
         check.setFlags(flags)
         check.setData(Qt.ItemDataRole.UserRole, source.sqt)
         check.setData(STATUS_ROLE, source.status)
+        is_pending = str(source.sqt) in self._pending_sqt
+        is_latest = str(source.sqt) in self._latest_pad_sqt
+        check.setData(PENDING_ROLE, is_pending)
+        check.setData(LATEST_PAD_ROLE, is_latest)
         check.setToolTip(
             "Đã được PAD xác nhận lưu thành công; vẫn có thể chọn để nhập lại."
             if source.status == RPA_STATUS_IMPORTED
@@ -318,11 +432,30 @@ class RpaSqtSelectionDialog(AppDialog):
             if source.status == RPA_STATUS_IMPORTED
             else "● Chưa nhập"
         )
+        group_display = (
+            "Cả hai"
+            if is_pending and is_latest
+            else "Chờ nhập QT"
+            if is_pending
+            else "Lượt PAD gần nhất"
+            if is_latest
+            else ""
+        )
         sqt_sort = self._sqt_sort_key(source.sqt)
+        group_sort = (
+            0
+            if is_pending and is_latest
+            else 1
+            if is_pending
+            else 2
+            if is_latest
+            else 3
+        )
         source_rows = tuple(int(value) for value in source.source_rows)
         values = (
             source.sqt,
             status_display,
+            group_display,
             ", ".join(str(value) for value in source.source_rows),
             _money(amounts.cuoc_bo_dong_hang),
             _money(amounts.nang_ha_dong_hang),
@@ -340,6 +473,7 @@ class RpaSqtSelectionDialog(AppDialog):
                 1 if source.status == RPA_STATUS_IMPORTED else 0,
                 sqt_sort,
             ),
+            (group_sort, sqt_sort),
             source_rows,
             amounts.cuoc_bo_dong_hang,
             amounts.nang_ha_dong_hang,
@@ -373,6 +507,20 @@ class RpaSqtSelectionDialog(AppDialog):
                     cell.setForeground(QColor("#1D4ED8"))
                     cell.setBackground(QColor("#EFF6FF"))
                     cell.setToolTip("Chưa có xác nhận lưu thành công từ PAD.")
+            elif column == 3 and group_display:
+                font = cell.font()
+                font.setBold(True)
+                cell.setFont(font)
+                cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if is_pending and is_latest:
+                    cell.setForeground(QColor("#15803D"))
+                    cell.setBackground(QColor("#DCFCE7"))
+                elif is_pending:
+                    cell.setForeground(QColor("#1D4ED8"))
+                    cell.setBackground(QColor("#DBEAFE"))
+                else:
+                    cell.setForeground(QColor("#6D28D9"))
+                    cell.setBackground(QColor("#EDE9FE"))
             if not source.can_run:
                 cell.setForeground(QColor("#8A3B32"))
             elif str(source.sqt) in self._skipped_sqt and column != 2:
@@ -414,9 +562,32 @@ class RpaSqtSelectionDialog(AppDialog):
             self.table.blockSignals(False)
         self._update_selection_summary()
 
-    def _set_filter(self, status: str | None) -> None:
-        self._active_filter = status
+    def _select_only(self, sqt_values: Iterable[str]) -> None:
+        selected = {str(value) for value in sqt_values}
+        self.table.blockSignals(True)
+        try:
+            for item in self._checks:
+                if item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                    item.setCheckState(
+                        Qt.CheckState.Checked
+                        if str(item.data(Qt.ItemDataRole.UserRole)) in selected
+                        else Qt.CheckState.Unchecked
+                    )
+        finally:
+            self.table.blockSignals(False)
+        self._update_selection_summary()
+
+    def _set_group_filter(self, group_name: str) -> None:
+        self._active_group_filter = group_name
         self._apply_filter()
+
+    def _set_status_filter(self, status: str | None) -> None:
+        self._active_status_filter = status
+        self._apply_filter()
+
+    # Alias giữ tương thích với adapter/test cũ.
+    def _set_filter(self, status: str | None) -> None:
+        self._set_status_filter(status)
 
     def _apply_filter(self) -> None:
         if not hasattr(self, "table"):
@@ -424,10 +595,20 @@ class RpaSqtSelectionDialog(AppDialog):
         for row in range(self.table.rowCount()):
             check = self.table.item(row, 0)
             status = check.data(STATUS_ROLE) if check is not None else None
+            pending = bool(check.data(PENDING_ROLE)) if check is not None else False
+            latest = bool(check.data(LATEST_PAD_ROLE)) if check is not None else False
+            group_matches = (
+                self._active_group_filter == "all"
+                or (self._active_group_filter == "pending" and pending)
+                or (self._active_group_filter == "latest" and latest)
+            )
+            status_matches = (
+                self._active_status_filter is None
+                or status == self._active_status_filter
+            )
             self.table.setRowHidden(
                 row,
-                self._active_filter is not None
-                and status != self._active_filter,
+                not (group_matches and status_matches),
             )
 
     def _apply_sort(self, _index: int | None = None) -> None:
@@ -455,9 +636,13 @@ class RpaSqtSelectionDialog(AppDialog):
             item.data(STATUS_ROLE) == RPA_STATUS_IMPORTED for item in selected
         )
         not_imported = len(selected) - imported
+        visible_selected = sum(
+            not self.table.isRowHidden(item.row()) for item in selected
+        )
         if selected:
             self.selection_summary.setText(
                 f"Đã chọn: {len(selected)} SQT — "
+                f"đang hiển thị {visible_selected}; "
                 f"{not_imported} chưa nhập, {imported} nhập lại"
             )
             if hasattr(self, "run_button"):

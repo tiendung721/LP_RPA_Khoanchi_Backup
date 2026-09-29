@@ -53,6 +53,7 @@ from .models import (
     PostingResolution,
     PostingResult,
     PostingSourceGroup,
+    OutcomeStatus,
     ResolutionAction,
     RowCandidate,
     TargetCellKind,
@@ -75,6 +76,8 @@ from .workbook import (
 
 
 ProgressCallback = Callable[[str], None] | None
+RPA_STATUS_HEADER = "Trạng thái RPA"
+RPA_STATUS_NOT_IMPORTED = "Chưa nhập"
 
 BASE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "sqt": ("SQT PM", "SQT", "Số thứ tự PM"),
@@ -249,6 +252,7 @@ class ExpensePostingService:
         posting_repository: Any | None = None,
         sea_freight_repository: Any | None = None,
         sea_freight_service: Any | None = None,
+        rpa_tracking_repository: Any | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.provider = reviewed_batch_provider or provider
@@ -276,6 +280,7 @@ class ExpensePostingService:
         self.posting_repository = posting_repository
         self.sea_freight_repository = sea_freight_repository
         self.sea_freight_service = sea_freight_service
+        self.rpa_tracking_repository = rpa_tracking_repository
         self.clock = clock or (lambda: datetime.now().astimezone().replace(tzinfo=None))
         # Working copy nằm cạnh BK để atomic replace không bao giờ cross-volume.
         self.backups = ExcelBackupService(self.backup_dir)
@@ -636,6 +641,7 @@ class ExpensePostingService:
                                 int(action["target_row"]), carrier_column
                             ).value = action["carrier_value_after"]
                         updated_rows.add(int(action["target_row"]))
+                    self._reset_rpa_statuses(worksheet, write_actions)
                     for target_row in updated_rows:
                         update_cell = worksheet.cell(target_row, update_column)
                         update_cell.value = update_timestamp
@@ -1363,6 +1369,7 @@ class ExpensePostingService:
                         row = int(action["target_row"])
                         worksheet.cell(row, column).value = action["value_after"]
                         updated_rows.add(row)
+                    self._reset_rpa_statuses(worksheet, sheet_actions)
                     for row in updated_rows:
                         cell = worksheet.cell(row, update_column)
                         cell.value = timestamp
@@ -1617,6 +1624,7 @@ class ExpensePostingService:
                                     "carrier_value_after"
                                 ]
                             updated_rows.add(row)
+                        self._reset_rpa_statuses(worksheet, sheet_actions)
                         for row in updated_rows:
                             cell = worksheet.cell(row, update_column)
                             cell.value = timestamp
@@ -4751,6 +4759,25 @@ class ExpensePostingService:
             self.run_repository.update_run(run_id, **changes)
 
     def _finish_result(self, result: PostingResult) -> None:
+        if self.rpa_tracking_repository is not None:
+            changed_by_sheet: dict[str, set[str]] = defaultdict(set)
+            for outcome in result.item_outcomes:
+                sheet_name = str(outcome.target_sheet or "").strip()
+                sqt = str(outcome.sqt or "").strip()
+                amount_changed = any(
+                    field.field_name == "Số tiền"
+                    and field.status is OutcomeStatus.WRITTEN
+                    for field in outcome.fields
+                )
+                if sheet_name and sqt and amount_changed:
+                    changed_by_sheet[sheet_name].add(sqt)
+            for sheet_name, sqt_values in changed_by_sheet.items():
+                self.rpa_tracking_repository.mark_bk_changed(
+                    result.target_path,
+                    sheet_name,
+                    sorted(sqt_values),
+                    source_run_id=result.run_id,
+                )
         if self.run_repository is None or result.run_id is None:
             return
         self.run_repository.finish_run(
@@ -4769,6 +4796,31 @@ class ExpensePostingService:
             conflict_count=result.conflict_count,
             item_outcomes=result.item_outcomes,
         )
+
+    @staticmethod
+    def _reset_rpa_statuses(
+        worksheet: Any,
+        actions: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Một thay đổi tiền làm mất hiệu lực xác nhận PAD trước đó."""
+
+        expected = normalize_header(RPA_STATUS_HEADER)
+        matches = [
+            column
+            for column in range(1, int(worksheet.max_column or 0) + 1)
+            if normalize_header(worksheet.cell(1, column).value) == expected
+        ]
+        if len(matches) > 1:
+            raise ExpensePostingError("Có nhiều cột Trạng thái RPA.")
+        if not matches:
+            return
+        status_column = matches[0]
+        for action in actions:
+            if not action.get("amount_write") or action.get("target_row") is None:
+                continue
+            worksheet.cell(
+                int(action["target_row"]), status_column
+            ).value = RPA_STATUS_NOT_IMPORTED
 
     def _finish_failed(self, run_id: int | None, exc: Exception) -> None:
         if self.run_repository is not None and run_id is not None:

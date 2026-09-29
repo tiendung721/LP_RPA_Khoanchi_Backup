@@ -150,7 +150,11 @@ class Database:
                 self._migration_21(connection)
                 connection.execute("PRAGMA user_version = 21")
                 current_version = 21
-            self._ensure_schema_21(connection)
+            if current_version < 22:
+                self._migration_22(connection)
+                connection.execute("PRAGMA user_version = 22")
+                current_version = 22
+            self._ensure_schema_22(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -1319,6 +1323,51 @@ class Database:
             connection.execute(
                 "ALTER TABLE expense_posting_items ADD COLUMN match_reason TEXT"
             )
+
+    @staticmethod
+    def _migration_22(connection: sqlite3.Connection) -> None:
+        """Theo dõi SQT chờ PAD và danh sách đã gửi gần nhất theo file/sheet."""
+
+        Database._ensure_schema_22(connection)
+
+    @staticmethod
+    def _ensure_schema_22(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_21(connection)
+        statements = (
+            """
+            CREATE TABLE IF NOT EXISTS rpa_pending_sqt (
+                workbook_key TEXT NOT NULL,
+                workbook_path TEXT NOT NULL,
+                sheet_name TEXT NOT NULL,
+                sqt TEXT NOT NULL,
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                source_run_id INTEGER,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (workbook_key, sheet_name, sqt)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_rpa_pending_sheet
+            ON rpa_pending_sqt(workbook_key, sheet_name, updated_at, sqt)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS rpa_latest_pad_items (
+                workbook_key TEXT NOT NULL,
+                workbook_path TEXT NOT NULL,
+                sheet_name TEXT NOT NULL,
+                sqt TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                launched_at TEXT NOT NULL,
+                PRIMARY KEY (workbook_key, sheet_name, sqt)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_rpa_latest_pad_sheet
+            ON rpa_latest_pad_items(workbook_key, sheet_name, launched_at, sqt)
+            """,
+        )
+        for statement in statements:
+            connection.execute(statement)
 
     @contextmanager
     def transaction(

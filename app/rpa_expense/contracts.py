@@ -101,6 +101,8 @@ class RpaExpensePlan:
     sheet_name: str
     fingerprint: WorkbookFingerprint
     items: tuple[RpaSqtItem, ...]
+    pending_revisions: tuple[tuple[str, int], ...] = ()
+    latest_pad_sqt: tuple[str, ...] = ()
 
     @property
     def runnable_count(self) -> int:
@@ -108,6 +110,21 @@ class RpaExpensePlan:
 
     def item_map(self) -> dict[str, RpaSqtItem]:
         return {item.sqt: item for item in self.items}
+
+    @property
+    def pending_sqt(self) -> tuple[str, ...]:
+        return tuple(sqt for sqt, _revision in self.pending_revisions)
+
+    def pending_revision(self, sqt: object) -> int | None:
+        target = str(sqt).strip()
+        return next(
+            (
+                int(revision)
+                for value, revision in self.pending_revisions
+                if value == target
+            ),
+            None,
+        )
 
 
 @dataclass(frozen=True, slots=True)

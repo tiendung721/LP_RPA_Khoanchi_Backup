@@ -19,3 +19,6 @@ __all__ = [
     "ExpensePostingItemRecord",
     "ExpensePostingRepository",
 ]
+from .rpa_tracking_repository import RpaTrackingRepository, RpaTrackingSnapshot
+
+__all__ = ["RpaTrackingRepository", "RpaTrackingSnapshot"]
