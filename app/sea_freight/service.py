@@ -31,7 +31,11 @@ from .matching import (
     vessel_voyage_keys,
     vessel_voyage_text,
 )
-from .repository import DuplicateContributionError, SeaFreightRepository
+from .repository import (
+    DuplicateContributionError,
+    SeaFreightRepository,
+    StaleRevisionError,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -39,6 +43,16 @@ LOGGER = logging.getLogger(__name__)
 
 class SeaFreightReconciliationError(RuntimeError):
     pass
+
+
+class SeaFreightStaleRevisionError(SeaFreightReconciliationError):
+    def __init__(self, current_group_id: int, revision_no: int | None = None) -> None:
+        self.current_group_id = current_group_id
+        self.revision_no = revision_no
+        label = f"lần {revision_no}" if revision_no is not None else "phiên mới nhất"
+        super().__init__(
+            f"Hồ sơ đang xem không còn là phiên hiện hành. Phiên hiện hành là {label}."
+        )
 
 
 class VesselVoyageNotFoundError(SeaFreightReconciliationError):
@@ -215,11 +229,11 @@ class SeaFreightReconciliationService:
         self._require_snapshot_match(row, snapshot)
         month, year = self.period_from_sheet(bk_sheet)
         existing = self.repository.find_open_group(
-            snapshot.bk_path, snapshot.bk_sheet, snapshot.vessel_key, snapshot.voyage_key
+            snapshot.vessel_key, snapshot.voyage_key
         )
         if existing is None:
             latest = self.repository.find_latest_group(
-                snapshot.bk_path, snapshot.bk_sheet, snapshot.vessel_key, snapshot.voyage_key
+                snapshot.vessel_key, snapshot.voyage_key
             )
             if latest is not None and latest.status is GroupStatus.POSTED:
                 raise SeaFreightReconciliationError("Hồ sơ đã hoàn tất, không thể thêm HĐ.")
@@ -326,8 +340,6 @@ class SeaFreightReconciliationService:
                     "Các hóa đơn được chọn không cùng tàu/chuyến."
                 )
         current = self.repository.find_latest_group(
-            snapshot.bk_path,
-            snapshot.bk_sheet,
             snapshot.vessel_key,
             snapshot.voyage_key,
         )
@@ -364,8 +376,6 @@ class SeaFreightReconciliationService:
             # Một thao tác đồng thời có thể tạo hồ sơ sau bước tra cứu. Luôn đổi
             # va chạm DB thành kết quả/ngữ nghĩa nghiệp vụ thay vì lộ lỗi SQLite.
             current = self.repository.find_latest_group(
-                snapshot.bk_path,
-                snapshot.bk_sheet,
                 snapshot.vessel_key,
                 snapshot.voyage_key,
             )
@@ -1112,10 +1122,11 @@ class SeaFreightReconciliationService:
 
         group = self._require_group(group_id)
         target_bk_path = bk_path if bk_path not in (None, "") else group.bk_path
-        if not group.is_current:
-            raise SeaFreightReconciliationError(
-                "Chỉ có thể đối soát lại từ phiên hiện hành."
-            )
+        current = self.repository.get_current_group_for_case(group.case_id)
+        if current is None:
+            raise SeaFreightReconciliationError("Hồ sơ không còn phiên hiện hành.")
+        if current.id != group.id:
+            raise SeaFreightStaleRevisionError(current.id, current.revision_no)
         if group.status not in {GroupStatus.ALLOCATED, GroupStatus.POSTED}:
             raise SeaFreightReconciliationError(
                 "Hồ sơ chưa hoàn tất; hãy tiếp tục chỉnh sửa phiên hiện tại."
@@ -1143,7 +1154,14 @@ class SeaFreightReconciliationService:
                 raise SeaFreightReconciliationError(
                     "Không đọc lại được dữ liệu BK để tạo phiên mới."
                 ) from exc
-            created = self.repository.create_revision(group_id, snapshots[0])
+            try:
+                created = self.repository.create_revision(group_id, snapshots[0])
+            except StaleRevisionError as exc:
+                latest = self.repository.get_group(exc.current_group_id)
+                raise SeaFreightStaleRevisionError(
+                    exc.current_group_id,
+                    latest.revision_no if latest is not None else None,
+                ) from exc
             return self.repository.replace_group_sources(created.id, snapshots)
         try:
             snapshot = self.matcher.snapshot(
@@ -1158,7 +1176,14 @@ class SeaFreightReconciliationService:
                 "Không đọc lại được dữ liệu BK để tạo phiên mới."
             ) from exc
         self._require_snapshot_match(self._contribution_row(first), snapshot)
-        return self.repository.create_revision(group_id, snapshot)
+        try:
+            return self.repository.create_revision(group_id, snapshot)
+        except StaleRevisionError as exc:
+            latest = self.repository.get_group(exc.current_group_id)
+            raise SeaFreightStaleRevisionError(
+                exc.current_group_id,
+                latest.revision_no if latest is not None else None,
+            ) from exc
 
     def allocation_rows(self, group_id: int) -> list[DataRow]:
         group = self._require_group(group_id)

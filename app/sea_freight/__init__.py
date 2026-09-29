@@ -33,7 +33,11 @@ from .matching import (
     validate_vessel_voyage,
 )
 from .repository import SeaFreightRepository
-from .service import SeaFreightReconciliationService, VesselVoyageNotFoundError
+from .service import (
+    SeaFreightReconciliationService,
+    SeaFreightStaleRevisionError,
+    VesselVoyageNotFoundError,
+)
 
 __all__ = [
     "BkContainerSnapshot",
@@ -57,6 +61,7 @@ __all__ = [
     "VesselVoyageSuggestion",
     "SeaFreightMatchError",
     "SeaFreightReconciliationService",
+    "SeaFreightStaleRevisionError",
     "VesselVoyageNotFoundError",
     "SeaFreightRepository",
     "normalize_match_key",

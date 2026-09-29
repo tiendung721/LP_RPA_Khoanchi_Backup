@@ -511,3 +511,93 @@ def test_database_v17_removes_vat_history_and_recalculates_aggregates(
     assert migrated.query_one("PRAGMA integrity_check")[0] == "ok"
     assert migrated.query_all("PRAGMA foreign_key_check") == []
     migrated.close()
+
+
+def test_migration_24_adds_input_and_selected_sqt_to_posting_history(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "schema-23.db"
+    database = Database(path)
+    database.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE expense_posting_items DROP COLUMN input_sqt")
+        connection.execute("ALTER TABLE expense_posting_items DROP COLUMN source_sqt")
+        connection.execute("PRAGMA user_version = 23")
+
+    migrated = Database(path)
+
+    columns = {
+        str(row["name"])
+        for row in migrated.query_all("PRAGMA table_info(expense_posting_items)")
+    }
+    assert {"input_sqt", "source_sqt"}.issubset(columns)
+    assert migrated.query_one("PRAGMA user_version")[0] == SQLITE_SCHEMA_VERSION
+    migrated.close()
+
+
+def test_migration_23_merges_current_groups_by_vessel_and_voyage(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    database = Database(path)
+    with database.transaction(immediate=True) as connection:
+        connection.execute("DROP INDEX IF EXISTS ux_sea_freight_current_case")
+        connection.execute("DROP TRIGGER IF EXISTS trg_sea_freight_group_case_insert")
+        connection.execute("DROP TRIGGER IF EXISTS trg_sea_freight_group_case_update")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_sea_freight_current_open_group
+            ON sea_freight_reconciliation_groups(
+                bk_path, bk_sheet, vessel_key, voyage_key
+            )
+            WHERE is_current = 1 AND status != 'CANCELLED'
+            """
+        )
+        for path_text, status, created_at in (
+            ("D:/Old/BK.xlsx", "ALLOCATED", "2026-09-28T11:39:54+07:00"),
+            ("C:/Current/BK.xlsx", "POSTED", "2026-09-28T22:22:57+07:00"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO sea_freight_reconciliation_groups(
+                    case_id, bk_path, bk_sheet, vessel_voyage_raw,
+                    vessel_key, voyage_key, combined_key,
+                    bk_container_count, received_container_count, total_amount,
+                    status, revision_no, is_current, created_at, updated_at
+                ) VALUES (
+                    NULL, ?, 'T09 26', 'BIENDONG MARINER MB2632S',
+                    'BIENDONGMARINER', 'MB2632S', 'BIENDONGMARINERMB2632S',
+                    5, 5, 33500000, ?, 1, 1, ?, ?
+                )
+                """,
+                (path_text, status, created_at, created_at),
+            )
+        connection.execute("PRAGMA user_version = 22")
+    database.close()
+
+    migrated = Database(path)
+
+    groups = migrated.query_all(
+        """
+        SELECT id, case_id, bk_path, is_current
+        FROM sea_freight_reconciliation_groups
+        ORDER BY id
+        """
+    )
+    assert len({int(row["case_id"]) for row in groups}) == 1
+    assert [bool(row["is_current"]) for row in groups] == [False, True]
+    assert str(groups[-1]["bk_path"]) == "C:/Current/BK.xlsx"
+    assert migrated.query_one(
+        "SELECT COUNT(*) FROM sea_freight_reconciliation_cases"
+    )[0] == 1
+    indexes = {
+        str(row["name"])
+        for row in migrated.query_all(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        )
+    }
+    assert "ux_sea_freight_current_case" in indexes
+    assert "ux_sea_freight_current_open_group" not in indexes
+    assert migrated.query_one("PRAGMA integrity_check")[0] == "ok"
+    assert migrated.query_all("PRAGMA foreign_key_check") == []
+    migrated.close()

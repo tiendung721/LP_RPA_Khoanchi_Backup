@@ -10,7 +10,8 @@ APP_VENDOR: Final = "Kikai"
 APP_SLUG: Final = "TroLyDuLieuQuyetToan"
 LEGACY_SCHEMA_VERSION: Final = 1
 OBJECT_SCHEMA_VERSION: Final = 2
-SCHEMA_VERSION: Final = 3
+DOCUMENT_SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 4
 
 FEE_CATALOG = MappingProxyType(
     {
@@ -91,4 +92,4 @@ APP_STATE_MAIN_WINDOW_GEOMETRY: Final = "main_window_geometry"
 APP_STATE_MAIN_WINDOW_STATE: Final = "main_window_state"
 APP_STATE_LAST_PAGE: Final = "last_page"
 
-SQLITE_SCHEMA_VERSION: Final = 22
+SQLITE_SCHEMA_VERSION: Final = 24

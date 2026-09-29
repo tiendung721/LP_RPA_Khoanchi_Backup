@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 from difflib import SequenceMatcher
@@ -21,32 +20,22 @@ from .contracts import (
     VesselVoyageResolutionKind,
     VesselVoyageSuggestion,
 )
+from .vessel_aliases import (
+    _split_bk_vessel_voyage,
+    canonical_vessel_key,
+    normalize_match_key,
+    vessel_voyage_alias_equivalent,
+    vessel_voyage_candidate_equivalent,
+)
 
-_NON_ALNUM = re.compile(r"[^A-Z0-9]+")
-_VOYAGE_KEY = re.compile(r"^(?P<prefix>[A-Z]*)(?P<number>\d+)(?P<suffix>[A-Z]*)$")
 _INVALID_BK_VALUES = frozenset({"TP", "GND", "CUOCBO", "CUOC BO", "NM", "KBB"})
 _SEA_FREIGHT_REQUIRED_FIELDS = tuple(
     field for field in SYNC_FIELDS if field != "bl"
 )
 
 
-@dataclass(frozen=True, slots=True)
-class _VoyageIdentity:
-    prefix: str
-    number: str
-    suffix: str
-
-
 class SeaFreightMatchError(ValueError):
     pass
-
-
-def normalize_match_key(value: object) -> str:
-    if not isinstance(value, str):
-        return ""
-    decomposed = unicodedata.normalize("NFKD", value.strip().upper())
-    ascii_like = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    return _NON_ALNUM.sub("", ascii_like)
 
 
 def vessel_voyage_text(vessel_name: object, voyage_no: object) -> str:
@@ -59,7 +48,7 @@ def vessel_voyage_keys(
     vessel_name: object,
     voyage_no: object,
 ) -> tuple[str, str, str]:
-    vessel_key = normalize_match_key(vessel_name)
+    vessel_key = canonical_vessel_key(vessel_name)
     voyage_key = normalize_match_key(voyage_no)
     if not vessel_key or not voyage_key:
         raise SeaFreightMatchError("Thiếu tên tàu hoặc số chuyến để đối soát BK.")
@@ -69,63 +58,6 @@ def vessel_voyage_keys(
     if combined_key in _INVALID_BK_VALUES or vessel_key in _INVALID_BK_VALUES:
         raise SeaFreightMatchError("Giá trị tàu/chuyến không hợp lệ.")
     return vessel_key, voyage_key, combined_key
-
-
-def _voyage_identity(value: object) -> _VoyageIdentity | None:
-    key = normalize_match_key(value)
-    match = _VOYAGE_KEY.fullmatch(key)
-    if match is None:
-        return None
-    return _VoyageIdentity(
-        prefix=match.group("prefix"),
-        number=match.group("number"),
-        suffix=match.group("suffix"),
-    )
-
-
-def vessel_voyage_alias_equivalent(
-    left_vessel_name: object,
-    left_voyage_no: object,
-    right_vessel_name: object,
-    right_voyage_no: object,
-) -> bool:
-    """Khớp exact hoặc chỉ khác việc một bên thiếu tiền tố chuyến."""
-
-    if normalize_match_key(left_vessel_name) != normalize_match_key(right_vessel_name):
-        return False
-    left = _voyage_identity(left_voyage_no)
-    right = _voyage_identity(right_voyage_no)
-    if left is None or right is None:
-        return False
-    if (left.number, left.suffix) != (right.number, right.suffix):
-        return False
-    return left.prefix == right.prefix or not left.prefix or not right.prefix
-
-
-def _split_bk_vessel_voyage(
-    raw_value: object,
-    expected_vessel_key: str,
-) -> tuple[str, str, str] | None:
-    if not isinstance(raw_value, str):
-        return None
-    display = " ".join(raw_value.strip().split())
-    combined_key = normalize_match_key(display)
-    if not expected_vessel_key or not combined_key.startswith(expected_vessel_key):
-        return None
-    voyage_key = combined_key[len(expected_vessel_key) :]
-    if _voyage_identity(voyage_key) is None:
-        return None
-
-    separators = " \t\r\n/-–—|:"
-    for index in range(1, len(display)):
-        vessel = display[:index].rstrip(separators)
-        voyage = display[index:].lstrip(separators)
-        if (
-            normalize_match_key(vessel) == expected_vessel_key
-            and normalize_match_key(voyage) == voyage_key
-        ):
-            return vessel, voyage, combined_key
-    return None
 
 
 def validate_vessel_voyage(

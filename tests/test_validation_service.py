@@ -27,6 +27,18 @@ def validator() -> ValidationService:
         (DataRow("DRYU3026167", None, "VTN", "CV", "1"), "amount_type"),
         (DataRow("DRYU3026167", None, "VTN", "CV", True), "amount_boolean"),
         (DataRow("DRYU3026167", None, "VTN", "CV", -1), "amount_negative"),
+        (DataRow("DRYU3026167", None, "VTN", "CV", 1, sqt=0), "sqt_invalid"),
+        (
+            DataRow(
+                "DRYU3026167",
+                None,
+                "VTN",
+                "CV",
+                1,
+                sqt="702",  # type: ignore[arg-type]
+            ),
+            "sqt_invalid",
+        ),
         (DataRow("DRYU3026167", None, "VTN", "HD", 1), "hd_requires_cb"),
         (DataRow("DRYU3026167", "BL1", "CB", "CV", 1), "cb_requires_hd"),
         (

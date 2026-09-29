@@ -23,7 +23,7 @@ def test_parse_valid_json_object_keeps_row_order() -> None:
 
     document = parse_document(raw)
 
-    assert document.v == 3
+    assert document.v == 4
     assert [row.to_list() for row in document.rows] == raw["d"]
     assert list(document_to_dict(document)) == ["v", "d"]
 
@@ -46,12 +46,12 @@ def test_parse_v1_keeps_invoice_and_carrier_fields() -> None:
 
     document = parse_document(raw)
 
-    assert document.v == 3
+    assert document.v == 4
     assert document.rows[0].invoice_no == "000130/HD"
     assert document.rows[0].carrier == "Công ty vận tải ABC"
     assert document.rows[0].amount == 13_554_000
     serialized = document_to_dict(document)
-    assert serialized["v"] == 3
+    assert serialized["v"] == 4
     assert serialized["d"][0]["source_document_id"].startswith("LEGACY_BATCH_")
     assert serialized["d"][0]["invoice_no"] == "000130/HD"
     assert serialized["d"][0]["container_count_basis"] == "UNKNOWN"
@@ -89,8 +89,8 @@ def test_root_must_have_exact_keys(raw: object) -> None:
     assert exc_info.value.code == "root_keys"
 
 
-@pytest.mark.parametrize("version", [0, 4, True, 1.0, "1"])
-def test_version_must_be_integer_one_two_or_three(version: object) -> None:
+@pytest.mark.parametrize("version", [0, 5, True, 1.0, "1"])
+def test_version_must_be_integer_one_through_four(version: object) -> None:
     with pytest.raises(SchemaError) as exc_info:
         parse_document({"v": version, "d": []})
     assert exc_info.value.code == "invalid_version"
@@ -119,7 +119,7 @@ def test_each_v1_row_must_be_seven_element_array(row: object, code: str) -> None
     assert exc_info.value.code == code
 
 
-def test_document_serializes_as_v3_objects() -> None:
+def test_document_serializes_as_v4_objects() -> None:
     document = BatchDocument(
         rows=[
             DataRow("DRYU3026167", None, "VTN", "CV", 13_554_000),
@@ -127,7 +127,7 @@ def test_document_serializes_as_v3_objects() -> None:
         ]
     )
     assert document_to_dict(document) == {
-        "v": 3,
+        "v": 4,
         "d": [
             DataRow("DRYU3026167", None, "VTN", "CV", 13_554_000).to_object(),
             DataRow(None, "BL123", "CB", "HD", 27_500_000).to_object(),
@@ -154,17 +154,18 @@ def test_parse_v2_sea_freight_fields() -> None:
     v2_row = {
         key: value
         for key, value in row.to_object().items()
-        if key not in {"source_document_id", "source_document_name"}
+        if key not in {"source_document_id", "source_document_name", "sqt"}
     }
     document = parse_document({"v": 2, "d": [v2_row]})
     assert document.rows[0].voyage_no == "2625S"
     assert document.rows[0].invoice_container_count == 4
     assert document.rows[0].source_document_id.startswith("LEGACY_BATCH_")
-    assert document_to_dict(document)["v"] == 3
+    assert document_to_dict(document)["v"] == 4
 
 
 def test_parse_v3_requires_exact_source_fields() -> None:
     row = DataRow("DRYU3026167", None, "VTN", "CV", 10).to_object()
+    row.pop("sqt")
     assert parse_document({"v": 3, "d": [row]}).rows[0].source_document_id == "MANUAL"
     missing = dict(row)
     missing.pop("source_document_name")
@@ -175,6 +176,17 @@ def test_parse_v3_requires_exact_source_fields() -> None:
     with pytest.raises(SchemaError) as exc_info:
         parse_document({"v": 3, "d": [empty]})
     assert exc_info.value.code == "empty_source_document_id"
+
+
+def test_parse_v4_keeps_optional_source_sqt() -> None:
+    row = DataRow(
+        "DRYU3026167", None, "VTN", "CV", 10, sqt=736
+    ).to_object()
+
+    document = parse_document({"v": 4, "d": [row]})
+
+    assert document.rows[0].sqt == 736
+    assert document_to_dict(document)["d"][0]["sqt"] == 736
 
 
 def test_v1_rejects_six_field_rows() -> None:

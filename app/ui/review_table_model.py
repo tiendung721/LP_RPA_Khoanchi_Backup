@@ -61,7 +61,7 @@ except ImportError:
             ("GV", "Gộp các dòng phù hợp rồi lấy tiền cuối cùng"),
         ]
     )
-    _SCHEMA_VERSION = 3
+    _SCHEMA_VERSION = 4
 
 
 class RowStatus(str, Enum):
@@ -81,7 +81,7 @@ STATUS_LABELS: Final[dict[RowStatus, str]] = {
 
 @dataclass(slots=True)
 class ReviewRow:
-    """Biểu diễn nội bộ của một dòng hóa đơn schema v3."""
+    """Biểu diễn nội bộ của một dòng hóa đơn schema v4."""
 
     cont: Any = None
     bl: Any = None
@@ -98,6 +98,7 @@ class ReviewRow:
     invoice_date: Any = None
     source_document_id: Any = "MANUAL"
     source_document_name: Any = "Dòng thêm thủ công"
+    sqt: Any = None
     runtime_id: str = field(default_factory=lambda: uuid4().hex)
 
     def as_array(self) -> list[Any]:
@@ -115,6 +116,7 @@ class ReviewRow:
         return {
             "source_document_id": self.source_document_id,
             "source_document_name": self.source_document_name,
+            "sqt": self.sqt,
             "container": self.cont,
             "bl": self.bl,
             "vessel_voyage_raw": self.vessel_voyage_raw,
@@ -137,6 +139,7 @@ class ReviewRow:
         return cls(
             cont=_mapping_value(value, "cont", "container"),
             bl=_mapping_value(value, "bl", "bill_of_lading", "bill"),
+            sqt=_mapping_value(value, "sqt", "source_sqt", "qt"),
             fee=_mapping_value(value, "fee", "fee_code", default="CXD"),
             rule=_mapping_value(value, "rule", "rule_code"),
             amount=_mapping_value(value, "amount"),
@@ -247,6 +250,7 @@ def coerce_review_row(value: Any) -> ReviewRow:
             {
                 "container": getattr(value, "cont", getattr(value, "container", None)),
                 "bl": getattr(value, "bl", getattr(value, "bill_of_lading", None)),
+                "sqt": getattr(value, "sqt", None),
                 "fee": getattr(value, "fee", getattr(value, "fee_code", "CXD")),
                 "rule": getattr(value, "rule", getattr(value, "rule_code", None)),
                 "amount": getattr(value, "amount", None),
@@ -282,6 +286,8 @@ def validate_row(row: ReviewRow, *, allow_negative: bool = False) -> RowValidati
         errors.append("Container phải là chuỗi hoặc null.")
     if row.bl is not None and not isinstance(row.bl, str):
         errors.append("B/L phải là chuỗi hoặc null.")
+    if row.sqt is not None and (type(row.sqt) is not int or row.sqt <= 0):
+        errors.append("SQT nguồn phải là số nguyên dương hoặc null.")
     if not isinstance(row.fee, str) or row.fee not in FEE_CATALOG:
         errors.append("Mã loại cước không thuộc danh mục chính thức.")
     if row.rule is not None and (not isinstance(row.rule, str) or row.rule not in RULE_CATALOG):
@@ -364,20 +370,21 @@ class ReviewTableModel(QAbstractTableModel):
     COLUMN_NO = 0
     COLUMN_CONT = 1
     COLUMN_BL = 2
-    COLUMN_VESSEL_VOYAGE = 3
-    COLUMN_INVOICE_CONTAINER_COUNT = 4
-    COLUMN_CONTAINER_COUNT_BASIS = 5
-    COLUMN_FEE = 6
-    COLUMN_FEE_NAME = 7
-    COLUMN_RULE = 8
-    COLUMN_RULE_NAME = 9
-    COLUMN_INVOICE_NO = 10
-    COLUMN_INVOICE_DATE = 11
-    COLUMN_CARRIER = 12
-    COLUMN_AMOUNT = 13
-    COLUMN_STATUS = 14
-    COLUMN_MESSAGES = 15
-    COLUMN_LOOKUP_ACTION = 16
+    COLUMN_SQT = 3
+    COLUMN_VESSEL_VOYAGE = 4
+    COLUMN_INVOICE_CONTAINER_COUNT = 5
+    COLUMN_CONTAINER_COUNT_BASIS = 6
+    COLUMN_FEE = 7
+    COLUMN_FEE_NAME = 8
+    COLUMN_RULE = 9
+    COLUMN_RULE_NAME = 10
+    COLUMN_INVOICE_NO = 11
+    COLUMN_INVOICE_DATE = 12
+    COLUMN_CARRIER = 13
+    COLUMN_AMOUNT = 14
+    COLUMN_STATUS = 15
+    COLUMN_MESSAGES = 16
+    COLUMN_LOOKUP_ACTION = 17
 
     ACTION_VISIBLE_ROLE = int(Qt.ItemDataRole.UserRole) + 10
     ACTION_ENABLED_ROLE = int(Qt.ItemDataRole.UserRole) + 11
@@ -388,6 +395,7 @@ class ReviewTableModel(QAbstractTableModel):
         "STT",
         "Container",
         "B/L",
+        "SQT nguồn",
         "Tàu/chuyến",
         "SL cont HĐ",
         "Căn cứ SL",
@@ -496,6 +504,7 @@ class ReviewTableModel(QAbstractTableModel):
             if column in (
                 self.COLUMN_CONT,
                 self.COLUMN_BL,
+                self.COLUMN_SQT,
                 self.COLUMN_INVOICE_NO,
                 self.COLUMN_CARRIER,
             ) and self._raw_value(
@@ -505,6 +514,7 @@ class ReviewTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.TextAlignmentRole:
             if column in (
                 self.COLUMN_NO,
+                self.COLUMN_SQT,
                 self.COLUMN_FEE,
                 self.COLUMN_RULE,
                 self.COLUMN_STATUS,
@@ -522,6 +532,7 @@ class ReviewTableModel(QAbstractTableModel):
             source_row + 1,
             row.cont,
             row.bl,
+            row.sqt,
             " ".join(
                 part
                 for part in (

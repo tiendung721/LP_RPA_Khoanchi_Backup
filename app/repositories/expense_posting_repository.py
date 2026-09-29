@@ -33,6 +33,8 @@ _UPDATABLE_COLUMNS = frozenset(
     {
         "container",
         "bl",
+        "input_sqt",
+        "source_sqt",
         "match_reason",
         "fee_original",
         "fee_selected",
@@ -79,6 +81,8 @@ _POSITIVE_COLUMNS = frozenset(
         "target_column",
         "invoice_target_column",
         "carrier_target_column",
+        "input_sqt",
+        "source_sqt",
     }
 )
 
@@ -120,6 +124,8 @@ class ExpensePostingItemRecord:
     source_item_index: int
     container: str | None
     bl: str | None
+    input_sqt: int | None
+    source_sqt: int | None
     match_reason: str | None
     fee_original: str
     fee_selected: str | None
@@ -188,6 +194,8 @@ class ExpensePostingRepository:
         status: object = "PLANNED",
         container: str | None = None,
         bl: str | None = None,
+        input_sqt: int | None = None,
+        source_sqt: int | None = None,
         match_reason: str | None = None,
         fee_selected: object | None = None,
         rule: object | None = None,
@@ -223,6 +231,8 @@ class ExpensePostingRepository:
                 "source_item_index": source_item_index,
                 "container": container,
                 "bl": bl,
+                "input_sqt": input_sqt,
+                "source_sqt": source_sqt,
                 "match_reason": match_reason,
                 "fee_original": fee_original,
                 "fee_selected": fee_selected,
@@ -679,7 +689,7 @@ class ExpensePostingRepository:
             """
             INSERT INTO expense_posting_items (
                 run_id, batch_id, batch_hash, source_item_index, container, bl,
-                match_reason,
+                input_sqt, source_sqt, match_reason,
                 fee_original, fee_selected, rule, amount, sheet_name,
                 target_row, target_column, target_cell, value_before,
                 value_after, action, invoice_no, invoice_selected,
@@ -691,7 +701,7 @@ class ExpensePostingRepository:
                 status, created_at
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             tuple(
@@ -703,6 +713,8 @@ class ExpensePostingRepository:
                     "source_item_index",
                     "container",
                     "bl",
+                    "input_sqt",
+                    "source_sqt",
                     "match_reason",
                     "fee_original",
                     "fee_selected",
@@ -776,6 +788,8 @@ class ExpensePostingRepository:
 
         target_row = payload.get("target_row")
         target_column = payload.get("target_column")
+        input_sqt = payload.get("input_sqt")
+        source_sqt = payload.get("source_sqt")
         invoice_target_column = payload.get("invoice_target_column")
         carrier_target_column = payload.get("carrier_target_column")
         if target_row is not None:
@@ -785,6 +799,10 @@ class ExpensePostingRepository:
                 target_column,
                 field_name="target_column",
             )
+        if input_sqt is not None:
+            input_sqt = _required_positive_int(input_sqt, field_name="input_sqt")
+        if source_sqt is not None:
+            source_sqt = _required_positive_int(source_sqt, field_name="source_sqt")
         if invoice_target_column is not None:
             invoice_target_column = _required_positive_int(
                 invoice_target_column,
@@ -802,6 +820,8 @@ class ExpensePostingRepository:
             "source_item_index": source_item_index,
             "container": _optional_text(payload.get("container")),
             "bl": _optional_text(payload.get("bl")),
+            "input_sqt": input_sqt,
+            "source_sqt": source_sqt,
             "match_reason": _optional_text(payload.get("match_reason")),
             "fee_original": fee_original,
             "fee_selected": _optional_text(payload.get("fee_selected")),
@@ -843,6 +863,12 @@ class ExpensePostingRepository:
             source_item_index=int(row["source_item_index"]),
             container=row["container"],
             bl=row["bl"],
+            input_sqt=(
+                int(row["input_sqt"]) if row["input_sqt"] is not None else None
+            ),
+            source_sqt=(
+                int(row["source_sqt"]) if row["source_sqt"] is not None else None
+            ),
             match_reason=row["match_reason"],
             fee_original=str(row["fee_original"]),
             fee_selected=row["fee_selected"],

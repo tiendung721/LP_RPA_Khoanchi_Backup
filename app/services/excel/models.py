@@ -103,6 +103,9 @@ class ConflictType(str, Enum):
     FILE_CHANGED = "FILE_CHANGED"
     FILE_LOCKED = "FILE_LOCKED"
     PARTIAL_KEY_MATCH = "PARTIAL_KEY_MATCH"
+    SOURCE_SQT_NOT_FOUND = "SOURCE_SQT_NOT_FOUND"
+    SOURCE_SQT_MISMATCH = "SOURCE_SQT_MISMATCH"
+    BL_MISMATCH = "BL_MISMATCH"
     NEGATIVE_ADJUSTMENT = "NEGATIVE_ADJUSTMENT"
     PAYMENT_SOURCE_INVALID = "PAYMENT_SOURCE_INVALID"
     PAYMENT_CLEAR_VALUE = "PAYMENT_CLEAR_VALUE"
@@ -451,6 +454,7 @@ class PostingItem:
     sheet_name: str | None = None
     selected_source_sheet: str | None = None
     selected_source_row: int | None = None
+    input_sqt: int | None = None
     source_sqt: int | None = None
     plan_values: tuple[Any, ...] = ()
     source_signature: str = ""

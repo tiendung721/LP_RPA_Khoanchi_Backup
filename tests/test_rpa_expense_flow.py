@@ -174,7 +174,7 @@ def test_dialog_keeps_imported_sqt_selectable(qtbot, tmp_path: Path) -> None:
     assert dialog.selected_sqt == ["102"]
 
 
-def test_dialog_filters_groups_and_preserves_hidden_choices(
+def test_dialog_filters_searches_and_selects_all_rows(
     qtbot, tmp_path: Path
 ) -> None:
     bk = tmp_path / "Output" / "BK.xlsx"
@@ -201,27 +201,44 @@ def test_dialog_filters_groups_and_preserves_hidden_choices(
     ]
     assert visible_sqt == ["101"]
 
-    dialog.findChild(QPushButton, "selectVisibleRpaSqtButton").click()
+    dialog.findChild(QPushButton, "selectAllRpaSqtButton").click()
     assert dialog.selected_sqt == ["101", "102"]
     assert "1 chưa nhập, 1 nhập lại" in dialog.selection_summary.text()
 
-    dialog.findChild(QPushButton, "clearVisibleRpaSqtButton").click()
-    assert dialog.selected_sqt == ["102"]
-    assert "0 chưa nhập, 1 nhập lại" in dialog.selection_summary.text()
+    dialog.findChild(QPushButton, "clearAllRpaSqtButton").click()
+    assert dialog.selected_sqt == []
+
+    dialog.filter_buttons[None].click()
+    dialog.sqt_search.setText("02")
+    visible_sqt = [
+        dialog.table.item(row, 1).text()
+        for row in range(dialog.table.rowCount())
+        if not dialog.table.isRowHidden(row)
+    ]
+    assert visible_sqt == ["102"]
+    dialog.sqt_search.clear()
+    assert all(
+        not dialog.table.isRowHidden(row)
+        for row in range(dialog.table.rowCount())
+    )
 
 
-def test_dialog_sorts_money_and_sqt_by_numeric_value(qtbot, tmp_path: Path) -> None:
+def test_dialog_removes_total_column_and_sorts_sqt_by_numeric_value(
+    qtbot, tmp_path: Path
+) -> None:
     bk = tmp_path / "Output" / "BK.xlsx"
     _build_bk(bk)
     plan = RpaExpenseService(_settings(tmp_path, bk)).analyze_sheet("T07 26")
     dialog = RpaSqtSelectionDialog(plan)
     qtbot.addWidget(dialog)
 
-    dialog.sort_combo.setCurrentIndex(dialog.sort_combo.findData("total_asc"))
-    assert [
-        dialog.table.item(row, 1).text()
-        for row in range(dialog.table.rowCount())
-    ] == ["102", "101"]
+    assert "Tổng" not in dialog.COLUMNS
+    assert dialog.table.columnCount() == len(dialog.COLUMNS) == 13
+    assert dialog.sort_combo.findData("total_asc") == -1
+    assert (
+        dialog.table.horizontalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+    )
 
     dialog.sort_combo.setCurrentIndex(dialog.sort_combo.findData("sqt_desc"))
     assert [
@@ -574,9 +591,11 @@ def test_dialog_selects_and_filters_rpa_groups(qtbot, tmp_path: Path) -> None:
     assert visible == {"101"}
     assert dialog.table.item(0, 3).text() == "Chờ nhập QT"
 
-    dialog.findChild(QPushButton, "selectLatestRpaGroupButton").click()
-    assert dialog.selected_sqt == ["102"]
-    dialog.findChild(QPushButton, "selectBothRpaGroupsButton").click()
+    assert dialog.findChild(QPushButton, "selectLatestRpaGroupButton") is None
+    assert dialog.findChild(QPushButton, "selectBothRpaGroupsButton") is None
+    dialog.findChild(QPushButton, "clearAllRpaSqtButton").click()
+    assert dialog.selected_sqt == []
+    dialog.findChild(QPushButton, "selectAllRpaSqtButton").click()
     assert set(dialog.selected_sqt) == {"101", "102"}
 
 

@@ -19,6 +19,7 @@ from app.sea_freight import (
     ContainerRecord,
     GroupStatus,
     SeaFreightReconciliationService,
+    SeaFreightStaleRevisionError,
     SeaFreightRepository,
     ReconciliationSourceSelection,
     VesselVoyageResolutionKind,
@@ -27,6 +28,7 @@ from app.sea_freight import (
     normalize_match_key,
     validate_vessel_voyage,
 )
+from app.sea_freight.vessel_aliases import vessel_voyage_candidate_equivalent
 from app.ui.sea_freight_center import (
     ReconciliationSourceManagerDialog,
     SeaFreightReconciliationDialog,
@@ -126,6 +128,39 @@ def test_vessel_voyage_normalization_keeps_voyage_letters() -> None:
     assert validate_vessel_voyage(
         "AI ĐỌC SAI", "PHUC KHANH", "V.424S"
     ) == ("PHUCKHANH", "V424S", "PHUCKHANHV424S")
+
+
+@pytest.mark.parametrize(
+    ("vessel_name", "voyage_no", "bk_value"),
+    [
+        ("PHUC KHANH", "424S", "PHÚC KHANH V.424S"),
+        ("VSICO PROMOTE", "2625S", "VSC PROMOTE 2625S"),
+        ("BIEN DONG MARINE", "2632S", "BIENDONG MARINER MB2632S"),
+        ("HAIAN", "2626S", "HAI AN 2626S"),
+    ],
+)
+def test_vessel_voyage_aliases_cover_controlled_real_world_variants(
+    vessel_name: str,
+    voyage_no: str,
+    bk_value: str,
+) -> None:
+    assert vessel_voyage_candidate_equivalent(vessel_name, voyage_no, bk_value)
+
+
+@pytest.mark.parametrize(
+    ("vessel_name", "voyage_no", "bk_value"),
+    [
+        ("PHUC KHANH", "424S", "PHUC KHANH 425S"),
+        ("PROSPER", "V2625S", "PROSPER MB2625S"),
+        ("VSICO PROMOTE", "2625S", "VSC PROMOTE 2625N"),
+    ],
+)
+def test_vessel_voyage_aliases_do_not_fuzzy_match_different_voyages(
+    vessel_name: str,
+    voyage_no: str,
+    bk_value: str,
+) -> None:
+    assert not vessel_voyage_candidate_equivalent(vessel_name, voyage_no, bk_value)
 
 
 def test_vessel_not_found_does_not_create_empty_group(tmp_path: Path) -> None:
@@ -1684,6 +1719,74 @@ def test_completed_group_revision_uses_current_bk_without_old_row_mapping(
         64,
     ]
     assert matcher.requested_paths[-1] == str(current_bk.resolve())
+    database.close()
+
+
+def test_same_voyage_reuses_current_group_when_bk_path_changes(tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.db")
+    repository = SeaFreightRepository(database)
+    old_snapshot = replace(
+        _snapshot(tmp_path, count=2, fingerprint="old-fp"),
+        bk_path=str((tmp_path / "old" / "BK.xlsx").resolve()),
+    )
+    current_snapshot = replace(
+        old_snapshot,
+        bk_path=str((tmp_path / "current" / "BK.xlsx").resolve()),
+        workbook_fingerprint="current-fp",
+        snapshot_hash="current-snapshot",
+    )
+
+    original = repository.upsert_snapshot(old_snapshot, month=7, year=2026)
+    refreshed = repository.upsert_snapshot(current_snapshot, month=7, year=2026)
+
+    assert refreshed.id == original.id
+    assert refreshed.case_id == original.case_id
+    assert refreshed.bk_path == current_snapshot.bk_path
+    assert len(repository.list_groups()) == 1
+    database.close()
+
+
+def test_old_revision_redirects_to_current_revision_across_bk_paths(
+    tmp_path: Path,
+) -> None:
+    old_bk = tmp_path / "old" / "BK.xlsx"
+    current_bk = tmp_path / "current" / "BK.xlsx"
+    old_snapshot = replace(
+        _snapshot(tmp_path, count=2, fingerprint="old-fp"),
+        bk_path=str(old_bk.resolve()),
+    )
+    current_snapshot = replace(
+        old_snapshot,
+        bk_path=str(current_bk.resolve()),
+        workbook_fingerprint="current-fp",
+        snapshot_hash="current-snapshot",
+    )
+    matcher = _WorkbookAwareMatcher(
+        {str(old_bk): old_snapshot, str(current_bk): current_snapshot}
+    )
+    database = Database(tmp_path / "state.db")
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(repository, matcher=matcher)
+    original = service.open_or_create(
+        _row(2, 101, "INV-STALE"),
+        bk_path=old_bk,
+        month=7,
+        year=2026,
+        source_batch_id=None,
+        source_item_index=0,
+        source_sha256="source",
+    )
+    repository.mark_allocated(original.id)
+    revised = service.create_revision(original.id, bk_path=current_bk)
+
+    with pytest.raises(SeaFreightStaleRevisionError) as caught:
+        service.create_revision(original.id, bk_path=current_bk)
+
+    assert caught.value.current_group_id == revised.id
+    assert [item.id for item in repository.list_revisions(revised.id)] == [
+        revised.id,
+        original.id,
+    ]
     database.close()
 
 

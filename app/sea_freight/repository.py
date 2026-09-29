@@ -26,6 +26,14 @@ class DuplicateContributionError(ValueError):
     pass
 
 
+class StaleRevisionError(ValueError):
+    def __init__(self, current_group_id: int) -> None:
+        self.current_group_id = current_group_id
+        super().__init__(
+            f"Hồ sơ đã có phiên hiện hành #{current_group_id}."
+        )
+
+
 class SeaFreightRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -38,31 +46,46 @@ class SeaFreightRepository:
         return self._group(row) if row is not None else None
 
     def find_open_group(
-        self, bk_path: str, bk_sheet: str, vessel_key: str, voyage_key: str
+        self, vessel_key: str, voyage_key: str
     ) -> ReconciliationGroup | None:
         row = self.database.query_one(
             """
-            SELECT * FROM sea_freight_reconciliation_groups
-            WHERE bk_path = ? AND bk_sheet = ? AND vessel_key = ? AND voyage_key = ?
+            SELECT g.*
+            FROM sea_freight_reconciliation_groups AS g
+            JOIN sea_freight_reconciliation_cases AS c ON c.id = g.case_id
+            WHERE c.vessel_key = ? AND c.voyage_key = ?
               AND is_current = 1
               AND status NOT IN ('POSTED','CANCELLED')
-            ORDER BY id DESC LIMIT 1
+            ORDER BY g.id DESC LIMIT 1
             """,
-            (bk_path, bk_sheet, vessel_key, voyage_key),
+            (vessel_key, voyage_key),
         )
         return self._group(row) if row is not None else None
 
     def find_latest_group(
-        self, bk_path: str, bk_sheet: str, vessel_key: str, voyage_key: str
+        self, vessel_key: str, voyage_key: str
     ) -> ReconciliationGroup | None:
         row = self.database.query_one(
             """
+            SELECT g.*
+            FROM sea_freight_reconciliation_groups AS g
+            JOIN sea_freight_reconciliation_cases AS c ON c.id = g.case_id
+            WHERE c.vessel_key = ? AND c.voyage_key = ?
+              AND g.is_current = 1
+            ORDER BY g.id DESC LIMIT 1
+            """,
+            (vessel_key, voyage_key),
+        )
+        return self._group(row) if row is not None else None
+
+    def get_current_group_for_case(self, case_id: int) -> ReconciliationGroup | None:
+        row = self.database.query_one(
+            """
             SELECT * FROM sea_freight_reconciliation_groups
-            WHERE bk_path = ? AND bk_sheet = ? AND vessel_key = ? AND voyage_key = ?
-              AND is_current = 1
+            WHERE case_id = ? AND is_current = 1
             ORDER BY id DESC LIMIT 1
             """,
-            (bk_path, bk_sheet, vessel_key, voyage_key),
+            (case_id,),
         )
         return self._group(row) if row is not None else None
 
@@ -222,38 +245,62 @@ class SeaFreightRepository:
     ) -> ReconciliationGroup:
         timestamp = _now()
         with self.database.transaction(immediate=True) as connection:
+            case_id = self._ensure_case(
+                connection,
+                snapshot.vessel_key,
+                snapshot.voyage_key,
+                timestamp,
+            )
             row = connection.execute(
                 """
                 SELECT * FROM sea_freight_reconciliation_groups
-                WHERE bk_path = ? AND bk_sheet = ? AND vessel_key = ? AND voyage_key = ?
+                WHERE case_id = ?
                   AND is_current = 1
                   AND status != 'CANCELLED'
                 ORDER BY id DESC LIMIT 1
                 """,
-                (
-                    snapshot.bk_path,
-                    snapshot.bk_sheet,
-                    snapshot.vessel_key,
-                    snapshot.voyage_key,
-                ),
+                (case_id,),
             ).fetchone()
             if row is not None and str(row["status"]) in {"ALLOCATED", "POSTED"}:
                 return self._group(row)
             created = row is None
             if row is None:
+                previous = connection.execute(
+                    """
+                    SELECT id, revision_no
+                    FROM sea_freight_reconciliation_groups
+                    WHERE case_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (case_id,),
+                ).fetchone()
+                revision_no = (
+                    int(
+                        connection.execute(
+                            "SELECT COALESCE(MAX(revision_no), 0) + 1 "
+                            "FROM sea_freight_reconciliation_groups WHERE case_id = ?",
+                            (case_id,),
+                        ).fetchone()[0]
+                    )
+                    if previous is not None
+                    else 1
+                )
                 cursor = connection.execute(
                     """
                     INSERT INTO sea_freight_reconciliation_groups(
-                        bk_path, bk_sheet, vessel_voyage_raw, vessel_key,
+                        case_id, bk_path, bk_sheet, vessel_voyage_raw, vessel_key,
                         voyage_key, combined_key, bk_container_count,
                         received_container_count, total_amount, status,
                         bk_fingerprint, container_snapshot_hash,
                         reconciliation_month, reconciliation_year, bk_issue,
                         bk_invalid_container_count, bk_duplicate_container_count,
+                        revision_no, supersedes_group_id,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        case_id,
                         snapshot.bk_path,
                         snapshot.bk_sheet,
                         snapshot.vessel_voyage_raw,
@@ -271,6 +318,8 @@ class SeaFreightRepository:
                         bk_issue,
                         snapshot.invalid_container_count,
                         snapshot.duplicate_container_count,
+                        revision_no,
+                        int(previous["id"]) if previous is not None else None,
                         timestamp,
                         timestamp,
                     ),
@@ -281,7 +330,8 @@ class SeaFreightRepository:
                 connection.execute(
                     """
                     UPDATE sea_freight_reconciliation_groups
-                    SET vessel_voyage_raw = ?, combined_key = ?,
+                    SET bk_path = ?, bk_sheet = ?, vessel_voyage_raw = ?,
+                        vessel_key = ?, voyage_key = ?, combined_key = ?,
                         bk_container_count = ?, bk_fingerprint = ?,
                         container_snapshot_hash = ?,
                         reconciliation_month = COALESCE(?, reconciliation_month),
@@ -291,7 +341,11 @@ class SeaFreightRepository:
                     WHERE id = ?
                     """,
                     (
+                        snapshot.bk_path,
+                        snapshot.bk_sheet,
                         snapshot.vessel_voyage_raw,
+                        snapshot.vessel_key,
+                        snapshot.voyage_key,
                         snapshot.combined_key,
                         snapshot.container_count,
                         snapshot.workbook_fingerprint,
@@ -346,10 +400,16 @@ class SeaFreightRepository:
     ) -> ReconciliationGroup:
         timestamp = _now()
         with self.database.transaction(immediate=True) as connection:
+            case_id = self._ensure_case(
+                connection,
+                snapshot.vessel_key,
+                snapshot.voyage_key,
+                timestamp,
+            )
             cursor = connection.execute(
                 """
                 UPDATE sea_freight_reconciliation_groups
-                SET bk_path = ?, bk_sheet = ?, vessel_voyage_raw = ?,
+                SET case_id = ?, bk_path = ?, bk_sheet = ?, vessel_voyage_raw = ?,
                     vessel_key = ?, voyage_key = ?, combined_key = ?,
                     bk_container_count = ?, bk_fingerprint = ?,
                     container_snapshot_hash = ?, bk_invalid_container_count = ?,
@@ -357,7 +417,7 @@ class SeaFreightRepository:
                 WHERE id = ? AND status NOT IN ('ALLOCATED','POSTED','CANCELLED')
                 """,
                 (
-                    snapshot.bk_path, snapshot.bk_sheet, snapshot.vessel_voyage_raw,
+                    case_id, snapshot.bk_path, snapshot.bk_sheet, snapshot.vessel_voyage_raw,
                     snapshot.vessel_key, snapshot.voyage_key, snapshot.combined_key,
                     snapshot.container_count, snapshot.workbook_fingerprint,
                     snapshot.snapshot_hash, snapshot.invalid_container_count,
@@ -1038,6 +1098,12 @@ class SeaFreightRepository:
         primary_snapshot = snapshots[0]
         timestamp = _now()
         with self.database.transaction(immediate=True) as connection:
+            case_id = self._ensure_case(
+                connection,
+                primary_snapshot.vessel_key,
+                primary_snapshot.voyage_key,
+                timestamp,
+            )
             group = connection.execute(
                 "SELECT status FROM sea_freight_reconciliation_groups WHERE id = ?",
                 (group_id,),
@@ -1155,10 +1221,11 @@ class SeaFreightRepository:
             connection.execute(
                 """
                 UPDATE sea_freight_reconciliation_groups
-                SET bk_path = ?, bk_fingerprint = ?, updated_at = ?
+                SET case_id = ?, bk_path = ?, bk_fingerprint = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
+                    case_id,
                     primary_snapshot.bk_path,
                     primary_snapshot.workbook_fingerprint,
                     timestamp,
@@ -1473,10 +1540,10 @@ class SeaFreightRepository:
             for row in self.database.query_all(
                 """
                 SELECT * FROM sea_freight_reconciliation_groups
-                WHERE bk_path = ? AND bk_sheet = ? AND vessel_key = ? AND voyage_key = ?
-                ORDER BY revision_no DESC, id DESC
+                WHERE case_id = ?
+                ORDER BY created_at DESC, id DESC
                 """,
-                (current.bk_path, current.bk_sheet, current.vessel_key, current.voyage_key),
+                (current.case_id,),
             )
         ]
 
@@ -1495,10 +1562,31 @@ class SeaFreightRepository:
             ).fetchone()
             if old is None:
                 raise KeyError("Không tìm thấy hồ sơ đối soát.")
-            if not bool(old["is_current"]):
-                raise ValueError("Chỉ có thể chạy lại phiên đối soát hiện hành.")
+            current = connection.execute(
+                """
+                SELECT id
+                FROM sea_freight_reconciliation_groups
+                WHERE case_id = ? AND is_current = 1
+                ORDER BY id DESC LIMIT 1
+                """,
+                (int(old["case_id"]),),
+            ).fetchone()
+            if current is None or int(current["id"]) != group_id:
+                if current is not None:
+                    raise StaleRevisionError(int(current["id"]))
+                raise ValueError("Hồ sơ không còn phiên hiện hành.")
             if str(old["status"]) not in {"ALLOCATED", "POSTED"}:
                 raise ValueError("Hồ sơ chưa hoàn tất nên không cần tạo phiên mới.")
+            next_revision_no = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(MAX(revision_no), 0) + 1
+                    FROM sea_freight_reconciliation_groups
+                    WHERE case_id = ?
+                    """,
+                    (int(old["case_id"]),),
+                ).fetchone()[0]
+            )
             connection.execute(
                 "UPDATE sea_freight_reconciliation_groups SET is_current = 0 WHERE id = ?",
                 (group_id,),
@@ -1511,7 +1599,7 @@ class SeaFreightRepository:
             cursor = connection.execute(
                 """
                 INSERT INTO sea_freight_reconciliation_groups(
-                    bk_path, bk_sheet, vessel_voyage_raw, vessel_key, voyage_key,
+                    case_id, bk_path, bk_sheet, vessel_voyage_raw, vessel_key, voyage_key,
                     combined_key, bk_container_count, received_container_count,
                     total_amount, status, bk_fingerprint, container_snapshot_hash,
                     output_carrier, invoice_conflict_accepted,
@@ -1520,17 +1608,18 @@ class SeaFreightRepository:
                     revision_no, supersedes_group_id, is_current,
                     primary_source_batch_id, primary_source_item_index,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'PENDING', ?, ?, ?, 0,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'PENDING', ?, ?, ?, 0,
                           ?, ?, NULL, ?, ?, ?, ?, 1, ?, ?, ?, ?)
                 """,
                 (
+                    int(old["case_id"]),
                     snapshot.bk_path, snapshot.bk_sheet, snapshot.vessel_voyage_raw,
                     snapshot.vessel_key, snapshot.voyage_key, snapshot.combined_key,
                     snapshot.container_count, snapshot.workbook_fingerprint,
                     snapshot.snapshot_hash, old["output_carrier"],
                     old["reconciliation_month"], old["reconciliation_year"],
                     snapshot.invalid_container_count, snapshot.duplicate_container_count,
-                    int(old["revision_no"] or 1) + 1, group_id,
+                    next_revision_no, group_id,
                     old["primary_source_batch_id"], old["primary_source_item_index"],
                     timestamp, timestamp,
                 ),
@@ -1901,9 +1990,42 @@ class SeaFreightRepository:
         )
 
     @staticmethod
+    def _ensure_case(
+        connection: Any,
+        vessel_key: str,
+        voyage_key: str,
+        timestamp: str,
+    ) -> int:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO sea_freight_reconciliation_cases(
+                vessel_key, voyage_key, created_at, updated_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (vessel_key, voyage_key, timestamp, timestamp),
+        )
+        row = connection.execute(
+            """
+            SELECT id
+            FROM sea_freight_reconciliation_cases
+            WHERE vessel_key = ? AND voyage_key = ?
+            """,
+            (vessel_key, voyage_key),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Không thể xác định hồ sơ tàu/chuyến.")
+        case_id = int(row["id"])
+        connection.execute(
+            "UPDATE sea_freight_reconciliation_cases SET updated_at = ? WHERE id = ?",
+            (timestamp, case_id),
+        )
+        return case_id
+
+    @staticmethod
     def _group(row: Any) -> ReconciliationGroup:
         return ReconciliationGroup(
             id=int(row["id"]),
+            case_id=int(row["case_id"]),
             bk_path=str(row["bk_path"]),
             bk_sheet=str(row["bk_sheet"]),
             vessel_voyage_raw=str(row["vessel_voyage_raw"]),

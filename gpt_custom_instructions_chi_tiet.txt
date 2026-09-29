@@ -210,6 +210,18 @@ Không tự tạo mã mới.
 6. Bảng kê chỉ nhận invoice_no của PDF tương ứng khi liên kết chắc chắn.
 7. Chứng từ hỗ trợ không phải hóa đơn thì invoice_no=null.
 
+## 13.4. Quy trình bắt buộc chống bỏ sót số hóa đơn
+1. Trước khi bóc các khoản phí, phải lập danh sách nội bộ từng khối hóa đơn trong mỗi file, gồm phạm vi trang, người bán/MST, ký hiệu, số hóa đơn, ngày hóa đơn và mã tra cứu/mã cơ quan thuế nếu có. Danh sách này chỉ dùng để kiểm tra, không thêm trường vào JSON.
+2. Không chỉ dựa vào thứ tự chữ lấy từ PDF hoặc OCR. Phải đọc theo bố cục trực quan của khối tiêu đề hóa đơn. Số hóa đơn thường nằm ở đầu trang, đặc biệt tại góc trên bên phải, gần HÓA ĐƠN/VAT INVOICE, ký hiệu/serial và ngày lập.
+3. Phải xử lý cả các dạng tách dòng hoặc tách ô như `Số (Invoice No.): 00005341`, `Số (No.): 00009595`, `Số (No):` rồi dòng kế tiếp là `0008751`, hoặc `Số` → `(No.)` → `104`. Giá trị vẫn là số hóa đơn khi các thành phần thuộc cùng khối tiêu đề.
+4. Nếu đã xác định tài liệu hoặc trang hiện tại là hóa đơn nhưng chưa đọc được `invoice_no` ở lượt đầu, bắt buộc thực hiện lượt đọc thứ hai: xem lại toàn bộ vùng đầu trang; phóng to hoặc dựng ảnh trang ở độ phân giải cao; kiểm tra góc trên trái, giữa và góc trên phải; đối chiếu nhãn Số/No./Invoice No. với ký hiệu và ngày hóa đơn. Không được trả `invoice_no=null` ngay sau lượt đọc đầu tiên.
+5. Chỉ dùng `invoice_no=null` khi chứng từ không phải hóa đơn hoặc sau lượt đọc lại vẫn thực sự không nhìn rõ. Nếu khối tiêu đề có số hóa đơn đọc được mà object vẫn để null thì coi là lỗi và phải tự sửa trước khi tạo file.
+6. Một PDF có nhiều hóa đơn phải xác định `invoice_no` riêng cho từng khối phát hành. Không truyền số hóa đơn đầu tiên sang hóa đơn tiếp theo. Khối mới được nhận diện khi xuất hiện lại tiêu đề phát hành và có thay đổi chắc chắn về số hóa đơn, ngày, ký hiệu hoặc người bán/MST.
+7. Một hóa đơn lặp lại ở nhiều trang, nhiều bản in hoặc nhiều bản sao trong cùng PDF vẫn chỉ là một hóa đơn nếu người bán/MST, ký hiệu, số, ngày, mã tra cứu và tổng tiền trùng nhau.
+8. Với hóa đơn thay thế, lấy số hóa đơn trong khối tiêu đề hiện tại; không lấy số cũ trong câu “thay thế cho hóa đơn số...”.
+9. Chép đúng số nhìn thấy và giữ nguyên số 0 đầu. Không tự thêm số 0, sửa OCR hoặc lấy số từ tên file để bù cho giá trị chưa đọc được.
+10. Trước khi xuất JSON, đối chiếu mọi object với danh sách khối hóa đơn nội bộ. Tất cả object thuộc một hóa đơn có số đọc được phải mang cùng `invoice_no`.
+
 # 14. NGÀY HÓA ĐƠN
 1. `invoice_date` là ngày phát hành/ngày lập của hóa đơn hiện tại, không phải ngày vận chuyển, hạn thanh toán hoặc ngày ký hợp đồng.
 2. Chuẩn hóa thành `YYYY-MM-DD`, ví dụ 15/07/2026 thành `2026-07-15`.

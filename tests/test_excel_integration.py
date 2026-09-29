@@ -111,6 +111,12 @@ class _ReadyProvider:
         return self.path
 
 
+class _BangKeProvider(_ReadyProvider):
+    repository = SimpleNamespace(
+        get_by_id=lambda _batch_id: SimpleNamespace(source_kind="BANG_KE")
+    )
+
+
 class _PostedIndexRepository:
     def __init__(self, indices: set[int]) -> None:
         self.indices = indices
@@ -258,6 +264,34 @@ def _save_ready(path: Path, rows: Iterable[Iterable[Any]]) -> None:
         normalized_rows.append(values)
     path.write_text(
         json.dumps({"v": 1, "d": normalized_rows}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _save_bang_ke_ready(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    defaults = {
+        "source_document_id": "BANG_KE_001",
+        "source_document_name": "bang_ke.xlsx",
+        "sqt": None,
+        "container": None,
+        "bl": None,
+        "vessel_voyage_raw": None,
+        "vessel_name": None,
+        "voyage_no": None,
+        "invoice_container_count": None,
+        "container_count_basis": "UNKNOWN",
+        "fee": "VSDL",
+        "rule": "GV",
+        "invoice_no": None,
+        "invoice_date": None,
+        "carrier": None,
+        "amount": 100,
+    }
+    path.write_text(
+        json.dumps(
+            {"v": 4, "d": [{**defaults, **row} for row in rows]},
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -414,9 +448,10 @@ def test_posting_reader_accepts_v1_review_fields_without_using_them_for_amount(
             "rule": "CV",
             "invoice_no": "000130/HD",
             "invoice_date": None,
-            "carrier": "Vận tải ABC",
-            "amount": 2_484_000,
-        }
+                "carrier": "Vận tải ABC",
+                "amount": 2_484_000,
+                "input_sqt": None,
+            }
     ]
 
 
@@ -551,6 +586,211 @@ def test_bang_ke_posts_across_sheets_ensures_gia_han_and_adds_negative(
         assert workbook["T04 26"].cell(2, 39).value == 150_000
     finally:
         workbook.close()
+
+
+def test_bang_ke_unique_container_matches_without_vessel_confirmation(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "bang-ke.json"
+    target = tmp_path / "BK.xlsx"
+    container = "DRYU3026167"
+    _save_bang_ke_ready(
+        ready,
+        [{
+            "container": container,
+            "vessel_name": "PHUC KHANH",
+            "voyage_no": "425S",
+            "vessel_voyage_raw": "PHUC KHANH 425S",
+        }],
+    )
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(sheet, 2, sqt=702, container=container, closing_date="2026-07-01")
+    sheet.cell(2, 7).value = None
+    workbook.save(target)
+    workbook.close()
+
+    service = ExpensePostingService(_BangKeProvider(ready), bk_path=target)
+    plan = service.analyze(batch_id=1)
+
+    assert not plan.conflicts
+    assert plan.items[0].source_sqt == 702
+    assert plan.items[0].match_reason == "UNIQUE_CONTAINER"
+
+
+def test_bang_ke_duplicate_container_uses_bl_before_vessel(tmp_path: Path) -> None:
+    ready = tmp_path / "bang-ke.json"
+    target = tmp_path / "BK.xlsx"
+    container = "DRYU3026167"
+    _save_bang_ke_ready(
+        ready,
+        [{"container": container, "bl": "vs 2607-1443"}],
+    )
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(
+        sheet, 2, sqt=701, container=container,
+        closing_date="2026-07-01", bl="VS26070001",
+    )
+    _add_full_plan_row(
+        sheet, 3, sqt=702, container=container,
+        closing_date="2026-07-02", bl="VS26071443",
+    )
+    workbook.save(target)
+    workbook.close()
+
+    plan = ExpensePostingService(_BangKeProvider(ready), bk_path=target).analyze(
+        batch_id=1
+    )
+
+    assert not plan.conflicts
+    assert plan.items[0].target_row == 3
+    assert plan.items[0].source_sqt == 702
+    assert plan.items[0].match_reason == "CONTAINER_BL"
+
+
+def test_bang_ke_source_sqt_has_highest_priority(tmp_path: Path) -> None:
+    ready = tmp_path / "bang-ke.json"
+    target = tmp_path / "BK.xlsx"
+    container = "DRYU3026167"
+    _save_bang_ke_ready(
+        ready,
+        [{"sqt": 702, "container": container, "vessel_name": "SAI", "voyage_no": "1S"}],
+    )
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(sheet, 2, sqt=701, container=container, closing_date="2026-07-01")
+    _add_full_plan_row(sheet, 3, sqt=702, container=container, closing_date="2026-07-02")
+    workbook.save(target)
+    workbook.close()
+
+    plan = ExpensePostingService(_BangKeProvider(ready), bk_path=target).analyze(
+        batch_id=1
+    )
+
+    assert not plan.conflicts
+    assert plan.items[0].input_sqt == 702
+    assert plan.items[0].target_row == 3
+    assert plan.items[0].match_reason == "INPUT_SQT"
+
+
+def test_bang_ke_source_sqt_wins_even_if_container_text_differs(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "bang-ke.json"
+    target = tmp_path / "BK.xlsx"
+    _save_bang_ke_ready(
+        ready,
+        [{"sqt": 702, "container": "WRONG0000000"}],
+    )
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(
+        sheet,
+        2,
+        sqt=702,
+        container="DRYU3026167",
+        closing_date="2026-07-01",
+    )
+    workbook.save(target)
+    workbook.close()
+
+    plan = ExpensePostingService(_BangKeProvider(ready), bk_path=target).analyze(
+        batch_id=1
+    )
+
+    assert not plan.conflicts
+    assert plan.items[0].target_row == 2
+    assert plan.items[0].match_reason == "INPUT_SQT"
+
+
+def test_bang_ke_missing_source_sqt_does_not_fall_back_silently(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "bang-ke.json"
+    target = tmp_path / "BK.xlsx"
+    container = "DRYU3026167"
+    _save_bang_ke_ready(ready, [{"sqt": 999, "container": container}])
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(
+        sheet,
+        2,
+        sqt=702,
+        container=container,
+        closing_date="2026-07-01",
+    )
+    workbook.save(target)
+    workbook.close()
+
+    plan = ExpensePostingService(_BangKeProvider(ready), bk_path=target).analyze(
+        batch_id=1
+    )
+
+    assert len(plan.conflicts) == 1
+    assert plan.conflicts[0].conflict_type is ConflictType.SOURCE_SQT_NOT_FOUND
+    assert plan.conflicts[0].sqt == 999
+
+
+def test_bang_ke_duplicate_container_rejects_known_bl_mismatch(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "bang-ke.json"
+    target = tmp_path / "BK.xlsx"
+    container = "DRYU3026167"
+    _save_bang_ke_ready(ready, [{"container": container, "bl": "BL-NOT-FOUND"}])
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(
+        sheet, 2, sqt=701, container=container,
+        closing_date="2026-07-01", bl="BL-ONE",
+    )
+    _add_full_plan_row(
+        sheet, 3, sqt=702, container=container,
+        closing_date="2026-07-02", bl="BL-TWO",
+    )
+    workbook.save(target)
+    workbook.close()
+
+    plan = ExpensePostingService(_BangKeProvider(ready), bk_path=target).analyze(
+        batch_id=1
+    )
+
+    assert len(plan.conflicts) == 1
+    assert plan.conflicts[0].conflict_type is ConflictType.BL_MISMATCH
+
+
+def test_bang_ke_vessel_alias_disambiguates_duplicate_container(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "bang-ke.json"
+    target = tmp_path / "BK.xlsx"
+    container = "VIMU2242689"
+    _save_bang_ke_ready(
+        ready,
+        [{
+            "container": container,
+            "vessel_voyage_raw": "BIENDONG MARINER 2625S",
+            "vessel_name": "BIENDONG MARINER",
+            "voyage_no": "2625S",
+        }],
+    )
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T07 26")
+    _add_full_plan_row(sheet, 2, sqt=685, container=container, closing_date="2026-07-01")
+    sheet.cell(2, 7).value = "VIMC PIONEER VPN2619S"
+    _add_full_plan_row(sheet, 3, sqt=741, container=container, closing_date="2026-07-02")
+    sheet.cell(3, 7).value = "BIENDONG MARINER MB2625S"
+    workbook.save(target)
+    workbook.close()
+
+    plan = ExpensePostingService(_BangKeProvider(ready), bk_path=target).analyze(
+        batch_id=1
+    )
+
+    assert not plan.conflicts
+    assert plan.items[0].source_sqt == 741
+    assert plan.items[0].match_reason == "CONTAINER_VESSEL_ALIAS"
 
 
 def _posting_service(

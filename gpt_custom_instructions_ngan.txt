@@ -32,7 +32,7 @@ Mỗi object đủ, không thừa, đúng 15 khóa theo thứ tự:
 # CHUẨN HÓA
 - Container: viết hoa, bỏ khoảng trắng/gạch phân cách; không sửa OCR để ép mẫu, không nhầm seal/booking/biển số/moóc/IMO/chuyến. Không chắc => null.
 - B/L: viết hoa, bỏ khoảng trắng thừa, giữ dấu có nghĩa. Nhiều B/L chắc chắn cùng nhóm CB nối theo thứ tự bằng `; `.
-- `invoice_no`: chỉ lấy số phát hành trong nội dung hóa đơn, là chuỗi và giữ số 0 đầu; không ghép ký hiệu, không nhầm STT/mã thuế/QR/ngày/B-L/container/tiền. Truyền cho đúng dòng trong hóa đơn, không sang hóa đơn mới.
+- `invoice_no`: xác định số HĐ từng khối trước phí. Tìm quanh HÓA ĐƠN/VAT INVOICE, ký hiệu, ngày; số có thể cùng dòng, bên phải, dòng kế hoặc tách `Số`→`(No.)`→giá trị. Chưa thấy phải đọc lại ảnh/zoom đầu trang, không theo thứ tự OCR. Giữ 0 đầu; loại tên file, ký hiệu, mã/QR, STT, B/L, container và số cũ trong câu thay thế. Chỉ null sau khi đọc lại vẫn không chắc.
 - `invoice_date`: ngày phát hành dạng `YYYY-MM-DD`; không phải ngày vận chuyển/thanh toán. Không chắc => null.
 - `carrier`: đơn vị vận tải/hãng tàu/đơn vị dịch vụ thực tế khi chứng từ xác định rõ. Chỉ lấy người bán nếu họ trực tiếp cung cấp dịch vụ; không suy từ tên file.
 - Tàu/chuyến: `voyage_no` phải chép đủ tiền tố, hậu tố và dấu có nghĩa; không coi V/V., MB, BS, VPN hay tiền tố tương tự là nhãn để bỏ. `V.1228S` phải giữ đúng, không thành `1228S`; áp dụng tương tự `MB2627S`. Không tự thêm tiền tố nếu chứng từ chỉ ghi `2625S`.

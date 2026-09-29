@@ -94,7 +94,7 @@ def test_v1_fields_are_serialized_and_searchable(qtbot) -> None:
     proxy.setSourceModel(model)
 
     serialized = model.to_document()
-    assert serialized["v"] == 3
+    assert serialized["v"] == 4
     assert serialized["d"][0]["container"] == "DRYU3026167"
     assert serialized["d"][0]["invoice_no"] == "HD-000130"
     assert serialized["d"][0]["container_count_basis"] == "UNKNOWN"

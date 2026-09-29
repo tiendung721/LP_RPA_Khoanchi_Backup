@@ -32,6 +32,7 @@ from app.sea_freight.contracts import (
     ReconciliationSourceSelection,
     group_status_text,
 )
+from app.sea_freight.service import SeaFreightStaleRevisionError
 
 from .app_dialog import AppDialog
 
@@ -410,6 +411,18 @@ class SeaFreightReconciliationDialog(AppDialog):
         ).casefold()
 
     def _refresh_bk_path_warning(self, group: Any) -> None:
+        current_group = self.service.repository.get_current_group_for_case(group.case_id)
+        if current_group is not None and current_group.id != group.id:
+            self.bk_path_warning_label.setText(
+                f"⚠ Bạn đang xem lần {group.revision_no}. "
+                f"Phiên hiện hành là lần {current_group.revision_no}."
+            )
+            self.bk_path_warning_label.setToolTip(
+                f"Hồ sơ đang xem: #{group.id}\n"
+                f"Hồ sơ hiện hành: #{current_group.id}"
+            )
+            self.bk_path_warning_label.show()
+            return
         current_path = self._current_bk_path()
         if current_path is None or self._same_bk_path(group.bk_path, current_path):
             self.bk_path_warning_label.clear()
@@ -422,11 +435,10 @@ class SeaFreightReconciliationDialog(AppDialog):
             if group.status in {GroupStatus.ALLOCATED, GroupStatus.POSTED}
             else "Đọc lại BK"
         )
-        old_name = Path(group.bk_path).name or str(group.bk_path)
-        current_name = Path(current_path).name or current_path
         self.bk_path_warning_label.setText(
-            f"⚠ Hồ sơ được lập từ {old_name}, nhưng BK hiện tại là {current_name}. "
-            f"Bấm {action} để cập nhật theo BK hiện tại."
+            "⚠ Vị trí file BK đã thay đổi. "
+            f"Từ: {group.bk_path} — Hiện tại: {current_path}. "
+            f"Bấm {action} để đọc lại file hiện tại."
         )
         self.bk_path_warning_label.setToolTip(
             f"BK của hồ sơ: {group.bk_path}\nBK hiện tại: {current_path}"
@@ -461,13 +473,24 @@ class SeaFreightReconciliationDialog(AppDialog):
             self._load_containers(self.service.repository.list_container_rows(group_id))
             self._refresh_summary(group)
             self._refresh_bk_path_warning(group)
+            current_group = self.service.repository.get_current_group_for_case(
+                group.case_id
+            )
+            is_stale = current_group is not None and current_group.id != group.id
             locked = (
                 not group.is_current
                 or group.status in {GroupStatus.ALLOCATED, GroupStatus.POSTED, GroupStatus.CANCELLED}
             )
             self._set_editable(not locked)
+            self.rerun_button.setText(
+                "Mở phiên hiện hành" if is_stale else "Đối soát lại"
+            )
             self.rerun_button.setEnabled(
-                group.is_current and group.status in {GroupStatus.ALLOCATED, GroupStatus.POSTED}
+                is_stale
+                or (
+                    group.is_current
+                    and group.status in {GroupStatus.ALLOCATED, GroupStatus.POSTED}
+                )
             )
         finally:
             self._loading = False
@@ -795,6 +818,15 @@ class SeaFreightReconciliationDialog(AppDialog):
         group = self.service.repository.get_group(self.group_id)
         if group is None:
             return
+        current_group = self.service.repository.get_current_group_for_case(group.case_id)
+        if current_group is not None and current_group.id != group.id:
+            QMessageBox.information(
+                self,
+                "Mở phiên hiện hành",
+                f"Hồ sơ này đã có phiên hiện hành lần {current_group.revision_no}.",
+            )
+            self.load_group(current_group.id)
+            return
         detail = (
             "Kết quả hiện tại đã được ghi vào BK. Phiên mới sẽ không tự ghi đè; "
             "mọi ô có dữ liệu khác phải được xác nhận thủ công.\n\n"
@@ -815,6 +847,10 @@ class SeaFreightReconciliationDialog(AppDialog):
                 group.id,
                 bk_path=self._current_bk_path(),
             )
+        except SeaFreightStaleRevisionError as exc:
+            QMessageBox.information(self, "Mở phiên hiện hành", str(exc))
+            self.load_group(exc.current_group_id)
+            return
         except Exception as exc:
             QMessageBox.warning(self, "Không thể đối soát lại", str(exc))
             return

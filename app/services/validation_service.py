@@ -173,6 +173,7 @@ class ValidationService:
         invoice_date: str | None = None,
         source_document_id: str = "MANUAL",
         source_document_name: str = "Dòng thêm thủ công",
+        sqt: int | None = None,
         amount: int | str | None = None,
     ) -> DataRow:
         if row is not None:
@@ -190,6 +191,7 @@ class ValidationService:
             invoice_date = row.invoice_date
             source_document_id = row.source_document_id
             source_document_name = row.source_document_name
+            sqt = row.sqt
             amount = row.amount
         if fee is None:
             raise ValueError("Vui lòng chọn mã loại cước.")
@@ -215,6 +217,7 @@ class ValidationService:
             source_document_name=normalize_optional_text(
                 source_document_name, field_name="Tên chứng từ nguồn"
             ) or "",
+            sqt=sqt,
         )
 
     def validate_row(
@@ -273,6 +276,7 @@ class ValidationService:
             isinstance(row.source_document_name, str)
             and bool(row.source_document_name.strip())
         )
+        sqt_valid = row.sqt is None or (type(row.sqt) is int and row.sqt > 0)
 
         if not source_id_valid:
             error(
@@ -285,6 +289,12 @@ class ValidationService:
                 "source_document_name_required",
                 "Tên chứng từ nguồn phải là chuỗi không rỗng.",
                 "source_document_name",
+            )
+        if not sqt_valid:
+            error(
+                "sqt_invalid",
+                "SQT nguồn phải là số nguyên dương hoặc null.",
+                "sqt",
             )
 
         if not cont_valid_type:

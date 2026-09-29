@@ -184,6 +184,12 @@ class EditRowDialog(AppDialog):
         self.bl_edit.setClearButtonEnabled(True)
         form.addRow("Số B/L:", self.bl_edit)
 
+        self.sqt_edit = QLineEdit()
+        self.sqt_edit.setObjectName("sourceSqtEdit")
+        self.sqt_edit.setPlaceholderText("Số nguyên dương; để trống nếu không có")
+        self.sqt_edit.setClearButtonEnabled(True)
+        form.addRow("SQT nguồn:", self.sqt_edit)
+
         self.vessel_name_edit = QLineEdit()
         self.vessel_name_edit.setObjectName("vesselNameEdit")
         self.vessel_name_edit.setPlaceholderText("Ví dụ: PROSPER")
@@ -301,6 +307,7 @@ class EditRowDialog(AppDialog):
     def _connect_signals(self) -> None:
         self.container_edit.textChanged.connect(self._validate_realtime)
         self.bl_edit.textChanged.connect(self._validate_realtime)
+        self.sqt_edit.textChanged.connect(self._validate_realtime)
         self.vessel_name_edit.textChanged.connect(self._vessel_changed)
         self.voyage_no_edit.textChanged.connect(self._vessel_changed)
         self.invoice_container_count_edit.textChanged.connect(self._validate_realtime)
@@ -356,6 +363,7 @@ class EditRowDialog(AppDialog):
         self._original_vessel_voyage_raw = value.vessel_voyage_raw
         self.container_edit.setText(value.cont if isinstance(value.cont, str) else "")
         self.bl_edit.setText(value.bl if isinstance(value.bl, str) else "")
+        self.sqt_edit.setText(str(value.sqt) if type(value.sqt) is int else "")
         self.vessel_name_edit.setText(
             value.vessel_name if isinstance(value.vessel_name, str) else ""
         )
@@ -429,9 +437,17 @@ class EditRowDialog(AppDialog):
                 count = int(count_text)
             else:
                 amount_error = "SL cont HĐ phải là số nguyên dương."
+        sqt_text = self.sqt_edit.text().strip()
+        sqt: int | None = None
+        if sqt_text:
+            if sqt_text.isdigit() and int(sqt_text) > 0:
+                sqt = int(sqt_text)
+            else:
+                amount_error = "SQT nguồn phải là số nguyên dương."
         row = ReviewRow(
             cont=normalize_container(self.container_edit.text()),
             bl=normalize_bl(self.bl_edit.text()),
+            sqt=sqt,
             fee=self.fee_combo.currentData(),
             rule=self._original_rule if self._editing else self.rule_combo.currentData(),
             amount=amount,

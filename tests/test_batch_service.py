@@ -202,7 +202,7 @@ def test_receive_only_legacy_vat_rows_creates_empty_valid_batch(
     assert result.batch.row_count == 0
     assert result.batch.error_count == 0
     persisted = json.loads(_current_json(settings).read_text(encoding="utf-8"))
-    assert persisted == {"v": 3, "d": []}
+    assert persisted == {"v": 4, "d": []}
     service.close()
 
 
@@ -407,7 +407,7 @@ def test_reapplying_same_output_keeps_review_sync_enabled(tmp_path: Path) -> Non
     output = json.loads(
         _current_json(settings).read_text(encoding="utf-8")
     )
-    assert output["v"] == 3
+    assert output["v"] == 4
     assert output["d"][0]["amount"] == 88
     service.close()
 
@@ -465,7 +465,7 @@ def test_restart_identifies_current_output_before_watcher_scan(
     output = json.loads(
         _current_json(settings).read_text(encoding="utf-8")
     )
-    assert output["v"] == 3
+    assert output["v"] == 4
     assert output["d"][0]["amount"] == 77
     restarted.close()
 

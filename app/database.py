@@ -154,7 +154,15 @@ class Database:
                 self._migration_22(connection)
                 connection.execute("PRAGMA user_version = 22")
                 current_version = 22
-            self._ensure_schema_22(connection)
+            if current_version < 23:
+                self._migration_23(connection)
+                connection.execute("PRAGMA user_version = 23")
+                current_version = 23
+            if current_version < 24:
+                self._migration_24(connection)
+                connection.execute("PRAGMA user_version = 24")
+                current_version = 24
+            self._ensure_schema_24(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -267,6 +275,8 @@ class Database:
                 source_item_index INTEGER NOT NULL CHECK (source_item_index >= 0),
                 container TEXT,
                 bl TEXT,
+                input_sqt INTEGER CHECK (input_sqt IS NULL OR input_sqt > 0),
+                source_sqt INTEGER CHECK (source_sqt IS NULL OR source_sqt > 0),
                 match_reason TEXT,
                 fee_original TEXT NOT NULL,
                 fee_selected TEXT,
@@ -1368,6 +1378,225 @@ class Database:
         )
         for statement in statements:
             connection.execute(statement)
+
+    @staticmethod
+    def _migration_23(connection: sqlite3.Connection) -> None:
+        """Định danh hồ sơ cước biển theo tàu/chuyến, không theo đường dẫn BK."""
+
+        Database._ensure_schema_23(connection)
+
+    @staticmethod
+    def _ensure_schema_23(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_22(connection)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sea_freight_reconciliation_cases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vessel_key TEXT NOT NULL,
+                voyage_key TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(vessel_key, voyage_key)
+            )
+            """
+        )
+
+        group_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(sea_freight_reconciliation_groups)"
+            ).fetchall()
+        }
+        if "case_id" not in group_columns:
+            connection.execute(
+                "ALTER TABLE sea_freight_reconciliation_groups "
+                "ADD COLUMN case_id INTEGER REFERENCES sea_freight_reconciliation_cases(id)"
+            )
+
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO sea_freight_reconciliation_cases(
+                vessel_key, voyage_key, created_at, updated_at
+            )
+            SELECT vessel_key, voyage_key, MIN(created_at), MAX(updated_at)
+            FROM sea_freight_reconciliation_groups
+            GROUP BY vessel_key, voyage_key
+            """
+        )
+        connection.execute(
+            """
+            UPDATE sea_freight_reconciliation_groups
+            SET case_id = (
+                SELECT c.id
+                FROM sea_freight_reconciliation_cases AS c
+                WHERE c.vessel_key = sea_freight_reconciliation_groups.vessel_key
+                  AND c.voyage_key = sea_freight_reconciliation_groups.voyage_key
+            )
+            WHERE case_id IS NULL
+            """
+        )
+        missing_case_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM sea_freight_reconciliation_groups WHERE case_id IS NULL"
+            ).fetchone()[0]
+        )
+        if missing_case_count:
+            raise DatabaseError(
+                "Không thể gắn hồ sơ cước biển cũ vào tàu/chuyến tương ứng."
+            )
+
+        # Mỗi tàu/chuyến chỉ có một phiên hiện hành. Bản ghi mới nhất chưa hủy
+        # thắng; nếu toàn bộ đã hủy thì giữ bản ghi hủy mới nhất để xem lịch sử.
+        previous_currents = {
+            int(row[0]): int(row[1])
+            for row in connection.execute(
+                """
+                SELECT id, case_id
+                FROM sea_freight_reconciliation_groups
+                WHERE is_current = 1
+                """
+            ).fetchall()
+        }
+        connection.execute(
+            "UPDATE sea_freight_reconciliation_groups SET is_current = 0"
+        )
+        cases = connection.execute(
+            "SELECT id FROM sea_freight_reconciliation_cases ORDER BY id"
+        ).fetchall()
+        selected_current_by_case: dict[int, int] = {}
+        for case_row in cases:
+            case_id = int(case_row[0])
+            selected = connection.execute(
+                """
+                SELECT id
+                FROM sea_freight_reconciliation_groups
+                WHERE case_id = ? AND status != 'CANCELLED'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (case_id,),
+            ).fetchone()
+            if selected is None:
+                selected = connection.execute(
+                    """
+                    SELECT id
+                    FROM sea_freight_reconciliation_groups
+                    WHERE case_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (case_id,),
+                ).fetchone()
+            if selected is None:
+                continue
+            selected_id = int(selected[0])
+            selected_current_by_case[case_id] = selected_id
+            connection.execute(
+                "UPDATE sea_freight_reconciliation_groups SET is_current = 1 WHERE id = ?",
+                (selected_id,),
+            )
+
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='sea_freight_reconciliation_events'"
+        ).fetchone():
+            for old_id, case_id in previous_currents.items():
+                selected_id = selected_current_by_case.get(case_id)
+                if selected_id is None or old_id == selected_id:
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO sea_freight_reconciliation_events(
+                        group_id, event_type, payload_json, created_at
+                    )
+                    SELECT ?, 'CASE_MERGED', ?, updated_at
+                    FROM sea_freight_reconciliation_groups
+                    WHERE id = ?
+                    """,
+                    (
+                        old_id,
+                        json.dumps(
+                            {"case_id": case_id, "current_group_id": selected_id},
+                            ensure_ascii=False,
+                        ),
+                        old_id,
+                    ),
+                )
+
+        connection.execute("DROP INDEX IF EXISTS ux_sea_freight_open_group")
+        connection.execute("DROP INDEX IF EXISTS ux_sea_freight_current_open_group")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_sea_freight_current_case
+            ON sea_freight_reconciliation_groups(case_id)
+            WHERE is_current = 1 AND status != 'CANCELLED'
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sea_freight_group_case_history
+            ON sea_freight_reconciliation_groups(case_id, created_at DESC, id DESC)
+            """
+        )
+        connection.execute("DROP TRIGGER IF EXISTS trg_sea_freight_group_case_insert")
+        connection.execute("DROP TRIGGER IF EXISTS trg_sea_freight_group_case_update")
+        connection.execute(
+            """
+            CREATE TRIGGER trg_sea_freight_group_case_insert
+            BEFORE INSERT ON sea_freight_reconciliation_groups
+            WHEN NEW.case_id IS NULL OR NOT EXISTS (
+                SELECT 1
+                FROM sea_freight_reconciliation_cases AS c
+                WHERE c.id = NEW.case_id
+                  AND c.vessel_key = NEW.vessel_key
+                  AND c.voyage_key = NEW.voyage_key
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'sea freight case is required');
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER trg_sea_freight_group_case_update
+            BEFORE UPDATE OF case_id, vessel_key, voyage_key
+            ON sea_freight_reconciliation_groups
+            WHEN NEW.case_id IS NULL OR NOT EXISTS (
+                SELECT 1
+                FROM sea_freight_reconciliation_cases AS c
+                WHERE c.id = NEW.case_id
+                  AND c.vessel_key = NEW.vessel_key
+                  AND c.voyage_key = NEW.voyage_key
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'sea freight case is required');
+            END
+            """
+        )
+
+    @staticmethod
+    def _migration_24(connection: sqlite3.Connection) -> None:
+        """Lưu SQT từ file bảng kê và SQT thực tế của dòng BK được chọn."""
+
+        Database._ensure_schema_24(connection)
+
+    @staticmethod
+    def _ensure_schema_24(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_23(connection)
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(expense_posting_items)"
+            ).fetchall()
+        }
+        if columns and "input_sqt" not in columns:
+            connection.execute(
+                "ALTER TABLE expense_posting_items ADD COLUMN input_sqt INTEGER"
+            )
+        if columns and "source_sqt" not in columns:
+            connection.execute(
+                "ALTER TABLE expense_posting_items ADD COLUMN source_sqt INTEGER"
+            )
 
     @contextmanager
     def transaction(

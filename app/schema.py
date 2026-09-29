@@ -12,7 +12,12 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from app.constants import LEGACY_SCHEMA_VERSION, OBJECT_SCHEMA_VERSION, SCHEMA_VERSION
+from app.constants import (
+    DOCUMENT_SCHEMA_VERSION,
+    LEGACY_SCHEMA_VERSION,
+    OBJECT_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+)
 from app.models import BatchDocument, DataRow
 
 
@@ -72,10 +77,11 @@ def parse_document(raw: object) -> BatchDocument:
     if type(version) is not int or version not in {
         LEGACY_SCHEMA_VERSION,
         OBJECT_SCHEMA_VERSION,
+        DOCUMENT_SCHEMA_VERSION,
         SCHEMA_VERSION,
     }:
         raise SchemaError(
-            "Khóa v phải là số nguyên 1, 2 hoặc 3.",
+            "Khóa v phải là số nguyên 1, 2, 3 hoặc 4.",
             code="invalid_version",
             field="v",
         )
@@ -105,7 +111,8 @@ def parse_document(raw: object) -> BatchDocument:
         "carrier",
         "amount",
     }
-    v3_keys = set(DataRow(None, None, "CXD", None, None).to_object())
+    v4_keys = set(DataRow(None, None, "CXD", None, None).to_object())
+    v3_keys = v4_keys - {"sqt"}
     for index, item in enumerate(data):
         if version == LEGACY_SCHEMA_VERSION:
             if not isinstance(item, list):
@@ -134,7 +141,12 @@ def parse_document(raw: object) -> BatchDocument:
                 row_index=index,
             )
         keys = set(item)
-        expected_row_keys = v2_keys if version == OBJECT_SCHEMA_VERSION else v3_keys
+        if version == OBJECT_SCHEMA_VERSION:
+            expected_row_keys = v2_keys
+        elif version == DOCUMENT_SCHEMA_VERSION:
+            expected_row_keys = v3_keys
+        else:
+            expected_row_keys = v4_keys
         if keys != expected_row_keys:
             missing = sorted(expected_row_keys - keys)
             extra = sorted(str(key) for key in keys - expected_row_keys)
@@ -174,15 +186,16 @@ def parse_document(raw: object) -> BatchDocument:
 
 
 def document_to_dict(document: BatchDocument) -> dict[str, Any]:
-    """Luôn serialize thành schema v3 dạng object."""
+    """Luôn serialize thành schema v4 dạng object."""
 
     if type(document.v) is not int or document.v not in {
         LEGACY_SCHEMA_VERSION,
         OBJECT_SCHEMA_VERSION,
+        DOCUMENT_SCHEMA_VERSION,
         SCHEMA_VERSION,
     }:
         raise SchemaError(
-            "Phiên bản tài liệu phải là số nguyên 1, 2 hoặc 3.",
+            "Phiên bản tài liệu phải là số nguyên 1, 2, 3 hoặc 4.",
             code="invalid_version",
             field="v",
         )

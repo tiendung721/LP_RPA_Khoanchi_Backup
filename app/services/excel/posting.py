@@ -16,6 +16,7 @@ from typing import Any
 from openpyxl.utils import get_column_letter
 
 from app.constants import FEE_CODES, RULE_CODES
+from app.sea_freight.vessel_aliases import vessel_voyage_candidate_equivalent
 from app.services.json_codec import JsonCodec, JsonCodecError
 from app.services.validation_service import (
     normalize_bl,
@@ -1109,9 +1110,11 @@ class ExpensePostingService:
         return refined_plan
 
     @staticmethod
-    def _bang_ke_item_key(item: PostingItem) -> tuple[str, str]:
+    def _bang_ke_item_key(item: PostingItem) -> tuple[int | None, str, str, str]:
         return (
+            item.input_sqt,
             item.container or "",
+            normalize_bl_key(item.bl) if item.bl else "",
             ExpensePostingService._vessel_voyage_key(
                 item.vessel_name,
                 item.voyage_no,
@@ -1133,7 +1136,9 @@ class ExpensePostingService:
         )
         self._assert_source_members_unchanged(plan)
         items = copy.deepcopy(plan.items)
-        selected_by_key: dict[tuple[str, str], tuple[str, int]] = {}
+        selected_by_key: dict[
+            tuple[int | None, str, str, str], tuple[str, int]
+        ] = {}
         applied_conflict_ids: set[str] = set()
         for conflict in plan.conflicts:
             value = resolved.get(conflict.conflict_id)
@@ -1160,6 +1165,7 @@ class ExpensePostingService:
                 if choice not in valid:
                     raise ExpensePostingError("Dòng BK được chọn không hợp lệ.")
                 selected_by_key[self._bang_ke_item_key(item)] = choice
+                item.match_reason = "MANUAL"
             elif action is ResolutionAction.SKIP:
                 item.action = ResolutionAction.SKIP
                 item.status = PostingItemStatus.USER_SKIPPED
@@ -1747,6 +1753,7 @@ class ExpensePostingService:
             invoice_no = row.invoice_no
             carrier = row.carrier
             amount = row.amount
+            input_sqt = row.sqt
             if container is not None and not isinstance(container, str):
                 raise ExpensePostingError(f"Container dòng {index + 1} không hợp lệ.")
             if bl is not None and not isinstance(bl, str):
@@ -1769,6 +1776,10 @@ class ExpensePostingService:
                 or (amount < 0 and not allow_negative)
             ):
                 raise ExpensePostingError(f"Số tiền dòng {index + 1} không hợp lệ.")
+            if input_sqt is not None and (
+                type(input_sqt) is not int or input_sqt <= 0
+            ):
+                raise ExpensePostingError(f"SQT nguồn dòng {index + 1} không hợp lệ.")
             payload = {
                     "source_item_index": index,
                     "source_document_id": row.source_document_id,
@@ -1781,6 +1792,7 @@ class ExpensePostingService:
                     "invoice_date": row.invoice_date,
                     "carrier": carrier,
                     "amount": amount,
+                    "input_sqt": input_sqt,
             }
             if any((row.vessel_voyage_raw, row.vessel_name, row.voyage_no)):
                 payload.update(
@@ -2453,6 +2465,7 @@ class ExpensePostingService:
                 ),
                 selected_source_sheet=group[0].get("reconciliation_source_sheet"),
                 selected_source_row=group[0].get("reconciliation_source_row"),
+                input_sqt=group[0].get("input_sqt"),
                 source_sqt=group[0].get("reconciliation_source_sqt"),
                 force_repost=any(
                     row["source_item_index"] in repost for row in group
@@ -2503,6 +2516,7 @@ class ExpensePostingService:
         sheets: dict[str, tuple[Any, HeaderResolution, dict[str, int]]] = {}
         all_candidates: list[RowCandidate] = []
         by_container: dict[str, list[RowCandidate]] = defaultdict(list)
+        by_sqt: dict[int, list[RowCandidate]] = defaultdict(list)
         for name in workbook.sheetnames:
             if self.months.parse_target_sheet(name) is None:
                 continue
@@ -2512,13 +2526,42 @@ class ExpensePostingService:
             sheets[name] = (worksheet, base, fee_columns)
             candidates = [
                 candidate
-                for values in self._container_index(worksheet, base).values()
+                for values in self._container_index(
+                    worksheet,
+                    base,
+                    include_sqt_without_container=True,
+                ).values()
                 for candidate in values
             ]
             all_candidates.extend(candidates)
             for candidate in candidates:
                 if candidate.container:
                     by_container[candidate.container].append(candidate)
+                if candidate.sqt is not None:
+                    by_sqt[candidate.sqt].append(candidate)
+
+        def candidate_identity(candidate: RowCandidate) -> tuple[str, int]:
+            return candidate.source_sheet, candidate.row
+
+        def ordered_candidates(values: Iterable[RowCandidate]) -> list[RowCandidate]:
+            identities = {candidate_identity(candidate) for candidate in values}
+            return [
+                candidate
+                for candidate in all_candidates
+                if candidate_identity(candidate) in identities
+            ]
+
+        def bl_matches(
+            candidates: Iterable[RowCandidate], source_bl: str | None
+        ) -> list[RowCandidate]:
+            keys = set(_bl_keys(source_bl))
+            if not keys:
+                return []
+            return ordered_candidates(
+                candidate
+                for candidate in candidates
+                if not keys.isdisjoint(candidate.bl_keys)
+            )
 
         conflicts: list[PostingConflict] = []
         for item_index, item in enumerate(items):
@@ -2528,12 +2571,14 @@ class ExpensePostingService:
             item.target_cell = None
             item.current_value = None
             item.cell_state = None
+            item.match_reason = None
             source_key = self._vessel_voyage_key(
                 item.vessel_name,
                 item.voyage_no,
                 item.vessel_voyage_raw if not (item.vessel_name or item.voyage_no) else None,
             )
-            candidates = list(by_container.get(item.container or "", ()))
+            container_candidates = list(by_container.get(item.container or "", ()))
+            candidates = container_candidates
             item.row_candidates = candidates
             selected: RowCandidate | None = None
             if item.selected_source_row is not None:
@@ -2548,43 +2593,143 @@ class ExpensePostingService:
                 )
                 if selected is None:
                     raise ExpensePostingError("Dòng BK đã chọn không còn hợp lệ.")
-            elif candidates:
-                exact = [
-                    candidate
-                    for candidate in candidates
-                    if source_key
-                    and self._vessel_voyage_key(candidate.vessel) == source_key
-                ]
-                if len(exact) == 1:
-                    selected = exact[0]
-                elif len(candidates) == 1:
-                    item.row_candidates = candidates
+                item.match_reason = "MANUAL"
+            elif item.input_sqt is not None:
+                sqt_candidates = list(by_sqt.get(item.input_sqt, ()))
+                item.row_candidates = sqt_candidates or all_candidates
+                if not sqt_candidates:
                     conflicts.append(
                         self._item_conflict(
                             batch_hash,
                             item_index,
                             item,
-                            ConflictType.PARTIAL_KEY_MATCH,
-                            "Container chỉ có một dòng nhưng tàu/chuyến trống hoặc khác; hãy xác nhận dòng BK.",
+                            ConflictType.SOURCE_SQT_NOT_FOUND,
+                            f"Không tìm thấy SQT nguồn {item.input_sqt} trên toàn bộ BK.",
                             (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
-                            row_candidates=candidates,
-                            details={"source_vessel_voyage": source_key},
+                            row_candidates=all_candidates,
+                            details={"input_sqt": item.input_sqt},
                         )
                     )
                     continue
-                else:
-                    choices = exact if exact else candidates
-                    item.row_candidates = choices
+                narrowed = sqt_candidates
+                if len(narrowed) == 1:
+                    selected = narrowed[0]
+                    item.row_candidates = narrowed
+                    item.match_reason = "INPUT_SQT"
+                elif item.container:
+                    same_container = [
+                        candidate
+                        for candidate in narrowed
+                        if candidate.container == item.container
+                    ]
+                    if same_container:
+                        narrowed = same_container
+                if selected is None and len(narrowed) > 1 and item.bl:
+                    same_bl = bl_matches(narrowed, item.bl)
+                    if same_bl:
+                        narrowed = same_bl
+                if selected is None and len(narrowed) == 1:
+                    selected = narrowed[0]
+                    item.row_candidates = narrowed
+                    item.match_reason = "INPUT_SQT"
+                elif selected is None:
+                    item.row_candidates = ordered_candidates(narrowed)
                     conflicts.append(
                         self._item_conflict(
                             batch_hash,
                             item_index,
                             item,
                             ConflictType.MULTIPLE_CONTAINER_MATCH,
-                            f"Container {item.container} có nhiều dòng trong BK; hãy chọn đúng tàu/chuyến.",
+                            f"SQT nguồn {item.input_sqt} xuất hiện ở nhiều dòng BK; hãy chọn đúng dòng.",
                             (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
-                            row_candidates=choices,
-                            details={"source_vessel_voyage": source_key},
+                            row_candidates=item.row_candidates,
+                            details={"input_sqt": item.input_sqt},
+                        )
+                    )
+                    continue
+            elif len(candidates) == 1:
+                selected = candidates[0]
+                item.match_reason = "UNIQUE_CONTAINER"
+            elif len(candidates) > 1:
+                if item.bl:
+                    matching_bl = bl_matches(candidates, item.bl)
+                    if not matching_bl:
+                        unknown_bl = [
+                            candidate
+                            for candidate in candidates
+                            if not candidate.bl_keys
+                        ]
+                        if unknown_bl:
+                            candidates = ordered_candidates(unknown_bl)
+                        else:
+                            item.row_candidates = candidates
+                            conflicts.append(
+                                self._item_conflict(
+                                    batch_hash,
+                                    item_index,
+                                    item,
+                                    ConflictType.BL_MISMATCH,
+                                    f"Container {item.container} có nhiều dòng nhưng không có B/L nào khớp {item.bl}.",
+                                    (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
+                                    row_candidates=candidates,
+                                    details={"source_bl_keys": list(_bl_keys(item.bl))},
+                                )
+                            )
+                            continue
+                    else:
+                        candidates = matching_bl
+                        item.row_candidates = candidates
+                        if len(candidates) == 1:
+                            selected = candidates[0]
+                            item.match_reason = "CONTAINER_BL"
+
+                if selected is None:
+                    exact = [
+                        candidate
+                        for candidate in candidates
+                        if source_key
+                        and self._vessel_voyage_key(candidate.vessel) == source_key
+                    ]
+                    if len(exact) == 1:
+                        selected = exact[0]
+                        item.row_candidates = exact
+                        item.match_reason = "CONTAINER_VESSEL_EXACT"
+                    elif len(exact) > 1:
+                        candidates = exact
+                    else:
+                        aliases = [
+                            candidate
+                            for candidate in candidates
+                            if item.vessel_name
+                            and item.voyage_no
+                            and vessel_voyage_candidate_equivalent(
+                                item.vessel_name,
+                                item.voyage_no,
+                                candidate.vessel,
+                            )
+                        ]
+                        if len(aliases) == 1:
+                            selected = aliases[0]
+                            item.row_candidates = aliases
+                            item.match_reason = "CONTAINER_VESSEL_ALIAS"
+                        elif aliases:
+                            candidates = aliases
+
+                if selected is None:
+                    item.row_candidates = ordered_candidates(candidates)
+                    conflicts.append(
+                        self._item_conflict(
+                            batch_hash,
+                            item_index,
+                            item,
+                            ConflictType.MULTIPLE_CONTAINER_MATCH,
+                            f"Container {item.container} có nhiều dòng trong BK; B/L và tàu/chuyến chưa xác định được một dòng duy nhất.",
+                            (ResolutionAction.SELECT_ROW, ResolutionAction.SKIP),
+                            row_candidates=item.row_candidates,
+                            details={
+                                "source_vessel_voyage": source_key,
+                                "source_bl_keys": list(_bl_keys(item.bl)),
+                            },
                         )
                     )
                     continue
@@ -2803,6 +2948,7 @@ class ExpensePostingService:
         base: HeaderResolution,
         *,
         plan_header: HeaderResolution | None = None,
+        include_sqt_without_container: bool = False,
     ) -> dict[str, list[RowCandidate]]:
         result: dict[str, list[RowCandidate]] = defaultdict(list)
         columns = base.columns
@@ -2814,7 +2960,10 @@ class ExpensePostingService:
                 )
             except TypeError:
                 continue
-            if not container:
+            sqt = self._positive_int(
+                worksheet.cell(row, columns["sqt"]).value
+            )
+            if not container and not (include_sqt_without_container and sqt):
                 continue
             cargo = (
                 worksheet.cell(row, columns["cargo_type"]).value
@@ -2844,12 +2993,10 @@ class ExpensePostingService:
             candidate_bl = normalize_bl(
                 str(raw_bl) if raw_bl not in (None, "") else None
             )
-            result[container].append(
+            result[container or ""].append(
                 RowCandidate(
                     row=row,
-                    sqt=self._positive_int(
-                        worksheet.cell(row, columns["sqt"]).value
-                    ),
+                    sqt=sqt,
                     container=container,
                     bl=candidate_bl,
                     bl_keys=_bl_keys(candidate_bl),
@@ -3840,6 +3987,7 @@ class ExpensePostingService:
                 conflict_type.value,
                 batch_hash,
                 item.source_indices,
+                item.input_sqt,
                 item.container,
                 item.bl,
                 item.selected_fee,
@@ -3851,7 +3999,11 @@ class ExpensePostingService:
             item_index=item_index,
             container=item.container,
             bl=item.bl,
-            sqt=item.source_sqt,
+            sqt=(
+                item.source_sqt
+                if item.source_sqt is not None
+                else item.input_sqt
+            ),
             fee=item.selected_fee,
             amount=item.amount,
             carrier=join_carriers(conflict_details.get("carrier_candidates", ())),
@@ -3864,7 +4016,7 @@ class ExpensePostingService:
             allowed_actions=actions,
             default_action=default,
             row_candidates=list(row_candidates),
-            details=conflict_details,
+            details={"input_sqt": item.input_sqt, **conflict_details},
         )
 
     def _resolve_apply_actions(
@@ -4314,6 +4466,7 @@ class ExpensePostingService:
             "source_indices": list(item.source_indices),
             "container": item.container,
             "bl": item.bl,
+            "input_sqt": item.input_sqt,
             "match_reason": item.match_reason,
             "fee_original": item.original_fee,
             "fee_selected": fee,
@@ -4359,6 +4512,8 @@ class ExpensePostingService:
                     ),
                     "container": source.get("container", item.container),
                     "bl": source.get("bl", item.bl),
+                    "input_sqt": source.get("input_sqt", item.input_sqt),
+                    "source_sqt": action.get("source_sqt", item.source_sqt),
                     "match_reason": action.get("match_reason"),
                     "fee_original": source.get("fee", item.original_fee),
                     "fee_selected": action["fee_selected"],

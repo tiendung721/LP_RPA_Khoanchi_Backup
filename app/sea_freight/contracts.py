@@ -113,6 +113,7 @@ class ReconciliationSource:
 @dataclass(frozen=True, slots=True)
 class ReconciliationGroup:
     id: int
+    case_id: int
     bk_path: str
     bk_sheet: str
     vessel_voyage_raw: str

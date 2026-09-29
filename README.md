@@ -31,8 +31,15 @@ Bước 1 hoặc chọn JSON thủ công.
 - Với từng chứng từ/hóa đơn, ứng dụng tìm dòng trong sheet tháng được chọn và hai
   tháng liền trước, rồi ghi khoản chi ngay tại sheet chứa dòng tìm thấy. Ứng dụng
   không sao chép hoặc tạo dòng kế hoạch mới.
-- Nguồn Bảng kê giữ cơ chế đối chiếu riêng trên toàn bộ các sheet tháng.
-- Container xuất hiện nhiều lần trong phạm vi dò phải được chọn đúng sheet/dòng/SQT.
+- Nguồn Bảng kê đối chiếu riêng trên toàn bộ các sheet tháng theo thứ tự ưu tiên:
+  SQT có sẵn trong JSON; container duy nhất; container + B/L; cuối cùng mới dùng
+  tàu/chuyến khi B/L không có hoặc dòng BK không có B/L.
+- Tàu/chuyến được chuẩn hóa dấu, khoảng trắng và dấu phân cách, đồng thời hỗ trợ
+  danh sách alias kiểm soát (ví dụ `VSICO PROMOTE`/`VSC PROMOTE`,
+  `BIEN DONG MARINE`/`BIENDONG MARINER`) và trường hợp một bên thiếu tiền tố
+  chuyến `V.`, `MB`, `BS`, `VPN`. Không fuzzy-match để tự chọn dòng.
+- Nếu container chỉ xuất hiện một lần thì dùng ngay dòng đó. Nếu vẫn còn nhiều
+  dòng sau các khóa trên, người dùng phải chọn đúng sheet/dòng/SQT.
   Nhiều dòng JSON cùng nhắm một ô phí không được cộng; người dùng chọn đúng một
   dòng để ghi, còn ô đã có giá trị chỉ cho giữ nguyên, ghi đè hoặc bỏ qua.
 - Bước 4 (RPA) vẫn chỉ cho chọn một sheet BK, tổng hợp các dòng theo SQT, chọn nhiều SQT và gọi
@@ -85,6 +92,9 @@ Bước 1 hoặc chọn JSON thủ công.
 - Hồ sơ đã hoàn tất hoặc đã ghi BK được phép **Đối soát lại**. Mỗi lần tạo một
   phiên mới, giữ nguyên phiên và nhật ký cũ. Nếu BK đã có giá trị khác, mặc định
   giữ nguyên và chỉ ghi đè khi người dùng chọn rõ trong màn hình xử lý xung đột.
+- Hồ sơ cước biển được định danh duy nhất bằng **tàu + chuyến**. Đường dẫn file BK
+  và các sheet tháng chỉ là nguồn dữ liệu của từng phiên; đổi tên hoặc chuyển vị
+  trí file không tạo thêm hồ sơ. Mỗi tàu/chuyến chỉ có một phiên hiện hành.
 - HĐ cước biển xuất hiện lại trong một batch khác được đánh dấu cảnh báo màu vàng
   và liên kết về đúng hồ sơ tàu/chuyến hiện có. Liên kết này chỉ phục vụ truy vết,
   không cộng lại tiền hoặc số cont và không chặn người dùng chọn nhập lại vào BK.
@@ -178,15 +188,16 @@ Các khóa khác trong `Preferences` được giữ nguyên.
 
 ## Hợp đồng JSON
 
-Schema ghi công khai hiện tại là v3:
+Schema ghi công khai hiện tại là v4:
 
 ```json
 {
-  "v": 3,
+  "v": 4,
   "d": [
     {
       "source_document_id": "DOC_001",
       "source_document_name": "Hoa_don_A.pdf",
+      "sqt": null,
       "container": null,
       "bl": "OOLU1234567890",
       "vessel_voyage_raw": "PROSPER 2625S",
@@ -205,14 +216,15 @@ Schema ghi công khai hiện tại là v3:
 }
 ```
 
-Root chỉ có `v` và `d`; mỗi object v3 phải có đủ đúng 15 khóa theo thứ tự trên.
+Root chỉ có `v` và `d`; mỗi object v4 phải có đủ đúng 16 khóa theo thứ tự trên.
 Hai trường nguồn phải là chuỗi không rỗng; dữ liệu nghiệp vụ thiếu dùng `null`.
-`voyage_no` luôn là chuỗi; `invoice_container_count` là số nguyên dương hoặc
-`null`; căn cứ nhận `EXPLICIT`, `CALCULATED`, `UNKNOWN`.
+`sqt` và `invoice_container_count` là số nguyên dương hoặc `null`;
+`voyage_no` luôn là chuỗi; căn cứ nhận `EXPLICIT`, `CALCULATED`, `UNKNOWN`.
 
-Schema v1 mảng 7 vị trí và schema v2 object 13 khóa vẫn được đọc để tương thích.
+Schema v1 mảng 7 vị trí, schema v2 object 13 khóa và schema v3 object 15 khóa
+vẫn được đọc để tương thích.
 Dữ liệu cũ được gắn nguồn legacy theo batch. Sau khi user lưu/chỉnh sửa, phần
-mềm luôn serialize thành v3; các file JSON lịch sử không bị sửa hàng loạt.
+mềm luôn serialize thành v4; các file JSON lịch sử không bị sửa hàng loạt.
 
 Không dùng các root `metadata`, `du_lieu_boc_tach`, `canh_bao` hoặc
 `raw_data`.
@@ -307,10 +319,10 @@ trong Cài đặt đúng với thư mục đang được theo dõi. Các hậu t
 
 ### JSON sai schema
 
-File phải có đúng root `{v, d}` và tuân theo schema v3 object 15 khóa; schema
-v2 object 13 khóa và schema v1 mảng 7 vị trí chỉ được đọc theo chế độ tương
-thích. Bước 2 hiển thị lỗi cấu trúc và khóa xem/sửa cho đến khi có file mới đọc
-được.
+File phải có đúng root `{v, d}` và tuân theo schema v4 object 16 khóa; schema
+v3 object 15 khóa, schema v2 object 13 khóa và schema v1 mảng 7 vị trí chỉ được
+đọc theo chế độ tương thích. Bước 2 hiển thị lỗi cấu trúc và khóa xem/sửa cho
+đến khi có file mới đọc được.
 
 ### Không có quyền ghi
 

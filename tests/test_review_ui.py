@@ -229,7 +229,7 @@ def test_cross_batch_duplicate_is_yellow_and_opens_existing_group(
             "sha256": new_batch.sha256,
             "status": "REVIEWING",
         },
-        "document": {"v": 3, "d": [new_row.to_object()]},
+        "document": {"v": 4, "d": [new_row.to_object()]},
     }
 
     window = ReviewWindow(payload, sea_freight_service=service)
@@ -573,6 +573,7 @@ def test_edit_dialog_hides_rule_but_preserves_its_value(qtbot) -> None:
             13_554_000,
             invoice_no="HD-130",
             carrier="Vận tải ABC",
+            sqt=702,
         )
     )
     qtbot.addWidget(dialog)
@@ -589,6 +590,8 @@ def test_edit_dialog_hides_rule_but_preserves_its_value(qtbot) -> None:
         assert edited.amount == 13_555_000
         assert edited.invoice_no == "HD-130"
         assert edited.carrier == "Vận tải ABC"
+        assert dialog.sqt_edit.text() == "702"
+        assert edited.sqt == 702
 
         dialog.amount_edit.clear()
         assert dialog.row_data().amount is None
@@ -784,7 +787,7 @@ def test_confirm_refreshes_reconciliation_state_before_blocking_save(
             "status": "REVIEWING",
         },
         "document": {
-            "v": 3,
+            "v": 4,
             "d": [
                 DataRow(
                     cont=None,
