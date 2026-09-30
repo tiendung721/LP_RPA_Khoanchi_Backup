@@ -56,6 +56,13 @@ QLabel[actionTitle="true"] {{
     font-size: 10.5pt;
     font-weight: 700;
 }}
+QLabel[formSection="true"] {{
+    color: #2563EB;
+    font-size: 9pt;
+    font-weight: 700;
+    padding-top: 12px;
+    padding-bottom: 3px;
+}}
 QLabel[status="error"] {{
     color: {ERROR};
 }}
@@ -244,6 +251,19 @@ QFrame[card="true"], QGroupBox {{
     border: 1px solid {BORDER};
     border-radius: 12px;
 }}
+QToolButton[quiet="true"] {{
+    min-height: 28px;
+    padding: 0 5px;
+    color: #475467;
+    background: transparent;
+    border: none;
+    font-weight: 600;
+}}
+QToolButton[quiet="true"]:hover {{
+    color: {PRIMARY_DARK};
+    background: {PRIMARY_LIGHT};
+    border: none;
+}}
 QFrame[card="true"] {{
     padding: 1px;
 }}
@@ -400,6 +420,10 @@ QTableView {{
 }}
 QTableView::item {{
     padding: 5px;
+}}
+QTableView::item:selected {{
+    background: #DBEAFE;
+    color: {TEXT};
 }}
 QHeaderView::section {{
     background: #EDF2F7;

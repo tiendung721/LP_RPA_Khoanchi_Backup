@@ -127,7 +127,7 @@ class RpaSqtSelectionDialog(AppDialog):
             "rows_desc": (4, Qt.SortOrder.DescendingOrder),
         }
         self.setObjectName("rpaSqtSelectionDialog")
-        self.setWindowTitle("Chọn số quyết toán chạy RPA")
+        self.setWindowTitle("Chọn số quyết toán để nhập")
         self.resize(1380, 650)
         self.setStyleSheet(
             """
@@ -155,14 +155,14 @@ class RpaSqtSelectionDialog(AppDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         title = QLabel(
-            f"Sheet {self.plan.sheet_name}: chọn các SQT cần nhập lên phần mềm quyết toán."
+            f"Trang tính {self.plan.sheet_name}: chọn các số quyết toán cần nhập."
         )
         title.setStyleSheet("font-size: 12pt; font-weight: 700;")
         title.setWordWrap(True)
         layout.addWidget(title)
         note = QLabel(
-            "SQT “Đã nhập” vẫn được phép chọn và chạy lại. "
-            "Trạng thái chỉ được đổi sang “Đã nhập” sau khi PAD xác nhận đã lưu thành công trên web."
+            "Có thể chọn lại số đã nhập nếu cần chạy lại. "
+            "Trạng thái chỉ đổi thành “Đã nhập” khi phần mềm quyết toán xác nhận lưu thành công."
         )
         note.setWordWrap(True)
         note.setProperty("muted", True)
@@ -176,9 +176,9 @@ class RpaSqtSelectionDialog(AppDialog):
                 self._selectable_pending_sqt | self._selectable_latest_pad_sqt
             )
             self.group_summary_label = QLabel(
-                f"Đã chọn sẵn {selected_count} SQT: "
-                f"{len(self._selectable_pending_sqt)} chờ nhập QT + "
-                f"{len(self._selectable_latest_pad_sqt)} thuộc lượt PAD gần nhất"
+                f"Đã chọn sẵn {selected_count} số quyết toán: "
+                f"{len(self._selectable_pending_sqt)} chờ nhập + "
+                f"{len(self._selectable_latest_pad_sqt)} thuộc lượt nhập gần nhất"
                 + (f" − {overlap} trùng nhau." if overlap else ".")
             )
             self.group_summary_label.setWordWrap(True)
@@ -192,9 +192,9 @@ class RpaSqtSelectionDialog(AppDialog):
             saved = int(self.restore_info.get("saved_count", 0) or 0)
             skipped = max(0, saved - restored)
             restore_row = QHBoxLayout()
-            message = f"Đã khôi phục {restored}/{saved} SQT từ lần chạy gần nhất."
+            message = f"Đã khôi phục {restored}/{saved} số quyết toán từ lần chạy gần nhất."
             if skipped:
-                message += f" Có {skipped} SQT đã thay đổi hoặc không còn hợp lệ."
+                message += f" Có {skipped} số đã thay đổi hoặc không còn hợp lệ."
             self.restore_label = QLabel(message)
             self.restore_label.setWordWrap(True)
             self.restore_label.setProperty("status", "info")
@@ -214,13 +214,13 @@ class RpaSqtSelectionDialog(AppDialog):
         group_specs = (
             ("Tất cả", "all", len(self.plan.items), "allRpaGroupFilterButton"),
             (
-                "Chờ nhập QT",
+                "Chờ nhập",
                 "pending",
                 len(self._pending_sqt),
                 "pendingRpaGroupFilterButton",
             ),
             (
-                "Lượt PAD gần nhất",
+                "Lượt nhập gần nhất",
                 "latest",
                 len(self._latest_pad_sqt),
                 "latestRpaGroupFilterButton",
@@ -245,7 +245,7 @@ class RpaSqtSelectionDialog(AppDialog):
 
         table_tools = QHBoxLayout()
         table_tools.setSpacing(7)
-        table_tools.addWidget(QLabel("Tìm số QT:"))
+        table_tools.addWidget(QLabel("Tìm số quyết toán:"))
         self.sqt_search = QLineEdit()
         self.sqt_search.setObjectName("rpaSqtSearchInput")
         self.sqt_search.setPlaceholderText("Nhập số QT cần tìm...")
@@ -268,7 +268,7 @@ class RpaSqtSelectionDialog(AppDialog):
 
         filters = QHBoxLayout()
         filters.setSpacing(7)
-        filters.addWidget(QLabel("Trạng thái RPA:"))
+        filters.addWidget(QLabel("Trạng thái nhập:"))
         self.filter_group = QButtonGroup(self)
         self.filter_group.setExclusive(True)
         imported_count = sum(
@@ -365,7 +365,7 @@ class RpaSqtSelectionDialog(AppDialog):
         )
         buttons.setObjectName("rpaSqtDialogButtons")
         self.run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self.run_button.setText("Chạy RPA các SQT đã chọn")
+        self.run_button.setText("Bắt đầu nhập các số đã chọn")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Hủy")
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)

@@ -218,7 +218,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         root.setSpacing(8)
 
         heading = QHBoxLayout()
-        title = QLabel("Đối soát số cont")
+        title = QLabel("Đối soát số container")
         title.setStyleSheet("font-size: 18pt; font-weight: 700;")
         heading.addWidget(title)
         heading.addStretch(1)
@@ -233,7 +233,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         heading.addWidget(self.group_value)
         root.addLayout(heading)
 
-        common = QGroupBox("Thông tin chung")
+        common = QGroupBox("Thông tin hồ sơ")
         common_layout = QGridLayout(common)
         self.period_value = QLabel()
         self.vessel_name_edit = QLineEdit()
@@ -256,8 +256,8 @@ class SeaFreightReconciliationDialog(AppDialog):
         stats_layout = QHBoxLayout()
         stats_layout.setSpacing(6)
         for key, label in (
-            (("invoices", "Số HĐ"), ("invoice_containers", "Cont trên HĐ"),
-             ("bk_containers", "Cont trong BK"), ("difference", "Chênh lệch"),
+            (("invoices", "Số hóa đơn"), ("invoice_containers", "Container trên hóa đơn"),
+             ("bk_containers", "Container trong BK"), ("difference", "Chênh lệch"),
              ("amount", "Tổng tiền"))
         ):
             frame = QFrame()
@@ -295,7 +295,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         )
         self.source_state_label = QLabel()
         self.source_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.manage_sources_button = QPushButton("Quản lý nguồn")
+        self.manage_sources_button = QPushButton("Chọn tháng đối soát")
         self.manage_sources_button.setToolTip(
             "Mở danh sách nguồn để thêm, bỏ hoặc đổi tàu/chuyến."
         )
@@ -323,7 +323,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         self.bk_path_warning_label.hide()
         root.addWidget(self.bk_path_warning_label)
 
-        invoices_box = QGroupBox("Danh sách HĐ trong hồ sơ")
+        invoices_box = QGroupBox("Hóa đơn trong hồ sơ")
         invoices_layout = QVBoxLayout(invoices_box)
         self.invoice_table = QTableWidget(0, len(self.INVOICE_HEADERS))
         self.invoice_table.setHorizontalHeaderLabels(self.INVOICE_HEADERS)
@@ -340,7 +340,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         root.addWidget(invoices_box, 2)
 
         lower = QHBoxLayout()
-        containers_box = QGroupBox("Cont tìm được trong BK")
+        containers_box = QGroupBox("Container tìm được trong BK")
         containers_layout = QVBoxLayout(containers_box)
         self.container_table = QTableWidget(0, len(self.CONTAINER_HEADERS))
         self.container_table.setHorizontalHeaderLabels(self.CONTAINER_HEADERS)
@@ -361,7 +361,7 @@ class SeaFreightReconciliationDialog(AppDialog):
 
         actions = QHBoxLayout()
         self.assistant_button = QPushButton("Mở Trợ lý bóc tách")
-        self.add_button = QPushButton("Thêm dòng HĐ")
+        self.add_button = QPushButton("Thêm hóa đơn")
         self.delete_button = QPushButton("Xóa dòng")
         actions.addWidget(self.assistant_button)
         actions.addWidget(self.add_button)
@@ -369,7 +369,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         actions.addStretch(1)
         self.save_button = QPushButton("Lưu")
         self.rerun_button = QPushButton("Đối soát lại")
-        self.confirm_button = QPushButton("Xác nhận")
+        self.confirm_button = QPushButton("Xác nhận đối soát")
         self.confirm_button.setProperty("primary", True)
         self.close_button = QPushButton("Đóng")
         actions.addWidget(self.save_button)

@@ -94,7 +94,10 @@ def test_runtime_and_main_window_start_with_isolated_data_root(
         assert runtime.payment_sync_service is not None
         assert runtime.excel_task_controller is not None
         assert runtime.rpa_expense_controller is not None
-        assert window.pages.count() == 4
+        assert window.pages.count() == 3
+        assert [window.navigation.item(i).text() for i in range(3)] == [
+            "Thao tác", "Lịch sử", "Cài đặt"
+        ]
         assert window.workflow_page.open_assistant_button.text() == "Mở Trợ lý ảo"
         assert not hasattr(window.workflow_page, "open_inbox_button")
         assert not hasattr(window.workflow_page, "choose_file_button")

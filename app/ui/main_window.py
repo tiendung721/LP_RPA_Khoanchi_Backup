@@ -33,7 +33,6 @@ from app.services.excel.workbook import (
 )
 
 from .history_page import HistoryPage
-from .log_page import LogPage
 from .review_window import ReviewWindow
 from .settings_page import SettingsPage
 from .workflow_page import WorkflowPage
@@ -270,12 +269,12 @@ class MainWindow(QMainWindow):
         self.navigation = QListWidget()
         self.navigation.setObjectName("navigation")
         self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        for text in ("Thao tác", "Lịch sử", "Cài đặt", "Nhật ký"):
+        for text in ("Thao tác", "Lịch sử", "Cài đặt"):
             item = QListWidgetItem(text)
             item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             self.navigation.addItem(item)
         sidebar_layout.addWidget(self.navigation, 1)
-        self.watcher_status = QLabel("Đang khởi tạo bộ theo dõi…")
+        self.watcher_status = QLabel("Đang chuẩn bị nhận file mới…")
         self.watcher_status.setObjectName("watcherStatus")
         self.watcher_status.setWordWrap(True)
         self.watcher_status.setStyleSheet(
@@ -291,11 +290,9 @@ class MainWindow(QMainWindow):
         self.workflow_page = WorkflowPage(self._settings)
         self.history_page = HistoryPage()
         self.settings_page = SettingsPage(self._settings)
-        self.log_page = LogPage(log_path)
         self.pages.addWidget(self.workflow_page)
         self.pages.addWidget(self.history_page)
         self.pages.addWidget(self.settings_page)
-        self.pages.addWidget(self.log_page)
         shell.addWidget(self.pages, 1)
 
         status = QStatusBar()
@@ -469,8 +466,6 @@ class MainWindow(QMainWindow):
         self.pageChanged.emit(index)
         if index == 1:
             self.refresh_history(silent=True)
-        elif index == 3:
-            self.log_page.refresh()
 
     @Slot()
     def open_assistant(self) -> None:
@@ -2435,7 +2430,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Không tiếp nhận được JSON",
                 f"Không thể xử lý {Path(path).name}: {exc}\n"
-                "Hãy xem trang Nhật ký để biết thêm.",
+                "Hãy kiểm tra file đầu vào và thử lại. Nếu lỗi tiếp tục, hãy liên hệ người hỗ trợ.",
             )
             return None
         finally:
@@ -2891,7 +2886,10 @@ class MainWindow(QMainWindow):
         self.watcher_status.setStyleSheet(
             f"color: {color}; background: {background}; border-radius: 6px; padding: 8px;"
         )
-        self.watcher_status.setText(message)
+        self.watcher_status.setText(
+            "Tự động nhận file mới" if running else "Chưa thể tự nhận file mới"
+        )
+        self.watcher_status.setToolTip(message)
 
     @Slot(str, str)
     def _watcher_rejected(self, path: str, message: str) -> None:

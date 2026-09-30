@@ -217,15 +217,15 @@ class MonthSelectionDialog(AppDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         note = QLabel(
-            "Hãy chọn một sheet để tiếp tục; "
-            "chỉ sheet này được phép thay đổi."
+            "Chọn tháng cần xử lý trong file Excel. "
+            "Chỉ dữ liệu của tháng đã chọn mới được thay đổi."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
         if self.initial_sheet_name and self.clear_saved_callback is not None:
             restore_row = QHBoxLayout()
             self.restore_label = QLabel(
-                "Đã chọn sẵn sheet từ lần xử lý gần nhất."
+                "Đã chọn sẵn tháng từ lần xử lý gần nhất."
             )
             restore_row.addWidget(self.restore_label, 1)
             clear_saved = QPushButton("Xóa lựa chọn đã nhớ cho file này")
@@ -237,7 +237,7 @@ class MonthSelectionDialog(AppDialog):
         self.table = QTableWidget(0, 5)
         self.table.setObjectName("monthCandidateTable")
         self.table.setHorizontalHeaderLabels(
-            ["Sheet", "Tháng", "Năm", "Cập nhật / mới", "Gần nhất"]
+            ["Tên trang tính", "Tháng", "Năm", "Dòng cần xử lý", "Gần nhất"]
         )
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
@@ -602,7 +602,7 @@ class DailySyncAllocationDialog(AppDialog):
         clear_saved_callback: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Ánh xạ các tháng Hàng ngày vào BK")
+        self.setWindowTitle("Chọn tháng BK cho dữ liệu Hàng ngày")
         self.resize(700, 430)
         self.plan = plan
         self.default_source_target_sheets = dict(
@@ -613,15 +613,15 @@ class DailySyncAllocationDialog(AppDialog):
         self._combos: dict[str, QComboBox] = {}
         layout = QVBoxLayout(self)
         note = QLabel(
-            "Chọn sheet BK đích cho từng sheet nguồn. "
-            "Mỗi nguồn chỉ được xử lý một lần."
+            "Ghép từng tháng trong file Hàng ngày với tháng tương ứng trong BK. "
+            "Mỗi tháng nguồn chỉ được xử lý một lần."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
         if self.restored and self.clear_saved_callback is not None:
             restore_row = QHBoxLayout()
             self.restore_label = QLabel(
-                "Đã điền sẵn ánh xạ sheet từ lần xử lý gần nhất."
+                "Đã điền sẵn lựa chọn tháng từ lần xử lý gần nhất."
             )
             restore_row.addWidget(self.restore_label, 1)
             clear_saved = QPushButton("Xóa lựa chọn đã nhớ cho file này")
@@ -630,7 +630,7 @@ class DailySyncAllocationDialog(AppDialog):
             restore_row.addWidget(clear_saved)
             layout.addLayout(restore_row)
         self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Sheet Hàng ngày", "Sheet BK đích"])
+        self.table.setHorizontalHeaderLabels(["Tháng trong file Hàng ngày", "Tháng BK nhận dữ liệu"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
@@ -641,7 +641,7 @@ class DailySyncAllocationDialog(AppDialog):
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(str(source_sheet)))
             combo = QComboBox()
-            combo.addItem("— Chọn sheet —", "")
+            combo.addItem("— Chọn tháng BK —", "")
             for candidate in candidates:
                 if str(_value(candidate, "source_sheet")) == str(source_sheet):
                     name = _sheet_name(candidate)
@@ -672,7 +672,7 @@ class DailySyncAllocationDialog(AppDialog):
             )
         if hasattr(self, "restore_label"):
             self.restore_label.setText(
-                "Đã xóa lựa chọn ghi nhớ; ánh xạ đã trở về mặc định."
+                "Đã xóa lựa chọn ghi nhớ; các tháng đã trở về mặc định."
             )
         self._update_action()
 
@@ -1289,21 +1289,21 @@ class ConflictResolutionDialog(AppDialog):
         self._inactive_conflict_ids: set[str] = set()
         self._problem_detail_conflict_id: str | None = None
         self.setObjectName("excelConflictResolutionDialog")
-        self.setWindowTitle("Xử lý xung đột Excel")
+        self.setWindowTitle("Xử lý dữ liệu chênh lệch")
         self.resize(1320, 660)
         self._build_ui()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         self.title_label = QLabel(
-            f"Có {len(self.conflicts)} mục cần xử lý trước khi ghi workbook."
+            f"Có {len(self.conflicts)} khoản cần quyết định trước khi cập nhật Excel."
         )
         self.title_label.setStyleSheet("font-size: 12pt; font-weight: 700;")
         layout.addWidget(self.title_label)
         note = QLabel(
             "Kiểm tra giá trị hiện tại và chọn cách xử lý cho từng mục. "
-            "Bấm vào nội dung ở cột Vấn đề để xem toàn bộ lý do. "
-            "Workbook chỉ được ghi sau khi toàn bộ lựa chọn hợp lệ."
+            "Bấm vào nội dung ở cột Vấn đề để xem lý do đầy đủ. "
+            "File Excel chỉ được cập nhật sau khi mọi lựa chọn hợp lệ."
         )
         note.setWordWrap(True)
         note.setProperty("muted", True)

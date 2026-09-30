@@ -1158,8 +1158,8 @@ def test_reconciliation_dialog_has_only_the_six_confirmed_actions(qtbot, tmp_pat
             dialog.delete_button.text(), dialog.save_button.text(),
             dialog.confirm_button.text(), dialog.close_button.text(),
         ] == [
-            "Mở Trợ lý bóc tách", "Thêm dòng HĐ", "Xóa dòng",
-            "Lưu", "Xác nhận", "Đóng",
+            "Mở Trợ lý bóc tách", "Thêm hóa đơn", "Xóa dòng",
+            "Lưu", "Xác nhận đối soát", "Đóng",
         ]
         assert dialog.confirm_button.isEnabled()
         assert dialog.invoice_table.rowCount() == 1
@@ -1170,7 +1170,7 @@ def test_reconciliation_dialog_has_only_the_six_confirmed_actions(qtbot, tmp_pat
         assert dialog.group_value.text().startswith("PROSPER 2625S – Lần 1 –")
         assert not hasattr(dialog, "group_combo")
         assert not hasattr(dialog, "source_table")
-        assert dialog.manage_sources_button.text() == "Quản lý nguồn"
+        assert dialog.manage_sources_button.text() == "Chọn tháng đối soát"
         assert dialog.source_summary_label.text().startswith("1 tháng  •  2 cont")
         assert dialog.bk_path_warning_label.isVisible()
         assert "BK.xlsx" in dialog.bk_path_warning_label.text()

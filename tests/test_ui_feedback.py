@@ -134,7 +134,7 @@ def test_workflow_uses_named_groups_instead_of_numbered_steps(qtbot) -> None:
     assert "BÓC TÁCH CHỨNG TỪ" in visible_copy
     assert "KIỂM TRA DỮ LIỆU" in visible_copy
     assert "XỬ LÝ EXCEL" in visible_copy
-    assert "TỰ ĐỘNG HÓA RPA" in visible_copy
+    assert "NHẬP DỮ LIỆU QUYẾT TOÁN" in visible_copy
 
 
 def test_excel_actions_are_three_distinct_vertical_rows(qtbot) -> None:

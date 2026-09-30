@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QTableView,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -420,6 +421,9 @@ class ReviewWindow(QMainWindow):
         title = QLabel("Kiểm tra dữ liệu bóc tách")
         title.setObjectName("pageTitle")
         title_box.addWidget(title)
+        subtitle = QLabel("Rà soát các dòng cần sửa, sau đó lưu dữ liệu để tiếp tục xử lý.")
+        subtitle.setProperty("muted", True)
+        title_box.addWidget(subtitle)
         self.source_label = QLabel()
         self.source_label.setProperty("muted", True)
         title_box.addWidget(self.source_label)
@@ -445,8 +449,6 @@ class ReviewWindow(QMainWindow):
         self.saved_value = QLabel()
         self.status_value = QLabel()
         metadata = (
-            ("Batch ID", self.batch_id_value),
-            ("SHA-256", self.sha_value),
             ("Thời điểm nhận", self.received_value),
             ("Lưu gần nhất", self.saved_value),
             ("Trạng thái", self.status_value),
@@ -458,6 +460,38 @@ class ReviewWindow(QMainWindow):
             meta_layout.addWidget(caption, 0, column)
             meta_layout.addWidget(value, 1, column)
         root.addWidget(meta_card)
+
+        self.technical_toggle = QToolButton()
+        self.technical_toggle.setText("Thông tin kỹ thuật")
+        self.technical_toggle.setCheckable(True)
+        self.technical_toggle.setChecked(False)
+        self.technical_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.technical_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.technical_toggle.setProperty("quiet", True)
+        root.addWidget(self.technical_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        self.technical_panel = QFrame()
+        self.technical_panel.setProperty("card", True)
+        technical_layout = QGridLayout(self.technical_panel)
+        for column, (label, value) in enumerate(
+            (("Mã lượt xử lý", self.batch_id_value), ("Dấu kiểm file", self.sha_value))
+        ):
+            caption = QLabel(label)
+            caption.setProperty("muted", True)
+            technical_layout.addWidget(caption, 0, column)
+            technical_layout.addWidget(value, 1, column)
+        self.raw_button = QPushButton("Xem dữ liệu gốc")
+        self.raw_button.setObjectName("rawJsonButton")
+        technical_layout.addWidget(self.raw_button, 0, 2, 2, 1)
+        self.technical_panel.setVisible(False)
+        self.technical_toggle.toggled.connect(self.technical_panel.setVisible)
+        self.technical_toggle.toggled.connect(
+            lambda checked: self.technical_toggle.setArrowType(
+                Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
+            )
+        )
+        root.addWidget(self.technical_panel)
 
         stats_line = QHBoxLayout()
         stats_line.setSpacing(8)
@@ -491,7 +525,7 @@ class ReviewWindow(QMainWindow):
         self.search_edit = QLineEdit()
         self.search_edit.setObjectName("reviewSearchEdit")
         self.search_edit.setPlaceholderText(
-            "Tìm container, B/L, Số HĐ hoặc Bên vận tải…  (Ctrl+F)"
+            "Tìm số container, vận đơn, hóa đơn hoặc bên vận tải…  (Ctrl+F)"
         )
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setMinimumWidth(220)
@@ -532,9 +566,7 @@ class ReviewWindow(QMainWindow):
         self.delete_button = QPushButton("Xóa dòng")
         self.delete_button.setObjectName("deleteRowButton")
         self.delete_button.setProperty("danger", True)
-        self.raw_button = QPushButton("Xem JSON thô")
-        self.raw_button.setObjectName("rawJsonButton")
-        for button in (self.add_button, self.edit_button, self.delete_button, self.raw_button):
+        for button in (self.add_button, self.edit_button, self.delete_button):
             action_toolbar.addWidget(button)
         root.addLayout(action_toolbar)
 

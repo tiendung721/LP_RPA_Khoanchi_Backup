@@ -11,7 +11,7 @@ def test_workflow_only_exposes_assistant_action_in_step_one(qtbot) -> None:
     qtbot.addWidget(page)
 
     assert page.open_assistant_button.text() == "Mở Trợ lý ảo"
-    assert page.open_bang_ke_assistant_button.text() == "Mở tool bảng kê"
+    assert page.open_bang_ke_assistant_button.text() == "Mở trợ lý bảng kê"
     assert not hasattr(page, "open_inbox_button")
     assert not hasattr(page, "choose_file_button")
     assert not hasattr(page, "pending_card")
@@ -34,7 +34,7 @@ def test_valid_batch_shows_saved_message_and_vietnamese_time(qtbot) -> None:
 
     assert page.file_status_badge.text() == "Đã có file"
     assert page.file_name_label.text() == "ket_qua_boc_tach.json"
-    assert "Đã lưu dữ liệu bóc tách JSON" in page.file_note_label.text()
+    assert "Đã kiểm tra và lưu dữ liệu bóc tách" in page.file_note_label.text()
     assert page.saved_label.text() == (
         "Lưu thành công lần cuối: 22:18 ngày 27/07/2026"
     )
@@ -55,7 +55,10 @@ def test_invalid_batch_never_claims_successful_save(qtbot) -> None:
     )
 
     assert page.file_status_badge.text() == "File không hợp lệ"
-    assert page.file_note_label.text() == "Thiếu khóa d."
+    assert page.file_note_label.text() == (
+        "Không đọc được file kết quả. Hãy kiểm tra file vừa tải về và thử lại."
+    )
+    assert page.file_note_label.toolTip() == "Thiếu khóa d."
     assert page.saved_label.text().endswith("—")
     assert not page.review_button.isEnabled()
 

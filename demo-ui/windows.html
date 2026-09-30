@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Xem thử các cửa sổ · Trợ lý dữ liệu quyết toán</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="window-gallery.css">
+  <script src="window-gallery.js" defer></script>
+</head>
+<body class="gallery-body">
+  <div class="gallery-layout">
+    <aside class="gallery-sidebar">
+      <div class="gallery-logo"><span class="gallery-logo-mark">▤</span><div><strong>Xem thử giao diện</strong><small>Trợ lý dữ liệu quyết toán</small></div></div>
+      <p class="gallery-nav-label">CÁC CỬA SỔ MẪU</p>
+      <nav id="gallery-nav" aria-label="Chọn cửa sổ xem thử">
+        <button class="gallery-nav-item active" data-view="review">01 <span>Kiểm tra dữ liệu</span></button>
+        <button class="gallery-nav-item" data-view="edit">02 <span>Sửa khoản chi</span></button>
+        <button class="gallery-nav-item" data-view="reconcile">03 <span>Đối soát số cont</span></button>
+        <button class="gallery-nav-item" data-view="month">04 <span>Chọn tháng Excel</span></button>
+        <button class="gallery-nav-item" data-view="conflict">05 <span>Xử lý chênh lệch</span></button>
+        <button class="gallery-nav-item" data-view="confirmation">06 <span>Xác nhận cập nhật</span></button>
+        <button class="gallery-nav-item" data-view="rpa">07 <span>Chọn số quyết toán</span></button>
+      </nav>
+      <div class="gallery-sidebar-bottom"><span class="status-dot"></span> Demo dùng dữ liệu minh họa</div>
+    </aside>
+    <main class="gallery-main">
+      <header class="gallery-heading">
+        <div><div class="eyebrow">PHƯƠNG ÁN GIỮ LUỒNG HIỆN TẠI</div><h1 id="gallery-title">Kiểm tra dữ liệu</h1><p id="gallery-subtitle">Các cửa sổ vẫn mở từ đúng tác vụ quen thuộc.</p></div>
+        <a class="btn" href="index.html">← Về trang Thao tác</a>
+      </header>
+      <div class="gallery-stage"><div id="gallery-preview"></div></div>
+      <section class="gallery-explanation card"><div><span class="eyebrow">CẦN GIỮ</span><p id="gallery-kept"></p></div><div><span class="eyebrow">ĐƯỢC CẢI THIỆN</span><p id="gallery-improved"></p></div></section>
+      <p class="gallery-disclaimer">Bản xem trước giao diện. Các nút chỉ mô phỏng thao tác để duyệt thiết kế; không đọc hoặc ghi file của phần mềm.</p>
+    </main>
+  </div>
+</body>
+</html>

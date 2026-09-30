@@ -152,7 +152,7 @@ class WorkflowPage(QWidget):
         step1_details.addWidget(name1)
         guide = QLabel(
             "Mở Trợ lý ảo, gửi chứng từ cần xử lý và tải file kết quả. "
-            "Ứng dụng sẽ tự nhận file mới trong thư mục Output."
+            "Ứng dụng sẽ tự nhận file kết quả khi bạn tải về."
         )
         guide.setWordWrap(True)
         guide.setProperty("muted", True)
@@ -171,7 +171,7 @@ class WorkflowPage(QWidget):
         self.open_assistant_button.setObjectName("openAssistantButton")
         self.open_assistant_button.setProperty("primary", True)
         self.open_assistant_button.setFixedWidth(primary_button_width)
-        self.open_bang_ke_assistant_button = QPushButton("Mở tool bảng kê")
+        self.open_bang_ke_assistant_button = QPushButton("Mở trợ lý bảng kê")
         self.open_bang_ke_assistant_button.setObjectName("openBangKeAssistantButton")
         self.open_bang_ke_assistant_button.setFixedWidth(primary_button_width)
         assistant_buttons = QHBoxLayout()
@@ -387,7 +387,7 @@ class WorkflowPage(QWidget):
 
         self.daily_sync_action = add_excel_action(
             "Hàng ngày → BK",
-            "Cập nhật dữ liệu từ workbook Hàng ngày vào BK Tổng hợp.",
+            "Cập nhật dữ liệu từ file Hàng ngày vào BK Tổng hợp.",
             self.sync_status_label,
             self.sync_daily_button,
             self.view_daily_sync_button,
@@ -403,7 +403,7 @@ class WorkflowPage(QWidget):
         )
         self.payment_sync_action = add_excel_action(
             "BK → Thanh toán",
-            "Chuyển dữ liệu từ BK Tổng hợp sang workbook Thanh toán.",
+            "Chuyển dữ liệu từ BK Tổng hợp sang file Thanh toán.",
             self.payment_sync_status_label,
             self.sync_payment_button,
             self.view_payment_sync_button,
@@ -423,7 +423,7 @@ class WorkflowPage(QWidget):
         step4.setSpacing(16)
         step4_details = QVBoxLayout()
         step4_details.setSpacing(4)
-        category4 = QLabel("TỰ ĐỘNG HÓA RPA")
+        category4 = QLabel("NHẬP DỮ LIỆU QUYẾT TOÁN")
         category4.setProperty("cardCategory", True)
         step4_details.addWidget(category4)
         name4 = QLabel("Nhập khoản chi lên phần mềm quyết toán")
@@ -431,8 +431,8 @@ class WorkflowPage(QWidget):
         name4.setWordWrap(True)
         step4_details.addWidget(name4)
         guide4 = QLabel(
-            "Chọn sheet BK, chọn một hoặc nhiều số quyết toán, sau đó khởi chạy "
-            "flow PAD để nhập các khoản chi đã tổng hợp lên phần mềm quyết toán."
+            "Chọn tháng BK và các số quyết toán cần nhập. Ứng dụng sẽ mở công cụ "
+            "tự động để chuyển các khoản chi sang phần mềm quyết toán."
         )
         guide4.setWordWrap(True)
         guide4.setProperty("muted", True)
@@ -452,7 +452,7 @@ class WorkflowPage(QWidget):
         self.run_rpa_expense_button.setProperty("primary", True)
         self.run_rpa_expense_button.setFixedWidth(primary_button_width)
         step4_controls.addWidget(self.run_rpa_expense_button)
-        self.rpa_expense_status_label = QLabel("Chạy RPA gần nhất: —")
+        self.rpa_expense_status_label = QLabel("Lần nhập gần nhất: —")
         self.rpa_expense_status_label.setObjectName("rpaExpenseStatusLabel")
         self.rpa_expense_status_label.setWordWrap(True)
         self.rpa_expense_status_label.setProperty("muted", True)
@@ -468,7 +468,7 @@ class WorkflowPage(QWidget):
         rpa_recent.addWidget(self.view_rpa_expense_button)
         step4_details.addLayout(rpa_recent)
         self.rpa_loading_bar = LinearLoadingBar()
-        self.rpa_loading_bar.setAccessibleName("Tiến trình chuẩn bị RPA")
+        self.rpa_loading_bar.setAccessibleName("Tiến trình chuẩn bị nhập dữ liệu")
         step4_controls.addWidget(self.rpa_loading_bar)
         step4.addLayout(step4_controls)
         workflow_grid.addWidget(self.step4_card, 3, 0)
@@ -498,7 +498,7 @@ class WorkflowPage(QWidget):
                 "padding: 4px 8px;"
             )
         else:
-            self.assistant_status.setText("Chưa cấu hình BAT")
+            self.assistant_status.setText("Chưa thiết lập trợ lý")
             self.assistant_status.setStyleSheet(
                 "color: #A16207; background: #FFF8DB; border-radius: 5px; "
                 "padding: 4px 8px;"
@@ -507,19 +507,19 @@ class WorkflowPage(QWidget):
             _get(settings, "bang_ke_assistant_bat_path", default="") or ""
         ).strip()
         self.open_bang_ke_assistant_button.setToolTip(
-            "" if bang_ke_bat else "Chưa cấu hình BAT mở tool bảng kê."
+            "" if bang_ke_bat else "Chưa thiết lập trợ lý bảng kê trong Cài đặt."
         )
         rpa_bat = str(
             _get(settings, "rpa_expense_bat_path", default="") or ""
         ).strip()
         if rpa_bat:
-            self.rpa_configuration_status.setText("Đã cấu hình BAT RPA")
+            self.rpa_configuration_status.setText("Đã sẵn sàng")
             self.rpa_configuration_status.setStyleSheet(
                 "color: #15803D; background: #ECFDF3; border-radius: 5px; "
                 "padding: 4px 8px;"
             )
         else:
-            self.rpa_configuration_status.setText("Chưa cấu hình BAT RPA")
+            self.rpa_configuration_status.setText("Cần thiết lập công cụ nhập")
             self.rpa_configuration_status.setStyleSheet(
                 "color: #A16207; background: #FFF8DB; border-radius: 5px; "
                 "padding: 4px 8px;"
@@ -537,6 +537,7 @@ class WorkflowPage(QWidget):
             )
             self.file_name_label.setText("Chưa có file bóc tách")
             self.file_note_label.setText("Chưa nhận được file bóc tách dữ liệu.")
+            self.file_note_label.setToolTip("")
             self.saved_label.setText("Lưu thành công lần cuối: —")
             self.review_button.setEnabled(False)
             return
@@ -555,20 +556,24 @@ class WorkflowPage(QWidget):
                 "padding: 4px 8px; font-weight: 600;"
             )
             self.file_note_label.setText(
-                str(_get(metadata, "last_error", default="File JSON không hợp lệ."))
+                "Không đọc được file kết quả. Hãy kiểm tra file vừa tải về và thử lại."
+            )
+            self.file_note_label.setToolTip(
+                str(_get(metadata, "last_error", default=""))
             )
             self.saved_label.setText("Lưu thành công lần cuối: —")
             self.review_button.setEnabled(False)
             return
 
         self.file_status_badge.setText("Đã có file")
+        self.file_note_label.setToolTip("")
         self.file_status_badge.setStyleSheet(
             "color: #15803D; background: #ECFDF3; border-radius: 5px; "
             "padding: 4px 8px; font-weight: 600;"
         )
         saved_at = _get(metadata, "last_saved_at", "saved_at")
         self.file_note_label.setText(
-            "Đã lưu dữ liệu bóc tách JSON sau khi kiểm tra."
+            "Đã kiểm tra và lưu dữ liệu bóc tách."
             if saved_at
             else "Đã nhận file mới; hãy kiểm tra và lưu dữ liệu."
         )
@@ -714,22 +719,22 @@ class WorkflowPage(QWidget):
         self.post_expenses_button.setEnabled(False)
         self.sync_payment_button.setEnabled(False)
         self.run_rpa_expense_button.setEnabled(False)
-        self.run_rpa_expense_button.setText("Đang chuẩn bị RPA…")
+        self.run_rpa_expense_button.setText("Đang chuẩn bị…")
         self.rpa_expense_status_label.setText(
-            f"RPA: {message or 'Đang chuẩn bị dữ liệu…'}"
+            f"Nhập quyết toán: {message or 'Đang chuẩn bị dữ liệu…'}"
         )
 
     def set_rpa_progress(self, message: str) -> None:
-        self.rpa_expense_status_label.setText(f"RPA: {message}")
+        self.rpa_expense_status_label.setText(f"Nhập quyết toán: {message}")
 
     def set_rpa_result(self, result: Any = None) -> None:
         message = (
             result
             if isinstance(result, str)
-            else _get(result, "message", default="Đã khởi chạy PAD.")
+            else _get(result, "message", default="Đã mở công cụ nhập.")
         )
         self.rpa_expense_status_label.setText(
-            f"Chạy RPA gần nhất: {message or 'Đã khởi chạy PAD.'}"
+            f"Lần nhập gần nhất: {message or 'Đã mở công cụ nhập.'}"
         )
 
     def set_latest_excel_data_available(

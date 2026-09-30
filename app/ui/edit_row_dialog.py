@@ -118,7 +118,7 @@ class EditRowDialog(AppDialog):
         super().__init__(parent)
         self.setWindowTitle(title or ("Thêm dòng dữ liệu" if row is None else "Sửa dòng dữ liệu"))
         self.setModal(True)
-        self.resize(680, 760)
+        self.resize(720, 800)
         self._editing = row is not None
         self._original_rule: Any = None
         self._original_vessel_voyage_raw: Any = None
@@ -148,12 +148,21 @@ class EditRowDialog(AppDialog):
         heading = QLabel(self.windowTitle())
         heading.setObjectName("pageTitle")
         root.addWidget(heading)
+        introduction = QLabel(
+            "Kiểm tra thông tin chứng từ và khoản chi. Các trường còn thiếu sẽ được nhắc ở cuối biểu mẫu."
+        )
+        introduction.setProperty("muted", True)
+        introduction.setWordWrap(True)
+        root.addWidget(introduction)
 
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         form.setHorizontalSpacing(14)
         form.setVerticalSpacing(12)
 
+        source_section = QLabel("CHỨNG TỪ VÀ VẬN CHUYỂN")
+        source_section.setProperty("formSection", True)
+        form.addRow(source_section)
         self.source_document_label = QLabel()
         self.source_document_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -168,6 +177,7 @@ class EditRowDialog(AppDialog):
         self.container_edit.setClearButtonEnabled(True)
         self.container_hint = QLabel("Mẫu thường gặp: 4 chữ cái + 7 chữ số; sai mẫu chỉ là cảnh báo.")
         self.container_hint.setProperty("muted", True)
+        self.container_hint.setWordWrap(True)
         container_box = QVBoxLayout()
         container_box.setContentsMargins(0, 0, 0, 0)
         container_box.setSpacing(3)
@@ -175,20 +185,20 @@ class EditRowDialog(AppDialog):
         container_box.addWidget(self.container_hint)
         container_widget = QWidget()
         container_widget.setLayout(container_box)
-        form.addRow("Container:", container_widget)
+        form.addRow("Số container:", container_widget)
 
         self.bl_edit = QLineEdit()
         self.bl_edit.setObjectName("blEdit")
         self.bl_edit.setPlaceholderText("Để trống nếu chưa xác định")
         self.bl_edit.setMaxLength(200)
         self.bl_edit.setClearButtonEnabled(True)
-        form.addRow("Số B/L:", self.bl_edit)
+        form.addRow("Số vận đơn (B/L):", self.bl_edit)
 
         self.sqt_edit = QLineEdit()
         self.sqt_edit.setObjectName("sourceSqtEdit")
         self.sqt_edit.setPlaceholderText("Số nguyên dương; để trống nếu không có")
         self.sqt_edit.setClearButtonEnabled(True)
-        form.addRow("SQT nguồn:", self.sqt_edit)
+        form.addRow("Số quyết toán nguồn:", self.sqt_edit)
 
         self.vessel_name_edit = QLineEdit()
         self.vessel_name_edit.setObjectName("vesselNameEdit")
@@ -211,13 +221,13 @@ class EditRowDialog(AppDialog):
 
         self.invoice_container_count_edit = QLineEdit()
         self.invoice_container_count_edit.setPlaceholderText("Số nguyên dương")
-        form.addRow("SL cont HĐ:", self.invoice_container_count_edit)
+        form.addRow("Số container trên hóa đơn:", self.invoice_container_count_edit)
 
         self.container_count_basis_combo = QComboBox()
-        self.container_count_basis_combo.addItem("UNKNOWN – Chưa xác định", "UNKNOWN")
-        self.container_count_basis_combo.addItem("EXPLICIT – Ghi rõ trên HĐ", "EXPLICIT")
-        self.container_count_basis_combo.addItem("CALCULATED – Tính từ HĐ", "CALCULATED")
-        form.addRow("Căn cứ SL:", self.container_count_basis_combo)
+        self.container_count_basis_combo.addItem("Chưa xác định", "UNKNOWN")
+        self.container_count_basis_combo.addItem("Ghi rõ trên hóa đơn", "EXPLICIT")
+        self.container_count_basis_combo.addItem("Tính từ hóa đơn", "CALCULATED")
+        form.addRow("Cách xác định số lượng:", self.container_count_basis_combo)
         self._sea_freight_widgets = (
             self.vessel_name_edit,
             self.voyage_no_edit,
@@ -227,8 +237,15 @@ class EditRowDialog(AppDialog):
         )
         self._form = form
 
+        expense_section = QLabel("KHOẢN CHI VÀ HÓA ĐƠN")
+        expense_section.setProperty("formSection", True)
+        form.addRow(expense_section)
         self.fee_combo = QComboBox()
         self.fee_combo.setObjectName("feeCombo")
+        self.fee_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.fee_combo.setMinimumContentsLength(20)
         self.fee_combo.addItem("— Chọn loại cước —", None)
         for code, name in FEE_CATALOG.items():
             self.fee_combo.addItem(f"{code} – {name}", code)
@@ -237,6 +254,10 @@ class EditRowDialog(AppDialog):
 
         self.rule_combo = QComboBox()
         self.rule_combo.setObjectName("ruleCombo")
+        self.rule_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.rule_combo.setMinimumContentsLength(20)
         for code, name in RULE_CATALOG.items():
             prefix = "null" if code is None else code
             self.rule_combo.addItem(f"{prefix} – {name}", code)
@@ -248,12 +269,12 @@ class EditRowDialog(AppDialog):
         self.invoice_no_edit.setPlaceholderText("Để trống nếu chưa xác định")
         self.invoice_no_edit.setMaxLength(200)
         self.invoice_no_edit.setClearButtonEnabled(True)
-        form.addRow("Số HĐ:", self.invoice_no_edit)
+        form.addRow("Số hóa đơn:", self.invoice_no_edit)
 
         self.invoice_date_edit = QLineEdit()
-        self.invoice_date_edit.setPlaceholderText("YYYY-MM-DD")
+        self.invoice_date_edit.setPlaceholderText("Ví dụ: 2026-09-30")
         self.invoice_date_edit.setClearButtonEnabled(True)
-        form.addRow("Ngày HĐ:", self.invoice_date_edit)
+        form.addRow("Ngày hóa đơn (năm-tháng-ngày):", self.invoice_date_edit)
 
         self.carrier_edit = QLineEdit()
         self.carrier_edit.setObjectName("carrierEdit")
@@ -277,13 +298,14 @@ class EditRowDialog(AppDialog):
             else "Lưu dưới dạng số nguyên VND; không nhập ký hiệu tiền tệ hoặc số âm."
         )
         amount_hint.setProperty("muted", True)
+        amount_hint.setWordWrap(True)
         amount_box.addWidget(amount_hint)
         amount_widget = QWidget()
         amount_widget.setLayout(amount_box)
         form.addRow("Số tiền:", amount_widget)
         root.addLayout(form)
 
-        validation_label = QLabel("Kiểm tra realtime")
+        validation_label = QLabel("Thông tin cần kiểm tra")
         validation_label.setStyleSheet("font-weight: 600;")
         root.addWidget(validation_label)
         self.validation_view = QPlainTextEdit()
