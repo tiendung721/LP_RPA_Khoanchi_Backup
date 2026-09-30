@@ -97,6 +97,7 @@ BK_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "storage": ("Lưu cont",),
     "overweight": ("Quá tải",),
     "vs_do": ("VS + D/O", "VS D/O LỆNH", "VS DO LỆNH"),
+    "seal": ("PHÍ SEAL", "PHÍ CHÌ"),
     "command_fee": ("LÀM LỆNH", "Làm lệnh"),
     "repair": ("SỬA CHỮA", "Sửa chữa"),
     "carrier_hp": BK_CARRIER_HEADER_ALIASES["HP"],
@@ -114,6 +115,7 @@ PAYMENT_FIELDS: tuple[str, ...] = (
     "storage",
     "overweight",
     "vs_do",
+    "seal",
     "command_fee",
     "repair",
 )
@@ -124,6 +126,7 @@ NAM_FIELDS: tuple[str, ...] = (
     "loaded_lift",
     "empty_drop",
     "vs_do",
+    "seal",
     "command_fee",
     "storage",
     "repair",
@@ -137,6 +140,7 @@ INVOICE_FIELDS: tuple[str, ...] = (
     "loaded_lift",
     "empty_drop",
     "vs_do",
+    "seal",
     "storage",
     "repair",
     "overweight",
@@ -147,6 +151,8 @@ INVOICE_HEADER_ALIASES: tuple[str, ...] = (
     "Số hóa đơn",
     "Số hoá đơn",
     "Hóa đơn",
+    "Hóa đơn VS",
+    "Số HĐ Seal",
     "Hoá đơn",
     "HD",
 )
@@ -156,6 +162,7 @@ FIELD_LABELS: dict[str, str] = {
     "loaded_lift": "Nâng hàng",
     "empty_drop": "Hạ vỏ",
     "vs_do": "VS + D/O",
+    "seal": "Phí Seal",
     "command_fee": "Làm lệnh",
     "storage": "Lưu cont",
     "repair": "Sửa chữa",
@@ -171,6 +178,7 @@ TARGET_DETAIL_HEADERS: dict[str, tuple[str, ...]] = {
     "loaded_lift": ("NÂNG HÀNG",),
     "empty_drop": ("HẠ VỎ",),
     "vs_do": ("VS + D/O", "VS D/O"),
+    "seal": ("PHÍ SEAL", "PHÍ CHÌ"),
     "command_fee": ("LÀM LỆNH",),
     "storage": ("Lưu Cont", "Lưu container"),
     "repair": ("Sửa chữa Cont", "SỬA CHỮA"),
@@ -601,7 +609,20 @@ def _ensure_bk_structure(
     ll_columns = _matching_columns(
         headers, BK_HEADER_ALIASES["command_fee"], before=boundary
     )
-    desired_ll = vs_col + 2
+    seal_columns = _matching_columns(
+        headers, BK_HEADER_ALIASES["seal"], before=boundary
+    )
+    has_vs_invoice = normalize_header(
+        worksheet.cell(1, vs_col + 1).value
+    ) in {normalize_header(value) for value in INVOICE_HEADER_ALIASES}
+    expected_seal_col = vs_col + (2 if has_vs_invoice else 1)
+    if seal_columns and seal_columns != [expected_seal_col]:
+        raise PaymentSyncError(
+            f"Sheet {worksheet.title} có cột PHÍ SEAL không đúng vị trí."
+        )
+    desired_ll = vs_col + (1 if has_vs_invoice else 0) + (
+        3 if seal_columns else 1
+    )
     if (
         ll_columns == [desired_ll]
         and normalize_header(worksheet.cell(1, desired_ll).value)
@@ -723,6 +744,13 @@ def _ensure_summary_block(
     worksheet: Any,
     report: NormalizationReport,
 ) -> int:
+    from .bang_ke import BangKeColumnError, ensure_bang_ke_seal_columns
+
+    try:
+        if ensure_bang_ke_seal_columns(worksheet, header_row=1):
+            report.add_change(worksheet.title)
+    except BangKeColumnError as exc:
+        raise PaymentSyncError(str(exc)) from exc
     summary_start = find_summary_start(worksheet)
     headers = _header_values(worksheet)
     if summary_start is None:
@@ -850,8 +878,18 @@ def _find_target_header_row(worksheet: Any) -> int:
     )
 
 
+def _ensure_payment_seal_columns(worksheet: Any, header_row: int) -> bool:
+    from .bang_ke import BangKeColumnError, ensure_bang_ke_seal_columns
+
+    try:
+        return ensure_bang_ke_seal_columns(worksheet, header_row=header_row)
+    except BangKeColumnError as exc:
+        raise PaymentSyncError(str(exc)) from exc
+
+
 def _resolve_target_columns(worksheet: Any) -> tuple[int, dict[str, int], int]:
     header_row = _find_target_header_row(worksheet)
+    _ensure_payment_seal_columns(worksheet, header_row)
     summary_start = find_summary_start(worksheet, header_row=header_row)
     if summary_start is None:
         raise PaymentSyncError(
@@ -1594,6 +1632,19 @@ class PaymentSheetProfile:
     aliases: Mapping[str, Sequence[str]] = {}
 
     def resolve(self, worksheet: Any) -> ResolvedPaymentProfile:
+        if self.target_type == "NAM":
+            for row in range(1, min(30, _effective_max_row(worksheet)) + 1):
+                header_keys = {
+                    normalize_header(worksheet.cell(row, column).value)
+                    for column in range(1, _effective_max_column(worksheet) + 1)
+                }
+                if (
+                    normalize_header("QT") in header_keys
+                    and normalize_header("SỐ CONT") in header_keys
+                    and normalize_header("VS + D/O") in header_keys
+                ):
+                    _ensure_payment_seal_columns(worksheet, row)
+                    break
         scan_columns = _effective_max_column(worksheet)
         scan_rows = min(30, _effective_max_row(worksheet))
         required = ("sqt", "container", "date")
@@ -1745,6 +1796,7 @@ class NAMSheetProfile(PaymentSheetProfile):
         "loaded_lift": ("NÂNG HÀNG",),
         "empty_drop": ("HẠ VỎ",),
         "vs_do": ("VS + D/O", "VS D/O"),
+        "seal": ("PHÍ SEAL", "PHÍ CHÌ"),
         "command_fee": ("LÀM LỆNH",),
         "storage": ("Lưu Cont", "Lưu container"),
         "repair": ("Sửa chữa Cont", "SỬA CHỮA"),

@@ -17,7 +17,10 @@ from app.services.excel.headers import (
     HeaderResolver,
     normalize_header,
 )
-from app.services.excel.bang_ke import ensure_bang_ke_fee_columns
+from app.services.excel.bang_ke import (
+    ensure_bang_ke_fee_columns,
+    ensure_bang_ke_seal_columns,
+)
 from app.services.excel.resolvers import (
     MonthSheetService,
     YearResolutionError,
@@ -71,6 +74,29 @@ def test_bang_ke_column_normalization_deletes_vat_and_keeps_gia_han(
     assert sheet["F2"].value == 150_000
     assert sheet["H2"].value == "=0+F2"
     assert not ensure_bang_ke_fee_columns(sheet, header_row=1)
+    workbook.close()
+
+
+def test_seal_columns_are_idempotent_and_rpa_formula_excludes_seal() -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    for column, header in enumerate(
+        ("SQT", "VS + D/O", "Số HĐ", "LÀM LỆNH", "QT"), 1
+    ):
+        sheet.cell(1, column).value = header
+    sheet["B2"] = 360_000
+    sheet["D2"] = 150_000
+    sheet["E2"] = "=B2+D2"
+
+    assert ensure_bang_ke_seal_columns(sheet, header_row=1)
+    assert [sheet.cell(1, col).value for col in range(2, 7)] == [
+        "VS + D/O", "Số HĐ", "PHÍ SEAL", "Số HĐ Seal", "LÀM LỆNH"
+    ]
+    sheet["D2"] = 50_000
+    sheet["E2"] = "4494"
+    assert sheet["G2"].value == "=B2+F2"
+    assert not ensure_bang_ke_seal_columns(sheet, header_row=1)
+    assert sheet["D2"].value == 50_000
     workbook.close()
 
 

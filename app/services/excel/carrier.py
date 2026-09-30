@@ -26,7 +26,7 @@ MISSING_INVOICE = "CHƯA CÓ HĐ"
 SEA_FEE_CODES = frozenset({"CB"})
 ROAD_FEE_CODES = frozenset(DAILY_SYNC_CARRIER_FEE_CODES - SEA_FEE_CODES)
 NAM_FEE_CODES = frozenset(
-    {"NV", "HH", "NH", "HV", "VSDL", "LL", "LC", "SC", "QT"}
+    {"NV", "HH", "NH", "HV", "VSDL", "SEAL", "LL", "LC", "SC", "QT"}
 )
 DAILY_MANAGED_CARRIER_GROUPS = frozenset({"SEA", "ROAD"})
 
@@ -76,6 +76,7 @@ INVOICE_SUMMARY_HEADERS = (
     "NH",
     "HV",
     "VSDL",
+    "SEAL",
     "LL",
     "LC",
     "SC",
@@ -85,7 +86,7 @@ INVOICE_SUMMARY_HEADERS = (
     "Cảnh báo",
 )
 
-FEE_CODES = ("HH", "NV", "NH", "HV", "VSDL", "LL", "LC", "SC", "QT")
+FEE_CODES = ("HH", "NV", "NH", "HV", "VSDL", "SEAL", "LL", "LC", "SC", "QT")
 LEGACY_DETAIL_START = 16  # P
 INVOICE_SUMMARY_START = 9  # I
 WARNING_FILL = PatternFill("solid", fgColor="FFF2CC")

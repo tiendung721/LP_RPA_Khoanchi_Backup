@@ -24,8 +24,9 @@ FEE_CATALOG = MappingProxyType(
         "HV": "Hạ vỏ, hạ container rỗng từ xe xuống bãi",
         "VSDL": (
             "Vệ sinh, D/O, phí chứng từ, lệnh giao hàng, điện thả hàng, "
-            "seal, THC hoặc terminal độc lập"
+            "THC hoặc terminal độc lập"
         ),
+        "SEAL": "Phí seal, phí chì",
         "LC": (
             "Lưu container, lưu vỏ, lưu hàng xuất, demurrage, "
             "detention, storage"

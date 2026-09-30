@@ -574,7 +574,9 @@ def test_bang_ke_posts_across_sheets_ensures_gia_han_and_adds_negative(
     try:
         for sheet_name in ("T01 26", "T04 26"):
             sheet = workbook[sheet_name]
-            assert sheet.cell(1, 39).value == "GIA HẠN"
+            assert sheet.cell(1, 41).value == "GIA HẠN"
+            assert sheet.cell(1, 32).value == "PHÍ SEAL"
+            assert sheet.cell(1, 33).value == "Số HĐ Seal"
             assert "THUẾ GTGT" not in [
                 sheet.cell(1, column).value
                 for column in range(1, sheet.max_column + 1)
@@ -582,8 +584,99 @@ def test_bang_ke_posts_across_sheets_ensures_gia_han_and_adds_negative(
         assert workbook["T01 26"].cell(2, 30).value == 718_000
         assert workbook["T01 26"].cell(2, 26).value == 590_700
         assert workbook["T01 26"].cell(2, 28).value == 440_000
-        assert workbook["T01 26"].cell(2, 39).value is None
-        assert workbook["T04 26"].cell(2, 39).value == 150_000
+        assert workbook["T01 26"].cell(2, 41).value is None
+        assert workbook["T04 26"].cell(2, 41).value == 150_000
+    finally:
+        workbook.close()
+
+
+def test_seal_posting_warns_when_same_invoice_has_existing_vsdl(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready.json"
+    target = tmp_path / "BK 2026.xlsx"
+    _save_ready(
+        ready,
+        [["DRYU3045911", None, "SEAL", "CV", "4494", None, 50_000]],
+    )
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "T08 26"
+    for column, header in enumerate(
+        (
+            "SQT PM", "Ngày Đóng", "Số Container", "Tên tàu",
+            "VS + D/O", "Số HĐ", "LÀM LỆNH", "SỬA CHỮA",
+            "Số HĐ", "GIA HẠN", "GHI CHÚ",
+        ),
+        1,
+    ):
+        sheet.cell(1, column).value = header
+    sheet["A2"] = 807
+    sheet["B2"] = "2026-08-28"
+    sheet["C2"] = "DRYU3045911"
+    sheet["D2"] = "BIENDONG STAR BS2629S"
+    sheet["E2"] = 410_000
+    sheet["F2"] = "4494"
+    workbook.save(target)
+    workbook.close()
+
+    service = _posting_service(ready, target, tmp_path / "runtime")
+    plan = service.analyze(batch_id=1, sheet_name="T08 26")
+    legacy = [
+        conflict for conflict in plan.conflicts
+        if conflict.conflict_type is ConflictType.POSSIBLE_LEGACY_SEAL
+    ]
+    assert len(legacy) == 1
+    assert legacy[0].details["vsdl_amount"] == 410_000
+    assert legacy[0].default_action is ResolutionAction.SKIP
+    with pytest.raises(CorrectionRequiredError):
+        service.apply(plan, {})
+
+
+def test_seal_and_vsdl_from_one_invoice_post_to_separate_bk_columns(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready.json"
+    target = tmp_path / "BK 2026.xlsx"
+    _save_ready(
+        ready,
+        [
+            ["DRYU3045911", None, "VSDL", "GV", "4494", None, 360_000],
+            ["DRYU3045911", None, "SEAL", "CV", "4494", None, 50_000],
+        ],
+    )
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "T08 26"
+    for column, header in enumerate(
+        (
+            "SQT PM", "Ngày Đóng", "Số Container", "Tên tàu",
+            "VS + D/O", "Số HĐ", "LÀM LỆNH", "SỬA CHỮA",
+            "Số HĐ", "GIA HẠN", "GHI CHÚ",
+        ),
+        1,
+    ):
+        sheet.cell(1, column).value = header
+    sheet["A2"] = 807
+    sheet["B2"] = "2026-08-28"
+    sheet["C2"] = "DRYU3045911"
+    workbook.save(target)
+    workbook.close()
+
+    service = _posting_service(ready, target, tmp_path / "runtime")
+    plan = service.analyze(batch_id=1, sheet_name="T08 26")
+    assert not plan.conflicts
+    result = service.apply(plan, {})
+    assert result.written_cells == 2
+
+    workbook = load_workbook(target, data_only=False)
+    try:
+        sheet = workbook["T08 26"]
+        columns = {sheet.cell(1, col).value: col for col in range(1, sheet.max_column + 1)}
+        assert sheet.cell(2, columns["VS + D/O"]).value == 360_000
+        assert sheet.cell(2, columns["PHÍ SEAL"]).value == 50_000
+        assert sheet.cell(2, columns["Số HĐ Seal"]).value == "4494"
+        assert sheet.cell(2, columns["VS + D/O"] + 1).value == "4494"
     finally:
         workbook.close()
 

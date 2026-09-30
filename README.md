@@ -8,6 +8,13 @@ Bước 1 hoặc chọn JSON thủ công.
 
 ## Chức năng chính
 
+### Theo dõi phí Seal (phí chì)
+
+- GPT Custom bóc tách phí Seal thành mã `SEAL`, tách khỏi `VSDL` (VS + D/O). Nếu cùng một hóa đơn có cả hai loại phí, mỗi loại có số tiền riêng sau thuế và cùng số hóa đơn nguồn.
+- Khi xử lý BK, phần mềm tự tạo cặp cột `PHÍ SEAL` và `Số HĐ Seal` ngay sau cặp cột VS + D/O. Khi đồng bộ sang file Thanh toán, phần mềm tự tạo cặp cột tương ứng trên sheet NAM. Các giá trị VSDL cũ được giữ nguyên.
+- Phí Seal được theo dõi trong Excel và không được cộng vào số tiền gửi RPA/PAD lên phần mềm quyết toán. Nếu một hóa đơn đã có VSDL trên BK, phần mềm yêu cầu đối chiếu trước khi ghi Seal để tránh cộng trùng số tiền lịch sử.
+- Sau khi cập nhật chương trình, cần cập nhật nội dung GPT Custom từ `gpt_custom_instructions_ngan.txt` hoặc `gpt_custom_instructions_chi_tiet.txt` và `gpt_custom_instructions_bang_ke.txt` theo GPT đang dùng.
+
 - Bước 1 chỉ có nút **Mở Trợ lý ảo**.
 - File BAT do người dùng chọn trong Cài đặt và được chạy tách rời qua
   `cmd.exe`.

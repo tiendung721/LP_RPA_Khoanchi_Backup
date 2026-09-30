@@ -105,6 +105,7 @@ FEE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "NH": ("Nâng Hàng",),
     "HV": ("Hạ vỏ",),
     "VSDL": ("VS D/O LỆNH", "VS DO LỆNH", "VS D/O"),
+    "SEAL": ("PHÍ SEAL", "PHÍ CHÌ"),
     "LC": ("Lưu cont",),
     "QT": ("Quá tải",),
     "LL": ("LÀM LỆNH",),
@@ -126,6 +127,7 @@ INVOICE_HEADER_NAMES = frozenset(
         "VAT",
         "Thuế GTGT",
         "Số HĐ",
+        "Số HĐ Seal",
         "Hóa đơn cước biển",
         "HD",
         "HĐ",
@@ -138,6 +140,7 @@ INVOICE_NUMBER_HEADER_NAMES = frozenset(
         "Hóa đơn",
         "Số hóa đơn",
         "Số HĐ",
+        "Số HĐ Seal",
         "Hóa đơn cước biển",
         "HD",
         "HĐ",
@@ -476,6 +479,7 @@ class ExpensePostingService:
                 ConflictType.TARGET_CELL_OCCUPIED,
                 ConflictType.TARGET_CELL_FORMULA,
                 ConflictType.TARGET_CELL_TEXT,
+                ConflictType.POSSIBLE_LEGACY_SEAL,
             }
         ]
         issues = validate_conflict_resolutions(target_value_conflicts, resolved)
@@ -515,6 +519,7 @@ class ExpensePostingService:
 
             workbook = self.gateway.load(plan.target_path, read_only=False)
             try:
+                self._ensure_seal_columns(workbook, plan.items)
                 if (
                     selected_sheet is not None
                     and selected_sheet not in workbook.sheetnames
@@ -598,6 +603,7 @@ class ExpensePostingService:
                 )
                 write_book = self.gateway.load(working_path, read_only=False)
                 try:
+                    self._ensure_seal_columns(write_book, plan.items)
                     worksheet = write_book[selected_sheet]
                     base = self._resolve_base_headers(worksheet)
                     fee_columns = self._resolve_fee_columns(worksheet, base)
@@ -986,6 +992,7 @@ class ExpensePostingService:
         _progress(progress_callback, "Đang kiểm tra lại dòng và ô đã chọn…")
         workbook = self.gateway.load(plan.target_path, read_only=False)
         try:
+            self._ensure_seal_columns(workbook, items)
             if selected_sheet not in workbook.sheetnames:
                 raise ExpensePostingError(f"Không tìm thấy sheet {selected_sheet}.")
             items, conflicts = self._analyze_items(
@@ -1508,6 +1515,7 @@ class ExpensePostingService:
         history: list[dict[str, Any]] = []
         workbook = self.gateway.load(plan.target_path, read_only=False)
         try:
+            self._ensure_seal_columns(workbook, plan.items)
             for sheet_name in self._ordered_sheet_names(plan.target_sheets):
                 if sheet_name not in workbook.sheetnames:
                     raise ExpensePostingError(f"Không tìm thấy sheet {sheet_name}.")
@@ -1584,6 +1592,7 @@ class ExpensePostingService:
                 )
                 write_book = self.gateway.load(working_path, read_only=False)
                 try:
+                    self._ensure_seal_columns(write_book, plan.items)
                     for sheet_name, sheet_actions in grouped.items():
                         _progress(
                             progress_callback,
@@ -2327,6 +2336,7 @@ class ExpensePostingService:
         *,
         batch_hash: str,
     ) -> tuple[list[PostingItem], list[PostingConflict]]:
+        self._ensure_seal_columns(workbook, items)
         assigned: dict[str, list[PostingItem]] = defaultdict(list)
         unassigned: list[PostingItem] = []
         for item in items:
@@ -2505,6 +2515,22 @@ class ExpensePostingService:
             calculation.forceFullCalc = True
             calculation.calcMode = "auto"
         return changed
+
+    def _ensure_seal_columns(
+        self, workbook: Any, items: Sequence[PostingItem]
+    ) -> None:
+        if not any(item.selected_fee == "SEAL" for item in items):
+            return
+        from .bang_ke import BangKeColumnError, ensure_bang_ke_seal_columns
+
+        for worksheet in workbook.worksheets:
+            if self.months.parse_target_sheet(worksheet.title) is None:
+                continue
+            base = self._resolve_base_headers(worksheet)
+            try:
+                ensure_bang_ke_seal_columns(worksheet, header_row=base.row_end)
+            except BangKeColumnError as exc:
+                raise ExpensePostingError(str(exc)) from exc
 
     def _analyze_bang_ke_items(
         self,
@@ -3159,6 +3185,7 @@ class ExpensePostingService:
         *,
         batch_hash: str,
     ) -> tuple[list[PostingItem], list[PostingConflict]]:
+        self._ensure_seal_columns(workbook, items)
         index, bl_index, manual_candidates, window_names = self._source_window_index(
             workbook, target_sheet
         )
@@ -3234,7 +3261,7 @@ class ExpensePostingService:
                         item_index,
                         item,
                         ConflictType.UNKNOWN_FEE_CODE,
-                        "Mã phí chưa xác định; hãy chọn một trong 12 mã phí.",
+                        f"Mã phí chưa xác định; hãy chọn một trong {len(FEE_HEADER_ALIASES)} mã phí.",
                         (ResolutionAction.SELECT_FEE, ResolutionAction.SKIP),
                         details={"fees": sorted(FEE_HEADER_ALIASES)},
                     )
@@ -3492,6 +3519,11 @@ class ExpensePostingService:
                 sheet_name
             )
             self._set_cell_state(worksheet, item)
+            legacy_seal_conflict = self._legacy_seal_conflict(
+                worksheet, item, item_index=item_index, batch_hash=batch_hash
+            )
+            if legacy_seal_conflict is not None:
+                conflicts.append(legacy_seal_conflict)
             cell_conflict = self._cell_conflict(batch_hash, item_index, item)
             if cell_conflict is not None:
                 conflicts.append(cell_conflict)
@@ -3921,6 +3953,47 @@ class ExpensePostingService:
                 ),
             )
         return None
+
+    def _legacy_seal_conflict(
+        self,
+        worksheet: Any,
+        item: PostingItem,
+        *,
+        item_index: int,
+        batch_hash: str,
+    ) -> PostingConflict | None:
+        if (
+            item.selected_fee != "SEAL"
+            or item.target_row is None
+            or len(item.invoice_candidates) != 1
+            or item.cell_state is None
+            or item.cell_state.kind not in {TargetCellKind.EMPTY, TargetCellKind.ZERO}
+        ):
+            return None
+        base = self._resolve_base_headers(worksheet)
+        fee_columns = self._resolve_fee_columns(worksheet, base)
+        invoice_columns = self._resolve_invoice_columns(worksheet, base, fee_columns)
+        vs_column = fee_columns.get("VSDL")
+        vs_invoice_column = invoice_columns.get("VSDL")
+        if vs_column is None or vs_invoice_column is None:
+            return None
+        vs_amount = worksheet.cell(item.target_row, vs_column).value
+        vs_invoice = worksheet.cell(item.target_row, vs_invoice_column).value
+        if vs_amount in (None, "", 0, 0.0) or _invoice_key(vs_invoice) != _invoice_key(
+            item.invoice_candidates[0]
+        ):
+            return None
+        return self._item_conflict(
+            batch_hash,
+            item_index,
+            item,
+            ConflictType.POSSIBLE_LEGACY_SEAL,
+            "Cùng HĐ đã có tiền VSDL trên dòng BK. Hãy đối chiếu chứng từ: "
+            "VSDL cũ có thể đã gồm phí Seal; điều chỉnh VSDL trước khi ghi Seal để tránh cộng trùng.",
+            (ResolutionAction.SKIP, ResolutionAction.OVERWRITE),
+            default=ResolutionAction.SKIP,
+            details={"vsdl_amount": vs_amount, "vsdl_invoice": vs_invoice},
+        )
 
     def _item_conflict(
         self,

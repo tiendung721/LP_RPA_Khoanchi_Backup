@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter
 
 import app.services.excel.payment_sync as payment_module
+from app.services.excel.bang_ke import ensure_bang_ke_seal_columns
 from app.services.excel.models import ConflictType, OutcomeStatus, ResolutionAction
 from app.services.excel.payment_sync import (
     DATE_NUMBER_FORMAT,
@@ -302,9 +304,9 @@ def test_one_source_row_can_update_both_targets_without_touching_manual_columns(
     try:
         hp, nam = workbook["T06 26 HP"], workbook["T06 26 NAM"]
         assert (hp["D8"].value, hp["E8"].value) == ("HD-88", "Không sửa")
-        assert (nam["L8"].value, nam["M8"].value) == ("HD-88", "Không sửa")
+        assert (nam["N8"].value, nam["O8"].value) == ("HD-88", "Không sửa")
         assert hp["F8"].value == datetime(2026, 8, 3, 14, 15, 16)
-        assert nam["K8"].value == datetime(2026, 8, 3, 14, 15, 16)
+        assert nam["M8"].value == datetime(2026, 8, 3, 14, 15, 16)
         assert hp["F8"].number_format == DATE_NUMBER_FORMAT
     finally:
         workbook.close()
@@ -671,14 +673,57 @@ def test_payment_sync_resolves_shifted_invoice_headers_and_writes_invoice_only(
         assert workbook["T06 26 HP"]["E8"].value == "INV-HH"
         assert [
             workbook["T06 26 NAM"][coordinate].value
-            for coordinate in ("D8", "F8", "H8", "J8", "M8", "O8", "Q8")
+            for coordinate in ("D8", "F8", "H8", "J8", "O8", "Q8", "S8")
         ] == [
             "INV-NV", "INV-NH", "INV-HV", "INV-VS", "INV-LC", "INV-SC", "INV-QT"
         ]
         assert workbook["T06 26 HP"]["G8"].value is not None
-        assert workbook["T06 26 NAM"]["T8"].value is not None
+        assert workbook["T06 26 NAM"]["V8"].value is not None
     finally:
         workbook.close()
+
+
+def test_seal_stays_separate_through_bk_and_payment_without_entering_rpa_total(
+    tmp_path: Path,
+) -> None:
+    bk, payment = tmp_path / "bk.xlsx", tmp_path / "payment.xlsx"
+    _save_invoice_bk(
+        bk,
+        [_invoice_source_row(vs_do=360_000, invoice_vs_do="4494")],
+    )
+    source_book = load_workbook(bk)
+    source_sheet = source_book["T06 26"]
+    assert ensure_bang_ke_seal_columns(source_sheet, header_row=1)
+    source_sheet["R2"] = 50_000
+    source_sheet["S2"] = "4494"
+    source_book.save(bk)
+    source_book.close()
+    _save_invoice_payment(payment)
+
+    service = _service(bk, payment, tmp_path / "runtime")
+    plan = service.analyze(source_sheet_name="T06 26")
+    assert not plan.conflicts
+    service.apply(plan, {})
+
+    payment_book = load_workbook(payment, data_only=False)
+    try:
+        nam = payment_book["T06 26 NAM"]
+        headers = {nam.cell(7, col).value: col for col in range(1, nam.max_column + 1)}
+        assert nam.cell(8, headers["VS + D/O"]).value == 360_000
+        assert nam.cell(8, headers["PHÍ SEAL"]).value == 50_000
+        assert nam.cell(8, headers["Số HĐ Seal"]).value == "4494"
+    finally:
+        payment_book.close()
+
+    source_book = load_workbook(bk, data_only=False)
+    try:
+        sheet = source_book["T06 26"]
+        headers = {sheet.cell(1, col).value: col for col in range(1, sheet.max_column + 1)}
+        seal_ref = f"{get_column_letter(headers['PHÍ SEAL'])}2"
+        rpa_formula = sheet.cell(2, headers["N.HA VS D/O LỆNH"]).value
+        assert seal_ref not in rpa_formula
+    finally:
+        source_book.close()
 
 
 def test_payment_invoice_conflict_defaults_to_keep_existing(tmp_path: Path) -> None:

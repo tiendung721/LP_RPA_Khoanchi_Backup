@@ -124,7 +124,8 @@ Root chỉ có đúng hai khóa `v` và `d`. Mỗi phần tử của `d` là m�
 - `HH`: Hạ hàng, hạ container có hàng từ xe xuống bãi.
 - `NH`: Nâng hàng, nâng container có hàng từ bãi lên xe.
 - `HV`: Hạ vỏ, hạ container rỗng từ xe xuống bãi.
-- `VSDL`: Vệ sinh, D/O, phí chứng từ, lệnh giao hàng, điện thả hàng, seal, THC/terminal độc lập.
+- `VSDL`: Vệ sinh, D/O, phí chứng từ, lệnh giao hàng, điện thả hàng, THC/terminal độc lập.
+- `SEAL`: Phí seal, phí chì khi là dòng dịch vụ có tiền; số seal/chì chỉ để tham chiếu không tạo phí.
 - `LC`: Lưu container/vỏ/hàng, lưu bãi, gia hạn, demurrage, detention, storage.
 - `QT`: Quá tải, quá trọng lượng hoặc phụ thu trọng lượng.
 - `LL`: Phí/công làm lệnh riêng.
@@ -248,7 +249,7 @@ Không tự tạo mã mới.
 
 # 17. THỨ TỰ ƯU TIÊN PHÂN LOẠI
 Ưu tiên nghiệp vụ cụ thể:
-`SC → LC → QT → NV → HH → NH → HV → VSDL → LL → CB → CBDH → VTN → CXD`.
+`SC → LC → QT → NV → HH → NH → HV → SEAL → VSDL → LL → CB → CBDH → VTN → CXD`.
 
 Từ khóa cụ thể như lưu cont, sửa chữa, quá tải phải ưu tiên hơn cụm chung như cước vận chuyển.
 
@@ -319,13 +320,16 @@ Quy tắc:
 5. Nhiều dòng cộng dồn cùng chứng từ, container và cùng loại nâng/hạ dùng GV.
 
 # 22. QUY TẮC VSDL
-Gồm vệ sinh/cleaning, D/O/Delivery Order, phí chứng từ, lệnh giao hàng, điện thả hàng, seal và THC/terminal độc lập.
+Gồm vệ sinh/cleaning, D/O/Delivery Order, phí chứng từ, lệnh giao hàng, điện thả hàng và THC/terminal độc lập. Không gồm phí seal/phí chì.
 
 1. D/O, chứng từ và lệnh giao hàng thuộc VSDL, không thuộc LL.
 2. THC trong hóa đơn biển thuộc CB; THC độc lập thuộc VSDL.
 3. Nhiều dòng VSDL cộng dồn cùng chứng từ và container/B-L dùng GV.
 4. Chỉ có B/L thì container=null và giữ B/L.
 5. “Phí phát sinh” không rõ bản chất là CXD.
+
+# 22A. QUY TẮC SEAL / PHÍ CHÌ
+Khi hóa đơn ghi phí chì, phí seal hoặc seal fee như một dòng dịch vụ có tiền, xuất fee="SEAL" riêng. Không lấy số seal/chì hoặc mã niêm phong làm container hay khoản phí. Dù cùng hóa đơn với VSDL, giữ hai fee và hai amount riêng, cùng invoice_no; không đưa tiền SEAL vào VSDL. Tính VAT của dòng SEAL theo đúng thuế suất/chứng từ và đối chiếu tổng hóa đơn một lần.
 
 # 23. QUY TẮC LC
 Gồm lưu container/vỏ/hàng, lưu bãi, trễ hạn trả rỗng, gia hạn, demurrage, detention và storage.

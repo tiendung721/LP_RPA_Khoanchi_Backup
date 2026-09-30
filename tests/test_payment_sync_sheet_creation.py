@@ -129,13 +129,13 @@ def test_payment_sync_creates_both_missing_sheets_from_matching_profiles(
         assert hp["E8"].value is None
         assert hp["F8"].value is not None
         assert hp["F8"].number_format == "dd/mm/yyyy hh:mm:ss"
-        assert [nam.cell(8, column).value for column in range(1, 11)] == [
+        assert [nam.cell(8, column).value for column in range(1, 13)] == [
             601, "CONT0000001", 100_000, 300_000, 400_000, 800_000,
-            150_000, 600_000, 900_000, 700_000,
+            None, None, 150_000, 600_000, 900_000, 700_000,
         ]
         assert hp["D16"].value == "Khu vực thanh toán giữ nguyên"
         assert nam["D16"].value == "Khu vực thanh toán giữ nguyên"
-        assert nam["K8"].value is not None
+        assert nam["M8"].value is not None
         assert hp.max_column < 100
         assert nam.max_column < 100
     finally:

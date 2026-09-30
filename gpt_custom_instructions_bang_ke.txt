@@ -68,7 +68,7 @@ Quy tắc:
 # CỘT XỬ LÝ
 
 SQT/SỐ QUYẾT TOÁN dùng làm khóa phân biệt và xuất vào trường sqt, không tạo fee. Chỉ lấy tiền từ:
-- PHÍ CHỨNG TỪ; PHÍ VỆ SINH; QUÁ TẢI; GIA HẠN; LƯU HÀNG XUẤT.
+- PHÍ CHỨNG TỪ; PHÍ VỆ SINH; PHÍ SEAL/PHÍ CHÌ; QUÁ TẢI; GIA HẠN; LƯU HÀNG XUẤT.
 - PHỤ THU PHÍ NÂNG TẠI CẢNG; PHỤ THU PHÍ HẠ TẠI CẢNG.
 - PHÍ NÂNG; PHÍ HẠ; SỬA CHỮA; LÀM LỆNH.
 
@@ -105,6 +105,7 @@ Nếu thiếu Bill: số tiền trên dòng có container rõ ràng gán trực 
 - HV = PHÍ HẠ + PHỤ THU PHÍ HẠ TẠI CẢNG; fee="HV".
 - SC = SỬA CHỮA; fee="SC".
 - LL = LÀM LỆNH; fee="LL".
+- SEAL = PHÍ SEAL hoặc PHÍ CHÌ có tiền; fee="SEAL". Không cộng vào VSDL. Số seal chỉ là tham chiếu, không phải khoản phí.
 
 Không tự tạo phí làm lệnh 150000 khi ô nguồn trống; chỉ lấy giá trị thật.
 
@@ -118,9 +119,9 @@ Trong quá trình xử lý, gộp theo đúng khóa nội bộ:
 
 SQT nội bộ + container + vessel_name + voyage_no + fee
 
-Mỗi khóa nội bộ chỉ một object, giữ vị trí xuất hiện đầu tiên. Khác SQT thì không gộp, kể cả khi các trường JSON còn lại giống nhau. Thứ tự fee trong cùng container: VSDL, QT, GH, LC, NH, HV, SC, LL.
+Mỗi khóa nội bộ chỉ một object, giữ vị trí xuất hiện đầu tiên. Khác SQT thì không gộp, kể cả khi các trường JSON còn lại giống nhau. Thứ tự fee trong cùng container: VSDL, SEAL, QT, GH, LC, NH, HV, SC, LL.
 
-Không xuất amount=0; ô trống không tạo phí. Không tạo mã ngoài VSDL, QT, GH, LC, NH, HV, SC, LL.
+Không xuất amount=0; ô trống không tạo phí. Không tạo mã ngoài VSDL, SEAL, QT, GH, LC, NH, HV, SC, LL.
 
 # TỰ KIỂM TRA
 
@@ -128,7 +129,7 @@ Trước khi tạo file, xác nhận:
 1. Đã đọc đủ sheet/dòng; không lấy dòng tổng hoặc cột tổng nâng/hạ lần hai.
 2. Mọi container cùng Bill đã tham gia chia.
 3. Tổng VSDL bằng phí chứng từ cộng vệ sinh; tổng QT bằng QUÁ TẢI nguồn.
-4. Tổng GH, LC, NH, HV, SC, LL khớp cột nguồn.
+4. Tổng SEAL, GH, LC, NH, HV, SC, LL khớp cột nguồn tương ứng.
 5. Số âm đúng; dấu gạch không thành số.
 6. SQT đúng dòng; không lấy STT, số dòng, tổng hoặc amount; khác SQT không bị gộp; không chắc chắn thì sqt=null.
 7. Root chỉ có v,d; v=4; mỗi object đúng 16 khóa.

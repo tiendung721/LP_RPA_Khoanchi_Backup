@@ -40,6 +40,7 @@ VALID_FEE_CODES = (
     "NH",
     "HV",
     "VSDL",
+    "SEAL",
     "LC",
     "QT",
     "LL",
@@ -58,6 +59,7 @@ PAYMENT_FIELD_LABELS = {
     "storage": "Lưu cont",
     "overweight": "Quá tải",
     "vs_do": "VS + D/O",
+    "seal": "Phí Seal",
     "command_fee": "Làm lệnh",
     "repair": "Sửa chữa",
 }
@@ -863,6 +865,7 @@ DEFAULT_ACTIONS: dict[str, tuple[str, ...]] = {
     "TARGET_CELL_OCCUPIED": ("KEEP_EXISTING", "OVERWRITE"),
     "TARGET_CELL_FORMULA": ("KEEP_FORMULA", "OVERWRITE"),
     "TARGET_CELL_TEXT": ("KEEP_EXISTING", "OVERWRITE"),
+    "POSSIBLE_LEGACY_SEAL": ("SKIP", "OVERWRITE"),
     "UNKNOWN_FEE_CODE": ("SELECT_FEE", "SKIP"),
     "FEE_COLUMN_MISSING": ("SKIP", "CANCEL_ALL"),
     "BL_ONLY_NO_CONTAINER": ("SELECT_ROW", "SKIP"),
@@ -908,6 +911,7 @@ DEFAULT_RESOLUTION: dict[str, str] = {
     "REPEATED_SOURCE_CONTAINER": "SKIP",
     "UNKNOWN_FEE_CODE": "SKIP",
     "FEE_COLUMN_MISSING": "SKIP",
+    "POSSIBLE_LEGACY_SEAL": "SKIP",
     "BL_ONLY_NO_CONTAINER": "SKIP",
     "PARTIAL_KEY_MATCH": "SKIP",
     "PAYMENT_SOURCE_INVALID": "SKIP",
@@ -997,7 +1001,9 @@ TARGET_VALUE_CONFLICT_TYPES = frozenset(
 )
 
 EXPLICIT_ACTION_CONFLICT_TYPES = (
-    ROW_SELECTION_CONFLICT_TYPES | TARGET_VALUE_CONFLICT_TYPES
+    ROW_SELECTION_CONFLICT_TYPES
+    | TARGET_VALUE_CONFLICT_TYPES
+    | {"POSSIBLE_LEGACY_SEAL"}
 )
 
 
@@ -1989,6 +1995,11 @@ class ConflictResolutionDialog(AppDialog):
                 label = {
                     "KEEP_EXISTING": "Giữ HĐ hiện tại",
                     "OVERWRITE": "Ghi đè bằng HĐ mới",
+                }.get(code, label)
+            elif conflict_type == "POSSIBLE_LEGACY_SEAL":
+                label = {
+                    "SKIP": "Bỏ qua Seal",
+                    "OVERWRITE": "Đã đối chiếu VSDL, ghi Seal",
                 }.get(code, label)
             action_combo.addItem(label, code)
         default_index = action_combo.findData(default_action)

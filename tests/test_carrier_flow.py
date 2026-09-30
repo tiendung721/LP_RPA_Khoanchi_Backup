@@ -446,14 +446,14 @@ def test_payment_sync_writes_carriers_and_builds_summary(tmp_path: Path) -> None
     workbook = load_workbook(payment, data_only=False)
     try:
         assert workbook["T07 26 HP"]["F8"].value == "PHB"
-        assert workbook["T07 26 NAM"]["R8"].value == "NHS"
+        assert workbook["T07 26 NAM"]["T8"].value == "NHS"
         assert PAYMENT_SUMMARY_SHEET in workbook.sheetnames
         summary = workbook[PAYMENT_SUMMARY_SHEET]
         assert {summary["B2"].value, summary["B3"].value} == {"NHS", "PHB"}
         assert {summary["F2"].value, summary["F3"].value} == {500_000, 1_200_000}
         assert summary["F2"].data_type == "n"
         assert {summary["J2"].value, summary["J3"].value} == {"NHS", "PHB"}
-        assert {summary["U2"].value, summary["U3"].value} == {500_000, 1_200_000}
+        assert {summary["V2"].value, summary["V3"].value} == {500_000, 1_200_000}
         assert PAYMENT_DETAIL_SHEET in workbook.sheetnames
         assert workbook[PAYMENT_DETAIL_SHEET].sheet_state == "hidden"
     finally:
@@ -617,11 +617,11 @@ def test_carrier_summary_aggregates_invoices_then_month_and_writes_values(
         ]
         invoice_rows = {
             summary.cell(row, 11).value: [
-                summary.cell(row, column).value for column in range(12, 22)
+                summary.cell(row, column).value for column in range(12, 23)
             ]
             for row in range(2, 5)
         }
-        assert invoice_rows["HD-01"] == [100, 0, 200, 0, 0, 0, 0, 0, 0, 300]
+        assert invoice_rows["HD-01"] == [100, 0, 200, 0, 0, 0, 0, 0, 0, 0, 300]
         assert invoice_rows["HD-02"][-1] == 300
         assert invoice_rows[MISSING_INVOICE][-1] == 50
     finally:
@@ -684,7 +684,7 @@ def test_carrier_summary_warns_cross_carrier_duplicates_and_unmapped() -> None:
     assert report.unmapped_carrier_items == 1
     summary = workbook[PAYMENT_SUMMARY_SHEET]
     warnings = " | ".join(
-        str(summary.cell(row, 23).value or "")
+        str(summary.cell(row, 24).value or "")
         for row in range(2, summary.max_row + 1)
     )
     assert "nhiều bên vận tải" in warnings
