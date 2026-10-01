@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import QModelIndex, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtGui import QCloseEvent, QKeySequence, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QTableView,
     QTableWidget,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from .app_dialog import AppDialog
+from .presentation import fit_window_to_screen
 from .edit_row_dialog import EditRowDialog
 from .inline_action_delegate import InlineActionDelegate
 from .review_table_model import (
@@ -335,8 +337,7 @@ class ReviewWindow(QMainWindow):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("Xem và chỉnh sửa dữ liệu bóc tách")
-        self.setMinimumSize(920, 600)
-        self.resize(1120, 720)
+        self.setMinimumSize(800, 500)
         self._batch_service = batch_service
         self._validator = validator
         self._save_handler = save_handler
@@ -371,6 +372,7 @@ class ReviewWindow(QMainWindow):
         self.proxy_model = ReviewFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
         self._build_ui()
+        fit_window_to_screen(self, 1120, 720)
         self._refresh_document_filter()
         self._connect_signals()
         self._install_shortcuts()
@@ -412,20 +414,25 @@ class ReviewWindow(QMainWindow):
         central = QWidget()
         central.setObjectName("applicationRoot")
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(12, 10, 12, 10)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(8)
+        body = QWidget()
+        body.setObjectName("reviewBody")
+        root = QVBoxLayout(body)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
 
         top_line = QHBoxLayout()
         title_box = QVBoxLayout()
         title = QLabel("Kiểm tra dữ liệu bóc tách")
-        title.setObjectName("pageTitle")
+        title.setObjectName("reviewTitle")
         title_box.addWidget(title)
-        subtitle = QLabel("Rà soát các dòng cần sửa, sau đó lưu dữ liệu để tiếp tục xử lý.")
-        subtitle.setProperty("muted", True)
-        title_box.addWidget(subtitle)
+        title_box.setSpacing(0)
+        title.setToolTip("Rà soát các dòng cần sửa, sau đó lưu dữ liệu để tiếp tục xử lý.")
         self.source_label = QLabel()
         self.source_label.setProperty("muted", True)
+        self.source_label.setObjectName("reviewSource")
         title_box.addWidget(self.source_label)
         top_line.addLayout(title_box, 1)
         self.dirty_label = QLabel("Có thay đổi chưa lưu")
@@ -438,28 +445,27 @@ class ReviewWindow(QMainWindow):
         root.addLayout(top_line)
 
         meta_card = QFrame()
-        meta_card.setProperty("card", True)
-        meta_layout = QGridLayout(meta_card)
-        meta_layout.setContentsMargins(12, 7, 12, 7)
-        meta_layout.setHorizontalSpacing(16)
-        meta_layout.setVerticalSpacing(2)
+        meta_card.setObjectName("reviewMetaStrip")
+        meta_layout = QHBoxLayout(meta_card)
+        meta_layout.setContentsMargins(10, 4, 10, 4)
+        meta_layout.setSpacing(6)
         self.batch_id_value = QLabel()
         self.sha_value = QLabel()
         self.received_value = QLabel()
         self.saved_value = QLabel()
         self.status_value = QLabel()
         metadata = (
-            ("Thời điểm nhận", self.received_value),
-            ("Lưu gần nhất", self.saved_value),
-            ("Trạng thái", self.status_value),
+            ("Nhận:", self.received_value),
+            ("Lưu gần nhất:", self.saved_value),
+            ("Trạng thái:", self.status_value),
         )
-        for column, (label, value) in enumerate(metadata):
+        for label, value in metadata:
             caption = QLabel(label)
             caption.setProperty("muted", True)
-            value.setStyleSheet("font-weight: 600;")
-            meta_layout.addWidget(caption, 0, column)
-            meta_layout.addWidget(value, 1, column)
-        root.addWidget(meta_card)
+            value.setObjectName("reviewMetaValue")
+            meta_layout.addWidget(caption)
+            meta_layout.addWidget(value)
+            meta_layout.addStretch(1)
 
         self.technical_toggle = QToolButton()
         self.technical_toggle.setText("Thông tin kỹ thuật")
@@ -470,7 +476,17 @@ class ReviewWindow(QMainWindow):
             Qt.ToolButtonStyle.ToolButtonTextBesideIcon
         )
         self.technical_toggle.setProperty("quiet", True)
-        root.addWidget(self.technical_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        meta_layout.addWidget(self.technical_toggle)
+        root.addWidget(meta_card)
+
+        self.guidance_card = QFrame()
+        self.guidance_card.setObjectName("reviewGuidance")
+        guidance_layout = QHBoxLayout(self.guidance_card)
+        guidance_layout.setContentsMargins(10, 5, 10, 5)
+        self.guidance_title = QLabel()
+        self.guidance_title.setObjectName("reviewGuidanceTitle")
+        guidance_layout.addWidget(self.guidance_title)
+        root.addWidget(self.guidance_card)
         self.technical_panel = QFrame()
         self.technical_panel.setProperty("card", True)
         technical_layout = QGridLayout(self.technical_panel)
@@ -505,22 +521,24 @@ class ReviewWindow(QMainWindow):
         )
         for key, caption in stat_defs:
             card = QFrame()
-            card.setProperty("card", True)
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(10, 5, 10, 5)
-            card_layout.setSpacing(2)
+            card.setObjectName("reviewMetric")
+            card_layout = QHBoxLayout(card)
+            card_layout.setContentsMargins(9, 4, 9, 4)
+            card_layout.setSpacing(6)
             cap_label = QLabel(caption)
             cap_label.setProperty("muted", True)
             value_label = QLabel("0")
             value_label.setObjectName(f"{key}Stat")
-            value_label.setStyleSheet("font-size: 12pt; font-weight: 700;")
+            value_label.setStyleSheet("font-weight: 700;")
             card_layout.addWidget(cap_label)
+            card_layout.addStretch(1)
             card_layout.addWidget(value_label)
             stats_line.addWidget(card, 1)
             self.stat_labels[key] = value_label
         root.addLayout(stats_line)
 
-        filter_toolbar = QHBoxLayout()
+        self.filter_toolbar = QGridLayout()
+        filter_toolbar = self.filter_toolbar
         filter_toolbar.setSpacing(7)
         self.search_edit = QLineEdit()
         self.search_edit.setObjectName("reviewSearchEdit")
@@ -528,33 +546,47 @@ class ReviewWindow(QMainWindow):
             "Tìm số container, vận đơn, hóa đơn hoặc bên vận tải…  (Ctrl+F)"
         )
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setMinimumWidth(220)
-        filter_toolbar.addWidget(self.search_edit, 2)
+        self.search_edit.setMinimumWidth(180)
+        filter_toolbar.addWidget(self.search_edit, 0, 0)
 
         self.document_filter = QComboBox()
         self.document_filter.setObjectName("documentFilter")
-        self.document_filter.setMinimumWidth(210)
-        filter_toolbar.addWidget(self.document_filter, 2)
+        self.document_filter.setMinimumWidth(180)
+        self.document_filter.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.document_filter.setMinimumContentsLength(16)
+        filter_toolbar.addWidget(self.document_filter, 0, 1)
 
         self.fee_filter = QComboBox()
         self.fee_filter.setObjectName("feeFilter")
+        self.fee_filter.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.fee_filter.setMinimumContentsLength(16)
         self.fee_filter.addItem("Tất cả loại cước", "")
         for code, name in FEE_CATALOG.items():
             self.fee_filter.addItem(f"{code} – {name}", code)
-        filter_toolbar.addWidget(self.fee_filter, 2)
+        filter_toolbar.addWidget(self.fee_filter, 1, 0)
 
         self.status_filter = QComboBox()
         self.status_filter.setObjectName("statusFilter")
+        self.status_filter.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.status_filter.setMinimumContentsLength(16)
         self.status_filter.addItem("Tất cả trạng thái", "")
         self.status_filter.addItem("Hợp lệ", RowStatus.VALID.value)
         self.status_filter.addItem("Cảnh báo", RowStatus.WARNING.value)
         self.status_filter.addItem("Lỗi", RowStatus.ERROR.value)
-        filter_toolbar.addWidget(self.status_filter, 1)
+        filter_toolbar.addWidget(self.status_filter, 1, 1)
 
         self.clear_filter_button = QPushButton("Xóa bộ lọc")
         self.clear_filter_button.setObjectName("clearFilterButton")
-        filter_toolbar.addWidget(self.clear_filter_button)
+        filter_toolbar.addWidget(self.clear_filter_button, 0, 2)
         root.addLayout(filter_toolbar)
+        self._filters_wide: bool | None = None
+        self._arrange_filters(self.width() >= 1200)
 
         action_toolbar = QHBoxLayout()
         action_toolbar.setSpacing(7)
@@ -569,6 +601,11 @@ class ReviewWindow(QMainWindow):
         for button in (self.add_button, self.edit_button, self.delete_button):
             action_toolbar.addWidget(button)
         root.addLayout(action_toolbar)
+
+        self.empty_label = QLabel()
+        self.empty_label.setObjectName("reviewEmptyState")
+        self.empty_label.setVisible(False)
+        root.addWidget(self.empty_label)
 
         self.table = QTableView()
         self.table.setObjectName("reviewTable")
@@ -598,14 +635,14 @@ class ReviewWindow(QMainWindow):
         header.setMinimumSectionSize(64)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(ReviewTableModel.COLUMN_NO, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(ReviewTableModel.COLUMN_FEE_NAME, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(ReviewTableModel.COLUMN_MESSAGES, QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_CONT, 140)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_BL, 130)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_VESSEL_VOYAGE, 190)
+        self.table.setColumnWidth(ReviewTableModel.COLUMN_FEE_NAME, 160)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_INVOICE_NO, 130)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_CARRIER, 190)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_AMOUNT, 185)
+        self.table.setColumnWidth(ReviewTableModel.COLUMN_MESSAGES, 220)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_LOOKUP_ACTION, 105)
         self.lookup_action_delegate = InlineActionDelegate(self.table)
         self.table.setItemDelegateForColumn(
@@ -613,11 +650,19 @@ class ReviewWindow(QMainWindow):
             self.lookup_action_delegate,
         )
         self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.table.setMinimumHeight(240)
         root.addWidget(self.table, 1)
 
         self.save_loading_bar = LinearLoadingBar()
         self.save_loading_bar.setAccessibleName("Tiến trình lưu dữ liệu")
         root.addWidget(self.save_loading_bar)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("reviewScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
 
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
@@ -634,7 +679,45 @@ class ReviewWindow(QMainWindow):
         self.close_button.setMinimumWidth(110)
         bottom.addWidget(self.close_button)
         bottom.addWidget(self.confirm_button)
-        root.addLayout(bottom)
+        outer.addLayout(bottom)
+
+    def _arrange_filters(self, wide: bool) -> None:
+        if self._filters_wide is wide:
+            return
+        widgets = (
+            self.search_edit,
+            self.document_filter,
+            self.fee_filter,
+            self.status_filter,
+            self.clear_filter_button,
+        )
+        for widget in widgets:
+            self.filter_toolbar.removeWidget(widget)
+        for column in range(5):
+            self.filter_toolbar.setColumnStretch(column, 0)
+        if wide:
+            for column, widget in enumerate(widgets):
+                self.filter_toolbar.addWidget(widget, 0, column)
+            self.filter_toolbar.setColumnStretch(0, 3)
+            for column in (1, 2, 3):
+                self.filter_toolbar.setColumnStretch(column, 1)
+        else:
+            for widget, row, column in (
+                (self.search_edit, 0, 0),
+                (self.document_filter, 0, 1),
+                (self.clear_filter_button, 0, 2),
+                (self.fee_filter, 1, 0),
+                (self.status_filter, 1, 1),
+            ):
+                self.filter_toolbar.addWidget(widget, row, column)
+            self.filter_toolbar.setColumnStretch(0, 2)
+            self.filter_toolbar.setColumnStretch(1, 2)
+        self._filters_wide = wide
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "filter_toolbar"):
+            self._arrange_filters(event.size().width() >= 1200)
 
     def _connect_signals(self) -> None:
         self.search_edit.textChanged.connect(self.proxy_model.set_search_text)
@@ -709,7 +792,28 @@ class ReviewWindow(QMainWindow):
 
     def _update_stats(self, stats: ReviewStats) -> None:
         self._global_stats = stats
-        self._update_filtered_stats()
+        self._set_stat_labels(stats)
+        if stats.error:
+            tone = "error"
+            title = f"{stats.error} dòng cần sửa trước khi lưu"
+            description = "Chọn trạng thái Lỗi để tìm dòng cần sửa, sau đó mở dòng và kiểm tra lại thông tin."
+        elif stats.warning:
+            tone = "warning"
+            title = f"{stats.warning} dòng cần xem lại"
+            description = "Bạn có thể mở từng dòng cảnh báo để kiểm tra trước khi lưu dữ liệu."
+        else:
+            tone = "normal"
+            title = "Dữ liệu đã sẵn sàng để lưu"
+            description = "Hãy xem lại các khoản chi và chọn Lưu khi thông tin đã đúng."
+        self.guidance_title.setText(title)
+        self.guidance_card.setToolTip(description)
+        self.guidance_card.setVisible(bool(stats.error or stats.warning))
+        if self.guidance_card.property("tone") != tone:
+            self.guidance_card.setProperty("tone", tone)
+            self.guidance_card.style().unpolish(self.guidance_card)
+            self.guidance_card.style().polish(self.guidance_card)
+            self.guidance_title.style().unpolish(self.guidance_title)
+            self.guidance_title.style().polish(self.guidance_title)
         self.confirm_button.setEnabled(stats.error == 0 and not self._saving)
         self._update_visible_count()
 
@@ -719,37 +823,24 @@ class ReviewWindow(QMainWindow):
         self.stat_labels["warning"].setText(f"{stats.warning:,}".replace(",", "."))
         self.stat_labels["error"].setText(f"{stats.error:,}".replace(",", "."))
         self.stat_labels["amount"].setText(f"{stats.total_amount:,} ₫".replace(",", "."))
-        self.stat_labels["valid"].setStyleSheet("font-size: 12pt; font-weight: 700; color: #15803D;")
-        self.stat_labels["warning"].setStyleSheet("font-size: 12pt; font-weight: 700; color: #A16207;")
-        self.stat_labels["error"].setStyleSheet("font-size: 12pt; font-weight: 700; color: #B42318;")
-
-    def _update_filtered_stats(self) -> None:
-        source_rows = [
-            self.proxy_model.mapToSource(self.proxy_model.index(index, 0)).row()
-            for index in range(self.proxy_model.rowCount())
-        ]
-        validations = [self.model.validation_at(index) for index in source_rows]
-        rows = [self.model.row_at(index) for index in source_rows]
-        stats = ReviewStats(
-            total=len(rows),
-            valid=sum(item.status is RowStatus.VALID for item in validations),
-            warning=sum(item.status is RowStatus.WARNING for item in validations),
-            error=sum(item.status is RowStatus.ERROR for item in validations),
-            with_container=sum(bool(item.cont) for item in rows),
-            with_bl=sum(bool(item.bl) for item in rows),
-            with_amount=sum(type(item.amount) is int for item in rows),
-            total_amount=sum(item.amount for item in rows if type(item.amount) is int),
-            fee_counts={},
-        )
-        self._set_stat_labels(stats)
+        self.stat_labels["valid"].setStyleSheet("font-weight: 700; color: #15803D;")
+        self.stat_labels["warning"].setStyleSheet("font-weight: 700; color: #A16207;")
+        self.stat_labels["error"].setStyleSheet("font-weight: 700; color: #B42318;")
 
     def _update_visible_count(self, *_args: Any) -> None:
-        self._update_filtered_stats()
+        visible = self.proxy_model.rowCount()
+        total = self.model.rowCount()
         self.visible_label.setText(
-            f"Đang hiển thị {self.proxy_model.rowCount():,}/{self.model.rowCount():,} dòng".replace(
+            f"Đang hiển thị {visible:,}/{total:,} dòng".replace(
                 ",", "."
             )
         )
+        self.empty_label.setText(
+            "Chưa có dòng dữ liệu. Chọn Thêm dòng để bắt đầu."
+            if total == 0
+            else "Không có dòng phù hợp với bộ lọc. Hãy đổi điều kiện hoặc chọn Xóa bộ lọc."
+        )
+        self.empty_label.setVisible(visible == 0)
 
     def _update_dirty(self, dirty: bool) -> None:
         self.dirty_label.setVisible(dirty)

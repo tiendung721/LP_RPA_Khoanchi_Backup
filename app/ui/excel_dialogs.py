@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from .app_dialog import AppDialog
+from .presentation import dialog_intro, fit_window_to_screen
 
 
 VALID_FEE_CODES = (
@@ -216,12 +217,11 @@ class MonthSelectionDialog(AppDialog):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        note = QLabel(
-            "Chọn tháng cần xử lý trong file Excel. "
-            "Chỉ dữ liệu của tháng đã chọn mới được thay đổi."
+        intro, _ = dialog_intro(
+            self.windowTitle(),
+            "Chọn tháng cần xử lý trong file Excel. Chỉ dữ liệu của tháng đã chọn mới được thay đổi.",
         )
-        note.setWordWrap(True)
-        layout.addWidget(note)
+        layout.addWidget(intro)
         if self.initial_sheet_name and self.clear_saved_callback is not None:
             restore_row = QHBoxLayout()
             self.restore_label = QLabel(
@@ -313,6 +313,7 @@ class MonthSelectionDialog(AppDialog):
             | QDialogButtonBox.StandardButton.Cancel
         )
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Tiếp tục")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setProperty("primary", True)
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Hủy")
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
@@ -420,13 +421,12 @@ class PostingAllocationDialog(AppDialog):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        note = QLabel(
-            "Ngày hóa đơn chỉ dùng để gợi ý. Phần mềm dò sheet được chọn và hai "
-            "tháng trước, rồi ghi khoản chi vào đúng sheet chứa dòng đã tìm thấy; "
-            "hồ sơ cước biển đã đối soát sẽ bị khóa tháng dò."
+        intro, _ = dialog_intro(
+            self.windowTitle(),
+            "Ngày hóa đơn chỉ dùng để gợi ý. Ứng dụng tìm trong tháng đã chọn và hai tháng trước, "
+            "rồi ghi khoản chi vào tháng chứa dòng phù hợp. Hồ sơ cước biển đã đối soát giữ nguyên tháng.",
         )
-        note.setWordWrap(True)
-        layout.addWidget(note)
+        layout.addWidget(intro)
         if self.restored and self.clear_saved_callback is not None:
             restore_row = QHBoxLayout()
             self.restore_label = QLabel(
@@ -498,6 +498,7 @@ class PostingAllocationDialog(AppDialog):
             | QDialogButtonBox.StandardButton.Cancel
         )
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Phân tích")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setProperty("primary", True)
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Hủy")
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
@@ -612,12 +613,12 @@ class DailySyncAllocationDialog(AppDialog):
         self.clear_saved_callback = clear_saved_callback
         self._combos: dict[str, QComboBox] = {}
         layout = QVBoxLayout(self)
-        note = QLabel(
+        intro, _ = dialog_intro(
+            self.windowTitle(),
             "Ghép từng tháng trong file Hàng ngày với tháng tương ứng trong BK. "
-            "Mỗi tháng nguồn chỉ được xử lý một lần."
+            "Mỗi tháng nguồn chỉ được xử lý một lần.",
         )
-        note.setWordWrap(True)
-        layout.addWidget(note)
+        layout.addWidget(intro)
         if self.restored and self.clear_saved_callback is not None:
             restore_row = QHBoxLayout()
             self.restore_label = QLabel(
@@ -656,6 +657,8 @@ class DailySyncAllocationDialog(AppDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Phân tích")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setProperty("primary", True)
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Hủy")
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
@@ -1290,24 +1293,18 @@ class ConflictResolutionDialog(AppDialog):
         self._problem_detail_conflict_id: str | None = None
         self.setObjectName("excelConflictResolutionDialog")
         self.setWindowTitle("Xử lý dữ liệu chênh lệch")
-        self.resize(1320, 660)
         self._build_ui()
+        fit_window_to_screen(self, 1320, 660)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        self.title_label = QLabel(
-            f"Có {len(self.conflicts)} khoản cần quyết định trước khi cập nhật Excel."
-        )
-        self.title_label.setStyleSheet("font-size: 12pt; font-weight: 700;")
-        layout.addWidget(self.title_label)
-        note = QLabel(
+        intro, self.title_label = dialog_intro(
+            f"Có {len(self.conflicts)} khoản cần quyết định trước khi cập nhật Excel.",
             "Kiểm tra giá trị hiện tại và chọn cách xử lý cho từng mục. "
             "Bấm vào nội dung ở cột Vấn đề để xem lý do đầy đủ. "
-            "File Excel chỉ được cập nhật sau khi mọi lựa chọn hợp lệ."
+            "File Excel chỉ được cập nhật sau khi mọi lựa chọn hợp lệ.",
         )
-        note.setWordWrap(True)
-        note.setProperty("muted", True)
-        layout.addWidget(note)
+        layout.addWidget(intro)
 
         if bool(self.restore_info.get("found")):
             status_labels = {
@@ -1385,7 +1382,11 @@ class ConflictResolutionDialog(AppDialog):
 
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setObjectName("excelConflictTable")
-        self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
+        display_headers = list(self.COLUMNS)
+        display_headers[self.COLUMNS.index("SQT")] = "Số quyết toán"
+        display_headers[self.COLUMNS.index("Số HĐ từ JSON")] = "Số hóa đơn nguồn"
+        display_headers[self.COLUMNS.index("Dòng / phí / sheet chọn")] = "Thông tin đã chọn"
+        self.table.setHorizontalHeaderLabels(display_headers)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
@@ -1405,6 +1406,18 @@ class ConflictResolutionDialog(AppDialog):
         self.table.setColumnHidden(
             self.COLUMNS.index("Tàu / chuyến nguồn"),
             not self._show_vessel_voyage,
+        )
+        self.technical_columns_toggle = QCheckBox("Hiện vị trí trong Excel")
+        self.technical_columns_toggle.setObjectName("technicalColumnsToggle")
+        self.technical_columns_toggle.setToolTip(
+            "Hiện các cột trang tính, dòng và ô. Các thông tin này vẫn có trong chi tiết vấn đề."
+        )
+        self.technical_columns_toggle.toggled.connect(
+            self._set_technical_columns_visible
+        )
+        self._set_technical_columns_visible(False)
+        layout.addWidget(
+            self.technical_columns_toggle, 0, Qt.AlignmentFlag.AlignRight
         )
         layout.addWidget(self.table, 1)
 
@@ -1477,11 +1490,16 @@ class ConflictResolutionDialog(AppDialog):
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
             "Xác nhận lựa chọn"
         )
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setProperty("primary", True)
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Hủy")
         self.buttons.accepted.connect(self._validate_and_accept)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
         self.show_issues(self.issues)
+
+    def _set_technical_columns_visible(self, visible: bool) -> None:
+        for name in ("Sheet", "Dòng", "Cột / ô"):
+            self.table.setColumnHidden(self.COLUMNS.index(name), not visible)
 
     def set_review(
         self,
@@ -1622,7 +1640,7 @@ class ConflictResolutionDialog(AppDialog):
             )
         else:
             self.title_label.setText(
-                f"Có {len(self.conflicts)} mục cần xử lý trước khi ghi workbook."
+                f"Có {len(self.conflicts)} khoản cần xử lý trước khi cập nhật Excel."
             )
             self.validation_label.clear()
         if first_problem_row is not None:
@@ -2896,6 +2914,7 @@ class ExcelOutcomeDialog(AppDialog):
         layout.addWidget(self.table, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText("Đóng")
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self._refresh()

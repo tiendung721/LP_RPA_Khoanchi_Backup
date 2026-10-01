@@ -540,10 +540,10 @@ def test_review_window_uses_compact_balanced_layout(qtbot) -> None:
     window = ReviewWindow(_review_payload())
     qtbot.addWidget(window)
 
-    assert window.minimumWidth() == 920
-    assert window.minimumHeight() == 600
-    assert window.width() == 1120
-    assert window.height() == 720
+    assert window.minimumWidth() == 800
+    assert window.minimumHeight() == 500
+    assert window.minimumWidth() <= window.width() <= 1120
+    assert window.minimumHeight() <= window.height() <= 720
 
     window.show()
     qtbot.wait(20)
@@ -555,10 +555,15 @@ def test_review_window_uses_compact_balanced_layout(qtbot) -> None:
         assert window.table.columnWidth(ReviewTableModel.COLUMN_INVOICE_NO) == 130
         assert window.table.columnWidth(ReviewTableModel.COLUMN_CARRIER) == 190
         assert window.table.columnWidth(ReviewTableModel.COLUMN_AMOUNT) == 185
+        assert window.table.columnWidth(ReviewTableModel.COLUMN_FEE_NAME) == 160
+        assert window.table.columnWidth(ReviewTableModel.COLUMN_MESSAGES) == 220
+        window.resize(1600, 900)
+        qtbot.wait(20)
         assert abs(
-            window.table.columnWidth(ReviewTableModel.COLUMN_FEE_NAME)
-            - window.table.columnWidth(ReviewTableModel.COLUMN_MESSAGES)
-        ) <= 1
+            window.search_edit.geometry().center().y()
+            - window.status_filter.geometry().center().y()
+        ) <= 2
+        assert window.table.height() > window.height() / 2
     finally:
         window.close()
 

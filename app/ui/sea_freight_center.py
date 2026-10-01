@@ -22,9 +22,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QHeaderView,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from app.sea_freight.contracts import (
@@ -35,6 +37,7 @@ from app.sea_freight.contracts import (
 from app.sea_freight.service import SeaFreightStaleRevisionError
 
 from .app_dialog import AppDialog
+from .presentation import fit_window_to_screen
 
 
 def _money(value: object) -> str:
@@ -205,22 +208,32 @@ class SeaFreightReconciliationDialog(AppDialog):
         self._source_rows: list[Any] = []
         self._source_container_count = 0
         self._unresolved_duplicate_count = 0
-        self.setWindowTitle("Đối soát số cont")
-        self.setMinimumSize(1050, 720)
-        self.resize(1280, 820)
+        self.setWindowTitle("Đối soát số container")
+        self.setMinimumSize(900, 520)
         self._build_ui()
+        fit_window_to_screen(self, 1280, 820)
         self._connect_signals()
         self.load_group(group_id)
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 10)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(8)
+        body = QWidget()
+        root = QVBoxLayout(body)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
 
         heading = QHBoxLayout()
         title = QLabel("Đối soát số container")
-        title.setStyleSheet("font-size: 18pt; font-weight: 700;")
-        heading.addWidget(title)
+        title.setObjectName("pageTitle")
+        heading_text = QVBoxLayout()
+        heading_text.setSpacing(1)
+        heading_text.addWidget(title)
+        subtitle = QLabel("So sánh số container trên hóa đơn với dữ liệu đã tìm trong BK.")
+        subtitle.setProperty("muted", True)
+        heading_text.addWidget(subtitle)
+        heading.addLayout(heading_text)
         heading.addStretch(1)
         heading.addWidget(QLabel("Hồ sơ đang mở:"))
         self.group_value = QLineEdit()
@@ -261,13 +274,14 @@ class SeaFreightReconciliationDialog(AppDialog):
              ("amount", "Tổng tiền"))
         ):
             frame = QFrame()
-            frame.setProperty("card", True)
+            frame.setObjectName("reconciliationMetric")
+            frame.setProperty("metric", key)
             box = QHBoxLayout(frame)
             box.setContentsMargins(8, 4, 8, 4)
             caption = QLabel(label)
             caption.setProperty("muted", True)
             value = QLabel("0")
-            value.setStyleSheet("font-weight: 700;")
+            value.setObjectName("reconciliationMetricValue")
             box.addWidget(caption)
             box.addStretch(1)
             box.addWidget(value)
@@ -275,10 +289,9 @@ class SeaFreightReconciliationDialog(AppDialog):
             self.stats[key] = value
         common_layout.addLayout(stats_layout, 1, 0, 1, 6)
         self.status_label = QLabel()
+        self.status_label.setObjectName("reconciliationStatus")
+        self.status_label.setProperty("tone", "warning")
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet(
-            "font-weight: 700; color: #92400E; background: #FFF7D6; padding: 7px; border-radius: 5px;"
-        )
         common_layout.addWidget(self.status_label, 2, 0, 1, 6)
         root.addWidget(common)
 
@@ -359,6 +372,13 @@ class SeaFreightReconciliationDialog(AppDialog):
         lower.addWidget(preview_box, 3)
         root.addLayout(lower, 2)
 
+        scroll = QScrollArea()
+        scroll.setObjectName("reconciliationScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
         actions = QHBoxLayout()
         self.assistant_button = QPushButton("Mở Trợ lý bóc tách")
         self.add_button = QPushButton("Thêm hóa đơn")
@@ -376,7 +396,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         actions.addWidget(self.rerun_button)
         actions.addWidget(self.confirm_button)
         actions.addWidget(self.close_button)
-        root.addLayout(actions)
+        outer.addLayout(actions)
 
     def _connect_signals(self) -> None:
         self.vessel_name_edit.textChanged.connect(self._vessel_fields_changed)
@@ -612,6 +632,9 @@ class SeaFreightReconciliationDialog(AppDialog):
         if duplicate_rows:
             warnings.append(f"Còn {len(duplicate_rows)} cont trùng chưa chọn nguồn")
         self.status_label.setText(" • ".join((status, *warnings)))
+        self._set_status_tone(
+            "success" if group.status is GroupStatus.READY and not warnings else "warning"
+        )
         self._built_preview = []
         if group.status in {
             GroupStatus.READY,
@@ -632,6 +655,13 @@ class SeaFreightReconciliationDialog(AppDialog):
             for column, value in enumerate(values):
                 self.result_table.setItem(row_index, column, QTableWidgetItem(str(value or "")))
         self.result_table.resizeColumnsToContents()
+
+    def _set_status_tone(self, tone: str) -> None:
+        if self.status_label.property("tone") == tone:
+            return
+        self.status_label.setProperty("tone", tone)
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
 
     def _set_editable(self, editable: bool) -> None:
         for widget in (
@@ -671,6 +701,7 @@ class SeaFreightReconciliationDialog(AppDialog):
             total = sum(int(item["amount"]) for item in payload)
         except (AttributeError, TypeError, ValueError):
             self.status_label.setText("Cần sửa dữ liệu HĐ • Chưa lưu")
+            self._set_status_tone("warning")
             self.result_table.setRowCount(0)
             return
         bk_count = self.container_table.rowCount()
@@ -688,6 +719,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         else:
             text = f"Đủ {invoice_containers}/{bk_count} cont"
         self.status_label.setText(text + " • Chưa lưu")
+        self._set_status_tone("warning")
         self.result_table.setRowCount(0)
 
     def manage_sources(self) -> None:

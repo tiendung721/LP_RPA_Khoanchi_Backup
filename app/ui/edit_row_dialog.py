@@ -12,10 +12,12 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
 from app.services.carrier_policy import carrier_is_managed_by_daily_sync
 
 from .app_dialog import AppDialog
+from .presentation import fit_window_to_screen
 from .review_table_model import (
     FEE_CATALOG,
     RULE_CATALOG,
@@ -118,7 +121,6 @@ class EditRowDialog(AppDialog):
         super().__init__(parent)
         self.setWindowTitle(title or ("Thêm dòng dữ liệu" if row is None else "Sửa dòng dữ liệu"))
         self.setModal(True)
-        self.resize(720, 800)
         self._editing = row is not None
         self._original_rule: Any = None
         self._original_vessel_voyage_raw: Any = None
@@ -130,6 +132,7 @@ class EditRowDialog(AppDialog):
         self._source_document_id = source_document_id
         self._source_document_name = source_document_name
         self._build_ui()
+        fit_window_to_screen(self, 720, 700)
         self._connect_signals()
         self.set_row(
             row
@@ -155,7 +158,10 @@ class EditRowDialog(AppDialog):
         introduction.setWordWrap(True)
         root.addWidget(introduction)
 
-        form = QFormLayout()
+        form_body = QWidget()
+        form_body.setObjectName("editRowFormBody")
+        form = QFormLayout(form_body)
+        form.setContentsMargins(8, 0, 8, 8)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         form.setHorizontalSpacing(14)
         form.setVerticalSpacing(12)
@@ -303,7 +309,15 @@ class EditRowDialog(AppDialog):
         amount_widget = QWidget()
         amount_widget.setLayout(amount_box)
         form.addRow("Số tiền:", amount_widget)
-        root.addLayout(form)
+        form_scroll = QScrollArea()
+        form_scroll.setObjectName("editRowScroll")
+        form_scroll.setWidgetResizable(True)
+        form_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        form_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        form_scroll.setWidget(form_body)
+        root.addWidget(form_scroll, 1)
 
         validation_label = QLabel("Thông tin cần kiểm tra")
         validation_label.setStyleSheet("font-weight: 600;")
@@ -465,7 +479,7 @@ class EditRowDialog(AppDialog):
             if sqt_text.isdigit() and int(sqt_text) > 0:
                 sqt = int(sqt_text)
             else:
-                amount_error = "SQT nguồn phải là số nguyên dương."
+                amount_error = "Số quyết toán nguồn phải là số nguyên dương."
         row = ReviewRow(
             cont=normalize_container(self.container_edit.text()),
             bl=normalize_bl(self.bl_edit.text()),

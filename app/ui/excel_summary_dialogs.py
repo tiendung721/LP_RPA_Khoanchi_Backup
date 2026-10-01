@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from .app_dialog import AppDialog
+from .presentation import fit_window_to_screen
 
 
 @dataclass(frozen=True, slots=True)
@@ -702,8 +703,7 @@ class _ExcelSummaryDialog(AppDialog):
         self.summary = summary
         self.setObjectName("excelSummaryDialog")
         self.setWindowTitle(summary.title)
-        self.setMinimumSize(760, 520)
-        self.resize(860, 620)
+        self.setMinimumSize(700, 460)
         self._outer = QVBoxLayout(self)
         self._outer.setContentsMargins(18, 18, 18, 14)
         self._outer.setSpacing(14)
@@ -724,6 +724,7 @@ class _ExcelSummaryDialog(AppDialog):
         body_layout.addStretch(1)
         scroll.setWidget(body)
         self._outer.addWidget(scroll, 1)
+        fit_window_to_screen(self, 860, 620)
 
     def _build_header(self) -> None:
         header = QFrame()
@@ -886,6 +887,10 @@ class ExcelConfirmationDialog(_ExcelSummaryDialog):
     ) -> None:
         super().__init__(summary, parent)
         footer = QHBoxLayout()
+        reminder = QLabel("Kiểm tra số liệu và phạm vi cập nhật trước khi xác nhận.")
+        reminder.setProperty("muted", True)
+        reminder.setWordWrap(True)
+        footer.addWidget(reminder, 1)
         footer.addStretch(1)
         self.cancel_button = QPushButton("Hủy")
         self.cancel_button.setObjectName("excelSummaryCancelButton")

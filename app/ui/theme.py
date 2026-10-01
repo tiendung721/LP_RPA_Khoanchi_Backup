@@ -38,6 +38,29 @@ QLabel#pageTitle {{
     font-weight: 700;
     color: #101828;
 }}
+QLabel#reviewTitle {{
+    font-size: 17pt;
+    font-weight: 700;
+    color: #101828;
+}}
+QLabel#reviewSource {{
+    color: {MUTED_TEXT};
+    font-size: 9pt;
+}}
+QFrame#reviewMetaStrip,
+QFrame#reviewMetric {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+QLabel#reviewMetaValue {{
+    font-weight: 600;
+}}
+QLabel#reviewEmptyState {{
+    color: {MUTED_TEXT};
+    font-size: 9pt;
+    padding: 2px 4px;
+}}
 QLabel#pageSubtitle, QLabel[muted="true"] {{
     color: {MUTED_TEXT};
 }}
@@ -63,6 +86,33 @@ QLabel[formSection="true"] {{
     padding-top: 12px;
     padding-bottom: 3px;
 }}
+QFrame#reviewGuidance,
+QFrame#dialogIntro {{
+    background: #EEF5F7;
+    border: 1px solid #D3E4E8;
+    border-radius: 10px;
+}}
+QFrame#reviewGuidance[tone="warning"] {{
+    background: {WARNING_BG};
+    border-color: #E8D58B;
+}}
+QFrame#reviewGuidance[tone="error"] {{
+    background: {ERROR_BG};
+    border-color: #F1B4AE;
+}}
+QLabel#dialogIntroTitle,
+QLabel#reviewGuidanceTitle {{
+    color: #123047;
+    font-size: 11pt;
+    font-weight: 700;
+}}
+QLabel#dialogIntroDescription,
+QLabel#reviewGuidanceDescription {{
+    color: #526779;
+    font-size: 9pt;
+}}
+QFrame#reviewGuidance[tone="error"] QLabel#reviewGuidanceTitle {{ color: {ERROR}; }}
+QFrame#reviewGuidance[tone="warning"] QLabel#reviewGuidanceTitle {{ color: {WARNING}; }}
 QLabel[status="error"] {{
     color: {ERROR};
 }}
@@ -250,6 +300,52 @@ QFrame[card="true"], QGroupBox {{
     background: {SURFACE};
     border: 1px solid {BORDER};
     border-radius: 12px;
+}}
+QScrollArea#editRowScroll,
+QWidget#editRowFormBody,
+QScrollArea#reconciliationScroll,
+QScrollArea#reviewScroll,
+QWidget#reviewBody {{
+    background: transparent;
+    border: none;
+}}
+QPlainTextEdit#validationView {{
+    background: #FFFCED;
+    border-color: #E8D58B;
+}}
+QCheckBox#technicalColumnsToggle {{
+    color: #526779;
+    font-weight: 600;
+}}
+QFrame#reconciliationMetric {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 9px;
+}}
+QFrame#reconciliationMetric[metric="difference"] {{
+    border-color: #E8D58B;
+    background: #FFFCED;
+}}
+QLabel#reconciliationMetricValue {{
+    color: #123047;
+    font-size: 13pt;
+    font-weight: 700;
+}}
+QFrame#reconciliationMetric[metric="difference"] QLabel#reconciliationMetricValue {{
+    color: {WARNING};
+}}
+QLabel#reconciliationStatus {{
+    padding: 9px 12px;
+    border: 1px solid #E8D58B;
+    border-radius: 8px;
+    color: {WARNING};
+    background: {WARNING_BG};
+    font-weight: 700;
+}}
+QLabel#reconciliationStatus[tone="success"] {{
+    border-color: #B7E4C7;
+    color: {SUCCESS};
+    background: {SUCCESS_BG};
 }}
 QToolButton[quiet="true"] {{
     min-height: 28px;

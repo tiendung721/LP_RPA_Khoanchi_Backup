@@ -30,6 +30,7 @@ from app.rpa_expense.contracts import (
 )
 
 from .app_dialog import AppDialog
+from .presentation import dialog_intro, fit_window_to_screen
 
 
 STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -60,8 +61,8 @@ def _money(value: Any) -> str:
 class RpaSqtSelectionDialog(AppDialog):
     COLUMNS = (
         "Chọn",
-        "SQT",
-        "Trạng thái RPA",
+        "Số quyết toán",
+        "Trạng thái nhập",
         "Nhóm",
         "Dòng BK",
         "Cước MB",
@@ -128,7 +129,6 @@ class RpaSqtSelectionDialog(AppDialog):
         }
         self.setObjectName("rpaSqtSelectionDialog")
         self.setWindowTitle("Chọn số quyết toán để nhập")
-        self.resize(1380, 650)
         self.setStyleSheet(
             """
             QPushButton[filterChip="true"] {
@@ -147,26 +147,24 @@ class RpaSqtSelectionDialog(AppDialog):
             QLabel#rpaSelectionSummaryLabel {
                 color: #334155;
                 font-weight: 700;
+                background: #EEF5F7;
+                border: 1px solid #D3E4E8;
+                border-radius: 8px;
+                padding: 9px 12px;
             }
             """
         )
         self._build_ui()
+        fit_window_to_screen(self, 1200, 650)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        title = QLabel(
-            f"Trang tính {self.plan.sheet_name}: chọn các số quyết toán cần nhập."
-        )
-        title.setStyleSheet("font-size: 12pt; font-weight: 700;")
-        title.setWordWrap(True)
-        layout.addWidget(title)
-        note = QLabel(
+        intro, _ = dialog_intro(
+            f"Chọn số quyết toán trong trang tính {self.plan.sheet_name}",
             "Có thể chọn lại số đã nhập nếu cần chạy lại. "
-            "Trạng thái chỉ đổi thành “Đã nhập” khi phần mềm quyết toán xác nhận lưu thành công."
+            "Trạng thái chỉ đổi thành “Đã nhập” khi phần mềm quyết toán xác nhận lưu thành công.",
         )
-        note.setWordWrap(True)
-        note.setProperty("muted", True)
-        layout.addWidget(note)
+        layout.addWidget(intro)
 
         if self._pending_sqt or self._latest_pad_sqt:
             overlap = len(
@@ -259,8 +257,8 @@ class RpaSqtSelectionDialog(AppDialog):
         self.sort_combo.setObjectName("rpaSortCombo")
         self.sort_combo.addItem("Trạng thái: Chưa nhập trước", "status_asc")
         self.sort_combo.addItem("Trạng thái: Đã nhập trước", "status_desc")
-        self.sort_combo.addItem("SQT tăng dần", "sqt_asc")
-        self.sort_combo.addItem("SQT giảm dần", "sqt_desc")
+        self.sort_combo.addItem("Số quyết toán tăng dần", "sqt_asc")
+        self.sort_combo.addItem("Số quyết toán giảm dần", "sqt_desc")
         self.sort_combo.addItem("Dòng BK tăng dần", "rows_asc")
         self.sort_combo.addItem("Dòng BK giảm dần", "rows_desc")
         self.sort_combo.currentIndexChanged.connect(self._apply_sort)
@@ -316,15 +314,16 @@ class RpaSqtSelectionDialog(AppDialog):
         clear_all.clicked.connect(
             lambda: self._set_all(Qt.CheckState.Unchecked)
         )
-        select_all.setToolTip("Chọn toàn bộ SQT hợp lệ, kể cả các dòng đang bị lọc")
-        clear_all.setToolTip("Bỏ chọn toàn bộ SQT, kể cả các dòng đang bị lọc")
+        select_all.setToolTip("Chọn toàn bộ số quyết toán hợp lệ, kể cả các dòng đang bị lọc")
+        clear_all.setToolTip("Bỏ chọn toàn bộ số quyết toán, kể cả các dòng đang bị lọc")
         selection.addWidget(select_all)
         selection.addWidget(clear_all)
         selection.addStretch()
         self.selection_summary = QLabel()
         self.selection_summary.setObjectName("rpaSelectionSummaryLabel")
-        selection.addWidget(self.selection_summary)
         layout.addLayout(selection)
+        self.selection_summary.setWordWrap(True)
+        layout.addWidget(self.selection_summary)
 
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setObjectName("rpaSqtTable")
@@ -366,6 +365,7 @@ class RpaSqtSelectionDialog(AppDialog):
         buttons.setObjectName("rpaSqtDialogButtons")
         self.run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
         self.run_button.setText("Bắt đầu nhập các số đã chọn")
+        self.run_button.setProperty("primary", True)
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Hủy")
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
@@ -392,9 +392,9 @@ class RpaSqtSelectionDialog(AppDialog):
         check.setData(PENDING_ROLE, is_pending)
         check.setData(LATEST_PAD_ROLE, is_latest)
         check.setToolTip(
-            "Đã được PAD xác nhận lưu thành công; vẫn có thể chọn để nhập lại."
+            "Phần mềm quyết toán đã xác nhận lưu thành công; vẫn có thể chọn để nhập lại."
             if source.status == RPA_STATUS_IMPORTED
-            else "Chưa có xác nhận lưu thành công từ PAD."
+            else "Chưa có xác nhận lưu thành công từ phần mềm quyết toán."
         )
         if str(source.sqt) in self._skipped_sqt:
             check.setBackground(QColor("#FFF4CC"))
@@ -410,9 +410,9 @@ class RpaSqtSelectionDialog(AppDialog):
         group_display = (
             "Cả hai"
             if is_pending and is_latest
-            else "Chờ nhập QT"
+            else "Chờ nhập"
             if is_pending
-            else "Lượt PAD gần nhất"
+            else "Lượt nhập gần nhất"
             if is_latest
             else ""
         )
@@ -473,13 +473,13 @@ class RpaSqtSelectionDialog(AppDialog):
                     cell.setForeground(QColor("#15803D"))
                     cell.setBackground(QColor("#ECFDF3"))
                     cell.setToolTip(
-                        "Đã được PAD xác nhận lưu thành công; "
+                        "Phần mềm quyết toán đã xác nhận lưu thành công; "
                         "vẫn có thể chọn để nhập lại."
                     )
                 else:
                     cell.setForeground(QColor("#1D4ED8"))
                     cell.setBackground(QColor("#EFF6FF"))
-                    cell.setToolTip("Chưa có xác nhận lưu thành công từ PAD.")
+                    cell.setToolTip("Chưa có xác nhận lưu thành công từ phần mềm quyết toán.")
             elif column == 3 and group_display:
                 font = cell.font()
                 font.setBold(True)
@@ -507,7 +507,7 @@ class RpaSqtSelectionDialog(AppDialog):
         self._initial_selected_sqt.clear()
         self._set_all(Qt.CheckState.Unchecked)
         if hasattr(self, "restore_label"):
-            self.restore_label.setText("Đã xóa lựa chọn ghi nhớ của file và sheet này.")
+            self.restore_label.setText("Đã xóa lựa chọn ghi nhớ của trang tính này.")
 
     def _set_all(self, state: Qt.CheckState) -> None:
         self.table.blockSignals(True)
@@ -596,17 +596,26 @@ class RpaSqtSelectionDialog(AppDialog):
             not self.table.isRowHidden(item.row()) for item in selected
         )
         if selected:
+            selected_sqt = {
+                str(item.data(Qt.ItemDataRole.UserRole)) for item in selected
+            }
+            total_amount = sum(
+                item.amounts.total
+                for item in self.plan.items
+                if str(item.sqt) in selected_sqt
+            )
             self.selection_summary.setText(
-                f"Đã chọn: {len(selected)} SQT — "
+                f"Đã chọn: {len(selected)} số quyết toán — "
                 f"đang hiển thị {visible_selected}; "
-                f"{not_imported} chưa nhập, {imported} nhập lại"
+                f"{not_imported} chưa nhập, {imported} nhập lại · "
+                f"Tổng các khoản chi: {_money(total_amount)} đ"
             )
             if hasattr(self, "run_button"):
-                self.run_button.setText(f"Chạy RPA {len(selected)} SQT đã chọn")
+                self.run_button.setText(f"Bắt đầu nhập {len(selected)} số đã chọn")
         else:
-            self.selection_summary.setText("Đã chọn: 0 SQT")
+            self.selection_summary.setText("Chưa chọn số quyết toán nào")
             if hasattr(self, "run_button"):
-                self.run_button.setText("Chạy RPA các SQT đã chọn")
+                self.run_button.setText("Bắt đầu nhập các số đã chọn")
 
     @staticmethod
     def _sqt_sort_key(value: Any) -> tuple[int, int | str]:
@@ -630,8 +639,8 @@ class RpaSqtSelectionDialog(AppDialog):
         if not self.selected_sqt:
             QMessageBox.warning(
                 self,
-                "Chưa chọn SQT",
-                "Vui lòng chọn ít nhất một SQT hợp lệ để chạy RPA.",
+                "Chưa chọn số quyết toán",
+                "Vui lòng chọn ít nhất một số quyết toán hợp lệ để bắt đầu nhập.",
             )
             return
         self.accept()
@@ -641,7 +650,7 @@ class RpaLatestDataDialog(AppDialog):
     """Bảng chỉ đọc của đúng payload gần nhất đã gửi sang PAD."""
 
     COLUMNS = (
-        "SQT",
+        "Số quyết toán",
         "Trạng thái trước khi gửi",
         "Dòng BK",
         "Cước MB",
@@ -675,9 +684,9 @@ class RpaLatestDataDialog(AppDialog):
         super().__init__(parent)
         self.payload = dict(payload)
         self.setObjectName("rpaLatestDataDialog")
-        self.setWindowTitle("Dữ liệu gần nhất đã gửi sang PAD")
-        self.resize(1480, 680)
+        self.setWindowTitle("Dữ liệu của lần nhập gần nhất")
         self._build_ui()
+        fit_window_to_screen(self, 1200, 650)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -688,19 +697,13 @@ class RpaLatestDataDialog(AppDialog):
             or self.payload.get("created_at")
             or "—"
         )
-        title = QLabel(
-            f"Sheet {sheet_name} · Run {run_id}\nĐã gửi sang PAD: {timestamp}"
+        intro, _ = dialog_intro(
+            f"Trang tính {sheet_name} · Gửi lúc {timestamp}",
+            "Đây là các số quyết toán đã chuyển sang công cụ nhập trong lần gần nhất. "
+            "Trạng thái bên dưới là trạng thái tại thời điểm gửi."
         )
-        title.setWordWrap(True)
-        title.setStyleSheet("font-size: 12pt; font-weight: 700;")
-        layout.addWidget(title)
-        note = QLabel(
-            "Bảng hiển thị toàn bộ SQT trong payload đã gửi sang PAD gần nhất. "
-            "Trạng thái trong bảng là trạng thái tại thời điểm gửi."
-        )
-        note.setWordWrap(True)
-        note.setProperty("muted", True)
-        layout.addWidget(note)
+        intro.setToolTip(f"Mã lượt xử lý: {run_id}")
+        layout.addWidget(intro)
 
         items = self.payload.get("items")
         values = items if isinstance(items, list) else []
@@ -722,6 +725,7 @@ class RpaLatestDataDialog(AppDialog):
         layout.addWidget(self.table, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText("Đóng")
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 

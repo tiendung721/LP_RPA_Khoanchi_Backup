@@ -589,7 +589,7 @@ def test_dialog_selects_and_filters_rpa_groups(qtbot, tmp_path: Path) -> None:
         if not dialog.table.isRowHidden(row)
     }
     assert visible == {"101"}
-    assert dialog.table.item(0, 3).text() == "Chờ nhập QT"
+    assert dialog.table.item(0, 3).text() == "Chờ nhập"
 
     assert dialog.findChild(QPushButton, "selectLatestRpaGroupButton") is None
     assert dialog.findChild(QPushButton, "selectBothRpaGroupsButton") is None
