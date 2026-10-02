@@ -342,9 +342,15 @@ class MainWindow(QMainWindow):
             self._safe_connect(watcher, "scan_completed", self._scan_completed)
             callback = getattr(watcher, "_on_file_ready_callback", None)
             if callback is not None and hasattr(watcher, "file_processed"):
-                self._safe_connect(watcher, "file_processed", self._file_processed)
+                if not self._safe_connect(
+                    watcher, "file_processed_with_origin", self._file_processed_with_origin
+                ):
+                    self._safe_connect(watcher, "file_processed", self._file_processed)
             else:
-                self._safe_connect(watcher, "file_ready", self._file_ready)
+                if not self._safe_connect(
+                    watcher, "file_ready_with_origin", self._file_ready_with_origin
+                ):
+                    self._safe_connect(watcher, "file_ready", self._file_ready)
                 self._safe_connect(watcher, "file_processed", self._file_processed)
             self._watcher_connected = True
 
@@ -739,38 +745,9 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _rpa_plan_ready(self, plan: Any) -> None:
-        restore = None
-        loader = getattr(self._rpa_expense, "remembered_selection", None)
-        if callable(loader):
-            restore = loader(plan)
-        pending_sqt = tuple(_attribute(plan, "pending_sqt", default=()) or ())
-        latest_pad_sqt = tuple(
-            _attribute(plan, "latest_pad_sqt", default=()) or ()
-        )
-        selected_sqt = (
-            ()
-            if pending_sqt or latest_pad_sqt
-            else tuple(_attribute(restore, "selected_sqt", default=()) or ())
-        )
-        restore_info = {
-            "found": bool(_attribute(restore, "found", default=False)),
-            "saved_count": int(_attribute(restore, "saved_count", default=0) or 0),
-            "restored_count": int(
-                _attribute(restore, "restored_count", default=0) or 0
-            ),
-            "skipped_sqt": tuple(
-                _attribute(restore, "skipped_sqt", default=()) or ()
-            ),
-        }
-        clearer = getattr(self._rpa_expense, "clear_remembered_selection", None)
         dialog = RpaSqtSelectionDialog(
             plan,
             self,
-            initial_selected_sqt=selected_sqt,
-            restore_info=restore_info,
-            clear_saved_callback=(
-                (lambda: bool(clearer(plan))) if callable(clearer) else None
-            ),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self.workflow_page.set_rpa_result("Đã hủy trước khi chạy PAD.")
@@ -2392,11 +2369,23 @@ class MainWindow(QMainWindow):
     def _file_ready(self, raw_path: str) -> None:
         self.receive_file(Path(raw_path), manual=False)
 
+    @Slot(str, bool)
+    def _file_ready_with_origin(self, raw_path: str, is_startup: bool) -> None:
+        self.receive_file(Path(raw_path), manual=False, startup=is_startup)
+
     @Slot(str, object)
     def _file_processed(self, _raw_path: str, result: Any) -> None:
         self._apply_receive_result(result, automatic=True)
 
-    def receive_file(self, path: str | Path, *, manual: bool = False) -> Any:
+    @Slot(str, object, bool)
+    def _file_processed_with_origin(
+        self, _raw_path: str, result: Any, is_startup: bool
+    ) -> None:
+        self._apply_receive_result(result, automatic=True, startup=is_startup)
+
+    def receive_file(
+        self, path: str | Path, *, manual: bool = False, startup: bool = False
+    ) -> Any:
         service = self._batch_service
         if service is None:
             QMessageBox.warning(
@@ -2422,7 +2411,7 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             result = handler(Path(path))
-            self._apply_receive_result(result, automatic=not manual)
+            self._apply_receive_result(result, automatic=not manual, startup=startup)
             return result
         except Exception as exc:
             LOGGER.exception("Tiếp nhận file thất bại, file=%s: %s", path, exc)
@@ -2436,7 +2425,9 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-    def _apply_receive_result(self, result: Any, *, automatic: bool) -> None:
+    def _apply_receive_result(
+        self, result: Any, *, automatic: bool, startup: bool = False
+    ) -> None:
         if result is None:
             return
         duplicate = bool(_attribute(result, "duplicate", default=False))
@@ -2465,7 +2456,7 @@ class MainWindow(QMainWindow):
                 ),
                 8000,
             )
-        if automatic and not duplicate and review is not None:
+        if automatic and not startup and not duplicate and review is not None:
             session = self._next_assistant_session()
             dialog = self._sea_freight_dialog
             if (

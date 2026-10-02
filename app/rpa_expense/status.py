@@ -72,7 +72,7 @@ class RpaExpenseStatusService:
             raise RpaExpenseStatusError(f"Không tìm thấy file BK: {target}")
         sheet_name = str(selection["sheet_name"])
         run_id = str(selection["run_id"])
-        raw_revision = item.get("pending_revision")
+        raw_revision = item.get("bk_revision", item.get("pending_revision"))
         try:
             expected_revision = (
                 int(raw_revision) if raw_revision is not None else None
@@ -80,7 +80,7 @@ class RpaExpenseStatusService:
         except (TypeError, ValueError):
             expected_revision = None
         if self.tracking_repository is not None:
-            current_revision = self.tracking_repository.pending_revision(
+            current_revision = self.tracking_repository.bk_revision(
                 target,
                 sheet_name,
                 target_sqt,
@@ -95,11 +95,8 @@ class RpaExpenseStatusService:
                     "sqt": target_sqt,
                     "source_rows": rows,
                     "status": RPA_STATUS_NOT_IMPORTED,
-                    "pending_cleared": False,
                     "stale_selection": True,
-                    "message": (
-                        "BK đã thay đổi sau khi gửi PAD; giữ SQT trong nhóm chờ."
-                    ),
+                    "message": "BK đã thay đổi sau khi gửi PAD; không cập nhật trạng thái cũ.",
                 }
 
         # Chỉ dùng khóa Windows như bước preflight. Phải nhả khóa trước khi
@@ -149,14 +146,6 @@ class RpaExpenseStatusService:
             if workbook is not None:
                 workbook.close()
             working.unlink(missing_ok=True)
-        pending_cleared = False
-        if self.tracking_repository is not None:
-            pending_cleared = self.tracking_repository.mark_pad_succeeded(
-                target,
-                sheet_name,
-                target_sqt,
-                expected_revision=expected_revision,
-            )
         return {
             "success": True,
             "operation": RPA_EXPENSE_OPERATION,
@@ -167,7 +156,6 @@ class RpaExpenseStatusService:
             "source_rows": rows,
             "status": RPA_STATUS_IMPORTED,
             "backup_path": str(backup),
-            "pending_cleared": pending_cleared,
         }
 
     @staticmethod

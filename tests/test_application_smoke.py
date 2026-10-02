@@ -11,6 +11,7 @@ from app.config import AppPaths, AppSettings, ConfigManager
 from app.constants import APP_STATE_LAST_OUTPUT_SCAN
 from app.models import DataRow
 from app.sea_freight import BkContainerSnapshot, ContainerRecord, iso6346_check_digit
+from app.services.file_stability import FileStabilityChecker
 from app.ui.main_window import MainWindow
 
 
@@ -232,6 +233,41 @@ def test_new_download_automatically_opens_review_window(
             window._review_windows[replacement.batch.id].model.rows()[0].amount
             == 200
         )
+    finally:
+        window.close()
+        runtime.close()
+
+
+def test_startup_file_is_received_without_opening_review_but_new_file_opens(
+    qtbot, tmp_path: Path
+) -> None:
+    runtime = _isolated_runtime(tmp_path)
+    runtime.watcher._checker = FileStabilityChecker(
+        stable_seconds=0, timeout_seconds=1, poll_interval=0.01,
+        max_size_bytes=runtime.watcher.max_size_bytes,
+    )
+    existing = runtime.paths.output_dir / "ket_qua_boc_tach_existing.json"
+    existing.write_text(
+        json.dumps({"v": 1, "d": [["DRYU3026167", None, "VTN", "CV", None, None, 100]]}),
+        encoding="utf-8",
+    )
+    window = MainWindow(controller=runtime)
+    qtbot.addWidget(window)
+
+    try:
+        window.show()
+        qtbot.waitUntil(lambda: window._active_batch is not None, timeout=5_000)
+        assert window._review_windows == {}
+
+        incoming = runtime.paths.output_dir / "ket_qua_boc_tach_new.json"
+        temporary = incoming.with_suffix(".part")
+        temporary.write_text(
+            json.dumps({"v": 1, "d": [["GAOU2112422", None, "VTN", "CV", None, None, 200]]}),
+            encoding="utf-8",
+        )
+        temporary.replace(incoming)
+        qtbot.waitUntil(lambda: len(window._review_windows) == 1, timeout=5_000)
+        assert next(iter(window._review_windows.values())).isVisible()
     finally:
         window.close()
         runtime.close()

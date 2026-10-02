@@ -162,7 +162,15 @@ class Database:
                 self._migration_24(connection)
                 connection.execute("PRAGMA user_version = 24")
                 current_version = 24
-            self._ensure_schema_24(connection)
+            if current_version < 25:
+                self._migration_25(connection)
+                connection.execute("PRAGMA user_version = 25")
+                current_version = 25
+            if current_version < 26:
+                self._migration_26(connection)
+                connection.execute("PRAGMA user_version = 26")
+                current_version = 26
+            self._ensure_schema_26(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -1597,6 +1605,69 @@ class Database:
             connection.execute(
                 "ALTER TABLE expense_posting_items ADD COLUMN source_sqt INTEGER"
             )
+
+    @staticmethod
+    def _migration_25(connection: sqlite3.Connection) -> None:
+        """Ghi nhận lượt ghi BK gần nhất cho toàn bộ workbook."""
+
+        Database._ensure_schema_25(connection)
+
+    @staticmethod
+    def _ensure_schema_25(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_24(connection)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rpa_latest_bk_run (
+                workbook_key TEXT PRIMARY KEY,
+                workbook_path TEXT NOT NULL,
+                generation INTEGER NOT NULL CHECK (generation > 0),
+                source_run_id INTEGER,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(rpa_pending_sqt)").fetchall()
+        }
+        if "latest_generation" not in columns:
+            connection.execute(
+                "ALTER TABLE rpa_pending_sqt ADD COLUMN latest_generation INTEGER"
+            )
+
+    @staticmethod
+    def _migration_26(connection: sqlite3.Connection) -> None:
+        """Theo dõi đúng dòng BK của lượt ghi và lượt PAD gần nhất."""
+
+        Database._ensure_schema_26(connection)
+
+    @staticmethod
+    def _ensure_schema_26(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_25(connection)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rpa_latest_bk_rows (
+                workbook_key TEXT NOT NULL,
+                sheet_name TEXT NOT NULL,
+                row_number INTEGER NOT NULL CHECK (row_number > 1),
+                sqt TEXT NOT NULL,
+                PRIMARY KEY (workbook_key, sheet_name, row_number)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rpa_latest_pad_rows (
+                workbook_key TEXT NOT NULL,
+                sheet_name TEXT NOT NULL,
+                row_number INTEGER NOT NULL CHECK (row_number > 1),
+                sqt TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                launched_at TEXT NOT NULL,
+                PRIMARY KEY (workbook_key, sheet_name, row_number)
+            )
+            """
+        )
 
     @contextmanager
     def transaction(

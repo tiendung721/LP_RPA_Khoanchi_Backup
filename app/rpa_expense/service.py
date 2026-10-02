@@ -20,6 +20,7 @@ from app.services.excel.payment_sync import (
     PaymentSyncError,
     find_summary_start,
 )
+from app.services.excel.posting import INVOICE_NUMBER_HEADER_NAMES
 from app.services.excel.resolvers import MonthSheetService
 from app.services.excel.workbook import (
     ExcelLockService,
@@ -171,6 +172,7 @@ class RpaExpenseService:
                 raise RpaExpenseError(f"Không tìm thấy sheet {sheet_name}.")
             worksheet = workbook[sheet_name]
             columns = self._summary_columns(worksheet)
+            invoice_columns = self._invoice_columns(worksheet)
             status_column = self._optional_status_column(worksheet)
             evaluator = ArithmeticFormulaEvaluator(worksheet)
             groups: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
@@ -192,6 +194,7 @@ class RpaExpenseService:
                     {
                         "rows": [],
                         "statuses": [],
+                        "invoice_numbers": [],
                         "amounts": {
                             key: 0
                             for key in SUMMARY_KEYS
@@ -202,6 +205,20 @@ class RpaExpenseService:
                     },
                 )
                 group["rows"].append(row_number)
+                for column in invoice_columns:
+                    cell = worksheet.cell(row_number, column)
+                    invoice_value = cell.value
+                    if cell.data_type == "f":
+                        try:
+                            invoice_value = evaluator.value(cell)
+                        except PaymentSyncError:
+                            continue
+                    invoice = self._invoice_text(invoice_value)
+                    if invoice and not any(
+                        value.casefold() == invoice.casefold()
+                        for value in group["invoice_numbers"]
+                    ):
+                        group["invoice_numbers"].append(invoice)
                 status_value = (
                     worksheet.cell(row_number, status_column).value
                     if status_column is not None
@@ -240,18 +257,18 @@ class RpaExpenseService:
             progress_callback,
             f"Đã đọc {len(items)} SQT; {sum(item.can_run for item in items)} SQT có thể chạy.",
         )
-        pending_revisions: tuple[tuple[str, int], ...] = ()
+        latest_bk_revisions: tuple[tuple[str, int], ...] = ()
         latest_pad_sqt: tuple[str, ...] = ()
         if self.tracking_repository is not None:
             snapshot = self.tracking_repository.snapshot(target, sheet_name)
-            pending_revisions = tuple(snapshot.pending_revisions.items())
+            latest_bk_revisions = tuple(snapshot.latest_bk_revisions.items())
             latest_pad_sqt = tuple(snapshot.latest_pad_sqt)
         return RpaExpensePlan(
             target,
             sheet_name,
             fingerprint,
             items,
-            pending_revisions=pending_revisions,
+            latest_bk_revisions=latest_bk_revisions,
             latest_pad_sqt=latest_pad_sqt,
         )
 
@@ -311,8 +328,11 @@ class RpaExpenseService:
                 {
                     **lookup[value].to_payload(),
                     **(
-                        {"pending_revision": revision}
-                        if (revision := plan.pending_revision(value)) is not None
+                        {"bk_revision": revision}
+                        if self.tracking_repository is not None
+                        and (revision := self.tracking_repository.bk_revision(
+                            plan.bk_path, plan.sheet_name, value
+                        )) is not None
                         else {}
                     ),
                 }
@@ -424,6 +444,26 @@ class RpaExpenseService:
         return columns
 
     @staticmethod
+    def _invoice_columns(worksheet: Any) -> tuple[int, ...]:
+        summary_start = find_summary_start(worksheet)
+        if summary_start is None:
+            return ()
+        return tuple(
+            column
+            for column in range(1, summary_start)
+            if normalize_header(worksheet.cell(1, column).value)
+            in INVOICE_NUMBER_HEADER_NAMES
+        )
+
+    @staticmethod
+    def _invoice_text(value: Any) -> str:
+        if value is None or isinstance(value, bool):
+            return ""
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value).strip()
+
+    @staticmethod
     def _optional_status_column(worksheet: Any) -> int | None:
         expected = normalize_header(STATUS_HEADER)
         matches = [
@@ -470,6 +510,7 @@ class RpaExpenseService:
             source_rows=tuple(group["rows"]),
             status=status,
             amounts=amounts,
+            invoice_numbers=tuple(group["invoice_numbers"]),
             errors=tuple(dict.fromkeys(group["errors"])),
         )
 

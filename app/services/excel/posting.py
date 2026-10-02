@@ -4989,6 +4989,7 @@ class ExpensePostingService:
     def _finish_result(self, result: PostingResult) -> None:
         if self.rpa_tracking_repository is not None:
             changed_by_sheet: dict[str, set[str]] = defaultdict(set)
+            changed_rows: set[tuple[str, int, str]] = set()
             for outcome in result.item_outcomes:
                 sheet_name = str(outcome.target_sheet or "").strip()
                 sqt = str(outcome.sqt or "").strip()
@@ -4999,13 +5000,17 @@ class ExpensePostingService:
                 )
                 if sheet_name and sqt and amount_changed:
                     changed_by_sheet[sheet_name].add(sqt)
-            for sheet_name, sqt_values in changed_by_sheet.items():
-                self.rpa_tracking_repository.mark_bk_changed(
-                    result.target_path,
-                    sheet_name,
-                    sorted(sqt_values),
-                    source_run_id=result.run_id,
-                )
+                    if outcome.target_row is not None:
+                        changed_rows.add((sheet_name, int(outcome.target_row), sqt))
+            self.rpa_tracking_repository.record_bk_run(
+                result.target_path,
+                {
+                    sheet_name: sorted(sqt_values)
+                    for sheet_name, sqt_values in changed_by_sheet.items()
+                },
+                changed_rows=sorted(changed_rows),
+                source_run_id=result.run_id,
+            )
         if self.run_repository is None or result.run_id is None:
             return
         self.run_repository.finish_run(

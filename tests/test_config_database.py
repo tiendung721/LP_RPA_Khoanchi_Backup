@@ -17,6 +17,7 @@ from app.constants import SQLITE_SCHEMA_VERSION
 from app.database import Database
 from app.models import BatchStatus
 from app.repositories.batch_repository import BatchRepository
+from app.repositories.rpa_tracking_repository import RpaTrackingRepository
 
 
 def test_first_load_creates_settings_and_runtime_directories(tmp_path: Path) -> None:
@@ -531,6 +532,30 @@ def test_migration_24_adds_input_and_selected_sqt_to_posting_history(
         for row in migrated.query_all("PRAGMA table_info(expense_posting_items)")
     }
     assert {"input_sqt", "source_sqt"}.issubset(columns)
+    assert migrated.query_one("PRAGMA user_version")[0] == SQLITE_SCHEMA_VERSION
+    migrated.close()
+
+
+def test_migration_25_keeps_bk_revisions_without_showing_legacy_pending(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "schema-24.db"
+    bk = tmp_path / "BK.xlsx"
+    database = Database(path)
+    tracking = RpaTrackingRepository(database)
+    tracking.record_bk_run(bk, {"T07 26": ["101"]})
+    database.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE rpa_latest_bk_run")
+        connection.execute("ALTER TABLE rpa_pending_sqt DROP COLUMN latest_generation")
+        connection.execute("PRAGMA user_version = 24")
+
+    migrated = Database(path)
+    tracking = RpaTrackingRepository(migrated)
+    assert tracking.snapshot(bk, "T07 26").latest_bk_sqt == ()
+    assert tracking.bk_revision(bk, "T07 26", "101") == 1
+    tracking.record_bk_run(bk, {"T07 26": ["101"]})
+    assert tracking.snapshot(bk, "T07 26").latest_bk_revisions == {"101": 2}
     assert migrated.query_one("PRAGMA user_version")[0] == SQLITE_SCHEMA_VERSION
     migrated.close()
 

@@ -1,11 +1,11 @@
-"""Lưu nhóm SQT chờ nhập quyết toán và lượt PAD gần nhất."""
+"""Lưu lượt ghi BK gần nhất, phiên bản SQT và lượt PAD gần nhất."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from app.database import Database
 
@@ -30,12 +30,18 @@ def _normalized_sqt(values: Iterable[object]) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class RpaTrackingSnapshot:
-    pending_revisions: dict[str, int]
+    latest_bk_revisions: dict[str, int]
     latest_pad_sqt: tuple[str, ...]
 
     @property
-    def pending_sqt(self) -> tuple[str, ...]:
-        return tuple(self.pending_revisions)
+    def latest_bk_sqt(self) -> tuple[str, ...]:
+        return tuple(self.latest_bk_revisions)
+
+
+@dataclass(frozen=True, slots=True)
+class RpaRowTrackingSnapshot:
+    latest_bk_rows: tuple[tuple[str, int], ...]
+    latest_pad_rows: tuple[tuple[str, int], ...]
 
 
 class RpaTrackingRepository:
@@ -44,53 +50,152 @@ class RpaTrackingRepository:
     def __init__(self, database: Database | str | Path) -> None:
         self.database = database if isinstance(database, Database) else Database(database)
 
-    def mark_bk_changed(
+    def record_bk_run(
         self,
         workbook_path: str | Path,
-        sheet_name: str,
-        sqt_values: Iterable[object],
+        changed_by_sheet: Mapping[str, Iterable[object]],
         *,
+        changed_rows: Iterable[tuple[str, int, object]] = (),
         source_run_id: int | None = None,
         updated_at: str | None = None,
-    ) -> dict[str, int]:
+    ) -> dict[str, dict[str, int]]:
         workbook_key, display_path = _path_parts(workbook_path)
-        values = _normalized_sqt(sqt_values)
-        if not values:
-            return {}
         timestamp = updated_at or _now_iso()
+        normalized = {
+            str(sheet): _normalized_sqt(values)
+            for sheet, values in changed_by_sheet.items()
+            if str(sheet).strip()
+        }
+        normalized_rows = tuple(
+            (str(sheet), int(row), str(sqt).strip())
+            for sheet, row, sqt in changed_rows
+            if str(sheet).strip() and int(row) > 1 and str(sqt).strip()
+        )
+        revisions: dict[str, dict[str, int]] = {}
         with self.database.transaction(immediate=True) as connection:
-            for sqt in values:
-                connection.execute(
-                    """
-                    INSERT INTO rpa_pending_sqt (
-                        workbook_key, workbook_path, sheet_name, sqt,
-                        revision, source_run_id, updated_at
-                    ) VALUES (?, ?, ?, ?, 1, ?, ?)
-                    ON CONFLICT(workbook_key, sheet_name, sqt) DO UPDATE SET
-                        workbook_path = excluded.workbook_path,
-                        revision = rpa_pending_sqt.revision + 1,
-                        source_run_id = excluded.source_run_id,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        workbook_key,
-                        display_path,
-                        str(sheet_name),
-                        sqt,
-                        source_run_id,
-                        timestamp,
-                    ),
-                )
-            rows = connection.execute(
+            previous = connection.execute(
+                "SELECT generation FROM rpa_latest_bk_run WHERE workbook_key = ?",
+                (workbook_key,),
+            ).fetchone()
+            generation = int(previous["generation"]) + 1 if previous else 1
+            connection.execute(
                 """
-                SELECT sqt, revision
-                FROM rpa_pending_sqt
-                WHERE workbook_key = ? AND sheet_name = ?
-                  AND sqt IN ({})
-                """.format(",".join("?" for _ in values)),
-                (workbook_key, str(sheet_name), *values),
-            ).fetchall()
-        return {str(row["sqt"]): int(row["revision"]) for row in rows}
+                INSERT INTO rpa_latest_bk_run (
+                    workbook_key, workbook_path, generation, source_run_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(workbook_key) DO UPDATE SET
+                    workbook_path = excluded.workbook_path,
+                    generation = excluded.generation,
+                    source_run_id = excluded.source_run_id,
+                    updated_at = excluded.updated_at
+                """,
+                (workbook_key, display_path, generation, source_run_id, timestamp),
+            )
+            connection.execute(
+                "DELETE FROM rpa_latest_bk_rows WHERE workbook_key = ?",
+                (workbook_key,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO rpa_latest_bk_rows (
+                    workbook_key, sheet_name, row_number, sqt
+                ) VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (workbook_key, sheet, row, sqt)
+                    for sheet, row, sqt in dict.fromkeys(normalized_rows)
+                ],
+            )
+            for sheet_name, values in normalized.items():
+                if not values:
+                    continue
+                for sqt in values:
+                    connection.execute(
+                        """
+                        INSERT INTO rpa_pending_sqt (
+                            workbook_key, workbook_path, sheet_name, sqt,
+                            revision, source_run_id, updated_at, latest_generation
+                        ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+                        ON CONFLICT(workbook_key, sheet_name, sqt) DO UPDATE SET
+                            workbook_path = excluded.workbook_path,
+                            revision = rpa_pending_sqt.revision + 1,
+                            source_run_id = excluded.source_run_id,
+                            updated_at = excluded.updated_at,
+                            latest_generation = excluded.latest_generation
+                        """,
+                        (
+                            workbook_key, display_path, sheet_name, sqt,
+                            source_run_id, timestamp, generation,
+                        ),
+                    )
+                rows = connection.execute(
+                    """
+                    SELECT sqt, revision FROM rpa_pending_sqt
+                    WHERE workbook_key = ? AND sheet_name = ?
+                      AND latest_generation = ?
+                    """,
+                    (workbook_key, sheet_name, generation),
+                ).fetchall()
+                revisions[sheet_name] = {
+                    str(row["sqt"]): int(row["revision"]) for row in rows
+                }
+        return revisions
+
+    def record_latest_pad_rows(
+        self,
+        workbook_path: str | Path,
+        selected_rows: Iterable[tuple[str, int, object]],
+        *,
+        run_id: str,
+        launched_at: str | None = None,
+    ) -> None:
+        workbook_key, _display_path = _path_parts(workbook_path)
+        timestamp = launched_at or _now_iso()
+        rows = tuple(
+            (str(sheet), int(row), str(sqt).strip())
+            for sheet, row, sqt in selected_rows
+        )
+        with self.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "DELETE FROM rpa_latest_pad_rows WHERE workbook_key = ?",
+                (workbook_key,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO rpa_latest_pad_rows (
+                    workbook_key, sheet_name, row_number, sqt, run_id, launched_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (workbook_key, sheet, row, sqt, str(run_id), timestamp)
+                    for sheet, row, sqt in rows
+                ],
+            )
+
+    def snapshot_rows(self, workbook_path: str | Path) -> RpaRowTrackingSnapshot:
+        workbook_key, _display_path = _path_parts(workbook_path)
+        bk_rows = self.database.query_all(
+            """
+            SELECT sheet_name, row_number FROM rpa_latest_bk_rows
+            WHERE workbook_key = ? ORDER BY sheet_name, row_number
+            """,
+            (workbook_key,),
+        )
+        pad_rows = self.database.query_all(
+            """
+            SELECT sheet_name, row_number FROM rpa_latest_pad_rows
+            WHERE workbook_key = ? ORDER BY sheet_name, row_number
+            """,
+            (workbook_key,),
+        )
+        return RpaRowTrackingSnapshot(
+            latest_bk_rows=tuple(
+                (str(row["sheet_name"]), int(row["row_number"])) for row in bk_rows
+            ),
+            latest_pad_rows=tuple(
+                (str(row["sheet_name"]), int(row["row_number"])) for row in pad_rows
+            ),
+        )
 
     def record_latest_pad(
         self,
@@ -138,12 +243,15 @@ class RpaTrackingRepository:
         sheet_name: str,
     ) -> RpaTrackingSnapshot:
         workbook_key, _display_path = _path_parts(workbook_path)
-        pending_rows = self.database.query_all(
+        latest_bk_rows = self.database.query_all(
             """
-            SELECT sqt, revision
-            FROM rpa_pending_sqt
-            WHERE workbook_key = ? AND sheet_name = ?
-            ORDER BY updated_at, sqt
+            SELECT item.sqt, item.revision
+            FROM rpa_pending_sqt AS item
+            JOIN rpa_latest_bk_run AS run
+              ON run.workbook_key = item.workbook_key
+             AND run.generation = item.latest_generation
+            WHERE item.workbook_key = ? AND item.sheet_name = ?
+            ORDER BY item.sqt
             """,
             (workbook_key, str(sheet_name)),
         )
@@ -157,39 +265,13 @@ class RpaTrackingRepository:
             (workbook_key, str(sheet_name)),
         )
         return RpaTrackingSnapshot(
-            pending_revisions={
-                str(row["sqt"]): int(row["revision"]) for row in pending_rows
+            latest_bk_revisions={
+                str(row["sqt"]): int(row["revision"]) for row in latest_bk_rows
             },
             latest_pad_sqt=tuple(str(row["sqt"]) for row in latest_rows),
         )
 
-    def mark_pad_succeeded(
-        self,
-        workbook_path: str | Path,
-        sheet_name: str,
-        sqt: object,
-        *,
-        expected_revision: int | None,
-    ) -> bool:
-        if expected_revision is None:
-            return False
-        workbook_key, _display_path = _path_parts(workbook_path)
-        removed = self.database.execute(
-            """
-            DELETE FROM rpa_pending_sqt
-            WHERE workbook_key = ? AND sheet_name = ?
-              AND sqt = ? AND revision = ?
-            """,
-            (
-                workbook_key,
-                str(sheet_name),
-                str(sqt).strip(),
-                int(expected_revision),
-            ),
-        )
-        return removed == 1
-
-    def pending_revision(
+    def bk_revision(
         self,
         workbook_path: str | Path,
         sheet_name: str,

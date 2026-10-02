@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+from types import SimpleNamespace
 from typing import Any
 
 from watchdog.events import FileCreatedEvent
@@ -86,6 +87,35 @@ def test_startup_scan_waits_for_stable_file_and_emits_on_qt_thread(
 
     assert observer.running is False
     assert watcher.is_running is False
+
+
+def test_file_replaced_during_startup_scan_is_treated_as_new(
+    tmp_path: Path, qtbot: Any
+) -> None:
+    source = tmp_path / "ket_qua_boc_tach.json"
+    source.write_text('{"v":1,"d":[]}', encoding="utf-8")
+
+    class ReplacingChecker:
+        def wait(self, path: Path, *, cancel_event: object) -> SimpleNamespace:
+            path.write_text('{"v":1,"d":[["new"]]}', encoding="utf-8")
+            stat_result = path.stat()
+            return SimpleNamespace(
+                size=stat_result.st_size, mtime_ns=stat_result.st_mtime_ns
+            )
+
+    watcher = OutputWatcher(
+        tmp_path,
+        stability_checker=ReplacingChecker(),
+        on_file_ready=lambda path: path,
+        observer_factory=FakeObserver,
+    )
+    try:
+        with qtbot.waitSignal(watcher.file_processed_with_origin, timeout=2_000) as signal:
+            watcher.start()
+        assert Path(signal.args[0]) == source
+        assert signal.args[2] is False
+    finally:
+        watcher.stop()
 
 
 def test_fake_watchdog_event_is_forwarded_and_duplicate_event_is_coalesced(

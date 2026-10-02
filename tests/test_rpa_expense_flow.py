@@ -38,7 +38,7 @@ def _build_bk(path: Path, *, with_status: bool = True) -> None:
     sheet = workbook.active
     sheet.title = "T07 26"
     sheet["A1"] = "SQT"
-    sheet["B1"] = "Ghi chú"
+    sheet["B1"] = "Số HĐ"
     summary_start = 3
     for offset, header in enumerate(SUMMARY_HEADERS):
         sheet.cell(1, summary_start + offset).value = header
@@ -53,6 +53,7 @@ def _build_bk(path: Path, *, with_status: bool = True) -> None:
     )
     for row_number, (sqt, values, status) in enumerate(rows, 2):
         sheet.cell(row_number, 1).value = sqt
+        sheet.cell(row_number, 2).value = f"HD-{sqt}-{row_number}"
         sheet.cell(row_number, summary_start).value = f"=A{row_number}"
         for offset, value in enumerate(values, 1):
             sheet.cell(row_number, summary_start + offset).value = value
@@ -87,6 +88,7 @@ def test_analyze_groups_rows_and_imported_items_remain_runnable(
 
     assert first.sqt == "101"
     assert first.source_rows == (2, 3)
+    assert first.invoice_numbers == ("HD-101-2", "HD-101-3")
     assert first.status == RPA_STATUS_NOT_IMPORTED
     assert first.amounts.cuoc_bo_dong_hang == 300
     assert first.amounts.nang_ha_dong_hang == 30
@@ -96,6 +98,31 @@ def test_analyze_groups_rows_and_imported_items_remain_runnable(
 
     assert second.status == RPA_STATUS_IMPORTED
     assert second.can_run
+
+
+def test_analyze_collects_distinct_invoices_from_multiple_bk_columns(
+    tmp_path: Path,
+) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "T07 26"
+    sheet["A1"] = "SQT"
+    sheet["B1"] = "Số HĐ"
+    sheet["C1"] = "Hóa đơn cước biển"
+    for offset, header in enumerate(SUMMARY_HEADERS, 4):
+        sheet.cell(1, offset).value = header
+    for row, invoices in ((2, ("HD-01", "SEA-02")), (3, ("hd-01", "SEA-03"))):
+        sheet.cell(row, 1).value = 101
+        sheet.cell(row, 2).value = invoices[0]
+        sheet.cell(row, 3).value = invoices[1]
+        sheet.cell(row, 4).value = f"=A{row}"
+    bk.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(bk)
+    workbook.close()
+
+    plan = RpaExpenseService(_settings(tmp_path, bk)).analyze_sheet("T07 26")
+    assert plan.items[0].invoice_numbers == ("HD-01", "SEA-02", "SEA-03")
 
 
 def test_prepare_json_and_mark_all_source_rows_after_success(
@@ -189,8 +216,9 @@ def test_dialog_filters_searches_and_selects_all_rows(
         == "Chưa nhập (1)"
     )
     assert dialog.filter_buttons[RPA_STATUS_IMPORTED].text() == "Đã nhập (1)"
-    assert dialog.table.item(0, 2).text() == "● Chưa nhập"
-    assert dialog.table.item(1, 2).text() == "✓ Đã nhập"
+    assert dialog.table.item(0, 2).text() == "HD-101-2, HD-101-3"
+    assert dialog.table.item(0, 3).text() == "● Chưa nhập"
+    assert dialog.table.item(1, 3).text() == "✓ Đã nhập"
     assert "1 nhập lại" in dialog.selection_summary.text()
 
     dialog.filter_buttons[RPA_STATUS_NOT_IMPORTED].click()
@@ -206,9 +234,12 @@ def test_dialog_filters_searches_and_selects_all_rows(
     assert "1 chưa nhập, 1 nhập lại" in dialog.selection_summary.text()
 
     dialog.findChild(QPushButton, "clearAllRpaSqtButton").click()
-    assert dialog.selected_sqt == []
+    assert dialog.selected_sqt == ["102"]
 
     dialog.filter_buttons[None].click()
+    dialog.findChild(QPushButton, "clearAllRpaSqtButton").click()
+    assert dialog.selected_sqt == []
+
     dialog.sqt_search.setText("02")
     visible_sqt = [
         dialog.table.item(row, 1).text()
@@ -216,6 +247,17 @@ def test_dialog_filters_searches_and_selects_all_rows(
         if not dialog.table.isRowHidden(row)
     ]
     assert visible_sqt == ["102"]
+    dialog.findChild(QPushButton, "selectAllRpaSqtButton").click()
+    assert dialog.selected_sqt == ["102"]
+    dialog.sqt_search.setText("hd-101-3")
+    visible_sqt = [
+        dialog.table.item(row, 1).text()
+        for row in range(dialog.table.rowCount())
+        if not dialog.table.isRowHidden(row)
+    ]
+    assert visible_sqt == ["101"]
+    dialog.findChild(QPushButton, "clearAllRpaSqtButton").click()
+    assert dialog.selected_sqt == ["102"]
     dialog.sqt_search.clear()
     assert all(
         not dialog.table.isRowHidden(row)
@@ -233,7 +275,7 @@ def test_dialog_removes_total_column_and_sorts_sqt_by_numeric_value(
     qtbot.addWidget(dialog)
 
     assert "Tổng" not in dialog.COLUMNS
-    assert dialog.table.columnCount() == len(dialog.COLUMNS) == 13
+    assert dialog.table.columnCount() == len(dialog.COLUMNS) == 14
     assert dialog.sort_combo.findData("total_asc") == -1
     assert (
         dialog.table.horizontalScrollBarPolicy()
@@ -479,18 +521,29 @@ def test_rpa_controller_keeps_choices_when_launch_fails(qtbot, tmp_path: Path) -
         database.close()
 
 
-def test_rpa_tracking_accumulates_pending_and_replaces_latest_pad(
+def test_rpa_tracking_replaces_latest_bk_across_workbook_and_latest_pad(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "app.db")
     tracking = RpaTrackingRepository(database)
     bk = tmp_path / "BK.xlsx"
     try:
-        tracking.mark_bk_changed(bk, "T07 26", ["101", "102"])
-        tracking.mark_bk_changed(bk, "T07 26", ["102", "103"])
+        tracking.record_bk_run(
+            bk,
+            {"T07 26": ["101", "102"], "T08 26": ["201"]},
+        )
+        assert tracking.snapshot(bk, "T08 26").latest_bk_revisions == {"201": 1}
+        tracking.record_bk_run(bk, {"T07 26": ["102", "103"]})
         snapshot = tracking.snapshot(bk, "T07 26")
 
-        assert snapshot.pending_revisions == {"101": 1, "102": 2, "103": 1}
+        assert snapshot.latest_bk_revisions == {"102": 2, "103": 1}
+        assert tracking.bk_revision(bk, "T07 26", "101") == 1
+
+        tracking.record_bk_run(bk, {"T08 26": ["201"]})
+        assert tracking.snapshot(bk, "T07 26").latest_bk_revisions == {}
+        assert tracking.snapshot(bk, "T08 26").latest_bk_revisions == {"201": 2}
+        tracking.record_bk_run(bk, {})
+        assert tracking.snapshot(bk, "T08 26").latest_bk_revisions == {}
 
         tracking.record_latest_pad(
             bk,
@@ -509,29 +562,29 @@ def test_rpa_tracking_accumulates_pending_and_replaces_latest_pad(
         database.close()
 
 
-def test_pad_success_clears_only_matching_pending_revision(tmp_path: Path) -> None:
+def test_pad_success_rejects_stale_bk_revision(tmp_path: Path) -> None:
     bk = tmp_path / "Output" / "BK.xlsx"
     _build_bk(bk)
     settings = _settings(tmp_path, bk)
     database = Database(tmp_path / "app.db")
     tracking = RpaTrackingRepository(database)
     try:
-        tracking.mark_bk_changed(bk, "T07 26", ["101"])
+        tracking.record_bk_run(bk, {"T07 26": ["101"]})
         service = RpaExpenseService(settings, tracking_repository=tracking)
         plan = service.analyze_sheet("T07 26")
         prepared = service.prepare_selection(plan, ["101"])
         payload = json.loads(prepared.selection_path.read_text(encoding="utf-8"))
-        assert payload["items"][0]["pending_revision"] == 1
+        assert payload["items"][0]["bk_revision"] == 1
 
         # BK lại thay đổi trong lúc payload cũ đang được PAD xử lý.
-        tracking.mark_bk_changed(bk, "T07 26", ["101"])
+        tracking.record_bk_run(bk, {"T07 26": ["101"]})
         result = RpaExpenseStatusService(
             backup_dir=settings.paths.excel_backup_dir,
             tracking_repository=tracking,
         ).mark_imported(prepared.selection_path, "101")
 
         assert result["stale_selection"] is True
-        assert tracking.snapshot(bk, "T07 26").pending_revisions == {"101": 2}
+        assert tracking.snapshot(bk, "T07 26").latest_bk_revisions == {"101": 2}
         workbook = load_workbook(bk, data_only=False)
         try:
             status_column = 3 + len(SUMMARY_HEADERS)
@@ -542,14 +595,14 @@ def test_pad_success_clears_only_matching_pending_revision(tmp_path: Path) -> No
         database.close()
 
 
-def test_pad_success_clears_pending_and_records_latest_launch(tmp_path: Path) -> None:
+def test_pad_success_keeps_latest_bk_and_records_latest_launch(tmp_path: Path) -> None:
     bk = tmp_path / "Output" / "BK.xlsx"
     _build_bk(bk)
     settings = _settings(tmp_path, bk)
     database = Database(tmp_path / "app.db")
     tracking = RpaTrackingRepository(database)
     try:
-        tracking.mark_bk_changed(bk, "T07 26", ["101"])
+        tracking.record_bk_run(bk, {"T07 26": ["101"]})
         service = RpaExpenseService(settings, tracking_repository=tracking)
         prepared = service.prepare_selection(
             service.analyze_sheet("T07 26"),
@@ -563,8 +616,8 @@ def test_pad_success_clears_pending_and_records_latest_launch(tmp_path: Path) ->
             tracking_repository=tracking,
         ).mark_imported(prepared.selection_path, "101")
 
-        assert result["pending_cleared"] is True
-        assert tracking.snapshot(bk, "T07 26").pending_revisions == {}
+        assert result["success"] is True
+        assert tracking.snapshot(bk, "T07 26").latest_bk_revisions == {"101": 1}
     finally:
         database.close()
 
@@ -575,31 +628,43 @@ def test_dialog_selects_and_filters_rpa_groups(qtbot, tmp_path: Path) -> None:
     base_plan = RpaExpenseService(_settings(tmp_path, bk)).analyze_sheet("T07 26")
     plan = replace(
         base_plan,
-        pending_revisions=(("101", 1),),
+        latest_bk_revisions=(("101", 1),),
         latest_pad_sqt=("102",),
     )
     dialog = RpaSqtSelectionDialog(plan)
     qtbot.addWidget(dialog)
 
-    assert set(dialog.selected_sqt) == {"101", "102"}
-    assert dialog.group_filter_buttons["pending"].isChecked()
+    assert set(dialog.selected_sqt) == {"101"}
+    assert dialog.group_filter_buttons["bk"].isChecked()
     visible = {
         dialog.table.item(row, 1).text()
         for row in range(dialog.table.rowCount())
         if not dialog.table.isRowHidden(row)
     }
     assert visible == {"101"}
-    assert dialog.table.item(0, 3).text() == "Chờ nhập"
+    assert dialog.table.item(0, 4).text() == "Vừa ghi BK"
+
+    dialog.sqt_search.setText("HD-102-4")
+    visible = {
+        dialog.table.item(row, 1).text()
+        for row in range(dialog.table.rowCount())
+        if not dialog.table.isRowHidden(row)
+    }
+    assert visible == {"102"}
+    dialog.sqt_search.clear()
 
     assert dialog.findChild(QPushButton, "selectLatestRpaGroupButton") is None
     assert dialog.findChild(QPushButton, "selectBothRpaGroupsButton") is None
     dialog.findChild(QPushButton, "clearAllRpaSqtButton").click()
     assert dialog.selected_sqt == []
     dialog.findChild(QPushButton, "selectAllRpaSqtButton").click()
+    assert dialog.selected_sqt == ["101"]
+    dialog.group_filter_buttons["all"].click()
+    dialog.findChild(QPushButton, "selectAllRpaSqtButton").click()
     assert set(dialog.selected_sqt) == {"101", "102"}
 
 
-def test_posting_result_adds_only_written_amounts_to_pending(tmp_path: Path) -> None:
+def test_posting_result_tracks_only_written_amounts_in_latest_bk(tmp_path: Path) -> None:
     database = Database(tmp_path / "app.db")
     tracking = RpaTrackingRepository(database)
     bk = tmp_path / "BK.xlsx"
@@ -640,7 +705,7 @@ def test_posting_result_adds_only_written_amounts_to_pending(tmp_path: Path) -> 
             )
         )
 
-        assert tracking.snapshot(bk, "T07 26").pending_revisions == {"101": 1}
+        assert tracking.snapshot(bk, "T07 26").latest_bk_revisions == {"101": 1}
     finally:
         database.close()
 

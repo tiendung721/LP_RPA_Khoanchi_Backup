@@ -79,6 +79,7 @@ class OutputWatcher(QObject):
 
     file_detected = Signal(str)
     file_ready = Signal(str)
+    file_ready_with_origin = Signal(str, bool)
     file_rejected = Signal(str, str)
     watcher_error = Signal(str)
     started = Signal(str)
@@ -86,8 +87,9 @@ class OutputWatcher(QObject):
     scan_completed = Signal(int)
     status_changed = Signal(bool, str)
     file_processed = Signal(str, object)
+    file_processed_with_origin = Signal(str, object, bool)
 
-    _stability_succeeded = Signal(str, object, int)
+    _stability_succeeded = Signal(str, object, int, bool)
     _stability_failed = Signal(str, str, bool, int)
     _scan_finished = Signal(int, int)
 
@@ -199,6 +201,7 @@ class OutputWatcher(QObject):
         self._executor: ThreadPoolExecutor | None = None
         self._cancel_event = threading.Event()
         self._pending: set[str] = set()
+        self._startup_signatures: dict[str, tuple[int, int]] = {}
         self._handled_signatures: dict[str, tuple[int, int]] = {}
         self._running = False
         self._generation = 0
@@ -269,6 +272,16 @@ class OutputWatcher(QObject):
             return False
 
         cancel_event = threading.Event()
+        startup_signatures: dict[str, tuple[int, int]] = {}
+        try:
+            for path in self._output_dir.iterdir():
+                if path.is_file() and self.accepts_path(path):
+                    stat_result = path.stat()
+                    startup_signatures[self._path_key(path)] = (
+                        stat_result.st_size, stat_result.st_mtime_ns
+                    )
+        except OSError:
+            LOGGER.warning("Không thể nhận diện đầy đủ file có sẵn khi khởi động.")
         executor = ThreadPoolExecutor(
             max_workers=self._max_workers,
             thread_name_prefix="output-stability",
@@ -283,6 +296,7 @@ class OutputWatcher(QObject):
             self._observer = observer
             self._running = True
             self._pending.clear()
+            self._startup_signatures = startup_signatures
 
         try:
             observer.schedule(
@@ -356,6 +370,7 @@ class OutputWatcher(QObject):
 
         with self._state_lock:
             self._pending.clear()
+            self._startup_signatures.clear()
 
         LOGGER.info("Watcher đã dừng: %s", self._output_dir)
         self.stopped.emit()
@@ -502,6 +517,7 @@ class OutputWatcher(QObject):
                 return False
             if self._handled_signatures.get(key) == signature:
                 return False
+            is_startup = self._startup_signatures.get(key) == signature
             if initial_stat.st_size > self._max_size_bytes:
                 self._handled_signatures[key] = signature
                 message = (
@@ -526,6 +542,7 @@ class OutputWatcher(QObject):
                 key,
                 generation,
                 cancel_event,
+                is_startup,
             )
         except RuntimeError as exc:
             with self._state_lock:
@@ -595,6 +612,7 @@ class OutputWatcher(QObject):
         key: str,
         generation: int,
         cancel_event: threading.Event,
+        is_startup: bool,
     ) -> None:
         LOGGER.info("Chờ file ổn định: %s", path)
         try:
@@ -635,11 +653,14 @@ class OutputWatcher(QObject):
         with self._state_lock:
             self._handled_signatures[key] = (size, mtime_ns)
             self._pending.discard(key)
-        self._stability_succeeded.emit(str(path), result, generation)
+            is_startup = is_startup and self._startup_signatures.get(key) == (
+                size, mtime_ns
+            )
+        self._stability_succeeded.emit(str(path), result, generation, is_startup)
 
-    @Slot(str, object, int)
+    @Slot(str, object, int, bool)
     def _deliver_ready(
-        self, raw_path: str, result: object, generation: int
+        self, raw_path: str, result: object, generation: int, is_startup: bool = False
     ) -> None:
         if not self._is_current_generation(generation):
             return
@@ -652,6 +673,7 @@ class OutputWatcher(QObject):
             )
             return
         LOGGER.info("File đã ổn định và sẵn sàng tiếp nhận: %s", path)
+        self.file_ready_with_origin.emit(raw_path, is_startup)
         self.file_ready.emit(raw_path)
         if self._on_file_ready_callback is None:
             return
@@ -666,6 +688,7 @@ class OutputWatcher(QObject):
             )
             self.file_rejected.emit(raw_path, message)
             return
+        self.file_processed_with_origin.emit(raw_path, callback_result, is_startup)
         self.file_processed.emit(raw_path, callback_result)
 
     @Slot(str, str, bool, int)
