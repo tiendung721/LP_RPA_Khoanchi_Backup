@@ -39,6 +39,8 @@ from app.services.excel.posting import (
 )
 from app.services.excel.review import CorrectionRequiredError, SourceDataChangedError
 from app.services.excel.workbook import WorkbookChangedError
+from app.ui.review_merge import merged_row
+from app.ui.review_table_model import ReviewRow
 
 
 SYNC_HEADERS = [
@@ -3100,6 +3102,46 @@ def test_same_cell_expenses_require_one_json_line_before_invoice_write(
         amount_column, invoice_column = POSTING_INVOICE_LAYOUT["VTN"]
         assert sheet.cell(2, amount_column).value == 200
         assert sheet.cell(2, int(invoice_column)).value == "INV-B"
+    finally:
+        workbook.close()
+
+
+def test_review_merged_total_posts_as_one_expense(tmp_path: Path) -> None:
+    ready = tmp_path / "ready.json"
+    target = tmp_path / "BK 2026.xlsx"
+    container = "DRYU3026167"
+    combined = merged_row(
+        [
+            ReviewRow(cont=container, fee="VSDL", rule="ST", amount=amount,
+                      invoice_no="26955", invoice_date="2026-08-29")
+            for amount in (291_600, 70_200, 75_600)
+        ]
+    )
+    ready.write_text(
+        json.dumps({"v": 4, "d": [combined.to_object()]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    workbook = Workbook()
+    sheet = _new_posting_sheet_with_invoices(workbook, "T08 26")
+    _add_posting_row(sheet, 2, container)
+    workbook.save(target)
+    workbook.close()
+
+    service = _posting_service(ready, target, tmp_path / "Excel")
+    plan = service.analyze(sheet_name="T08 26")
+    assert len(plan.items) == 1
+    assert plan.items[0].amount == 437_400
+    assert not any(
+        conflict.conflict_type is ConflictType.MULTIPLE_EXPENSE_SAME_CELL
+        for conflict in plan.conflicts
+    )
+    result = service.apply(plan, {})
+    assert result.written_cells == 1
+    workbook = load_workbook(target, data_only=False)
+    try:
+        amount_column, invoice_column = POSTING_INVOICE_LAYOUT["VSDL"]
+        assert workbook["T08 26"].cell(2, amount_column).value == 437_400
+        assert workbook["T08 26"].cell(2, int(invoice_column)).value == "26955"
     finally:
         workbook.close()
 

@@ -9,8 +9,8 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import QModelIndex, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QKeySequence, QResizeEvent, QShortcut
+from PySide6.QtCore import QModelIndex, Qt, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QKeySequence, QResizeEvent, QShortcut, QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -52,6 +52,14 @@ from .review_table_model import (
     RowStatus,
     coerce_review_row,
 )
+from .review_merge import (
+    candidate_groups,
+    conflicting_fields,
+    has_valid_amounts,
+    is_exact_duplicate_group,
+    merged_row,
+)
+from .review_merge_dialog import ReviewMergeDialog
 from app.constants import SCHEMA_VERSION
 from app.models import DataRow
 from app.services.review_carrier_lookup import ReviewCarrierLookup
@@ -364,12 +372,19 @@ class ReviewWindow(QMainWindow):
             validator=validator,
             allow_negative=self._allow_negative,
         )
+        self._merge_origins = {
+            row.runtime_id: (row,) for row in self.model.rows()
+        }
         self._source_index_by_runtime = {
             self.model.runtime_id_at(index): index
             for index in range(self.model.rowCount())
         }
+        self._persisted_source_count = self.model.rowCount()
         self._pending_deleted_source_indices: set[int] = set()
         self._next_source_item_index = self.model.rowCount()
+        self._declined_merge_signatures: set[tuple[Any, ...]] = set()
+        self._merging_rows = False
+        self._pending_initial_merge_dialogs = False
         self.proxy_model = ReviewFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
         self._build_ui()
@@ -382,6 +397,9 @@ class ReviewWindow(QMainWindow):
         self._update_dirty(False)
         self._update_action_state()
         self._restore_reconciliation_presentations()
+        if self._last_saved_at is None and self._status != "READY":
+            self._run_merge_review(show_dialogs=False)
+            self._pending_initial_merge_dialogs = True
         if populated_carrier_count:
             self.model.mark_dirty()
             self.statusBar().showMessage(
@@ -389,6 +407,12 @@ class ReviewWindow(QMainWindow):
                 f"{populated_carrier_count} khoản chi; hãy kiểm tra và xác nhận.",
                 12000,
             )
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._pending_initial_merge_dialogs:
+            self._pending_initial_merge_dialogs = False
+            QTimer.singleShot(0, lambda: self._run_merge_review(show_dialogs=True))
 
     def _rows_with_standard_carriers(
         self, rows: Sequence[Any]
@@ -968,6 +992,9 @@ class ReviewWindow(QMainWindow):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        previous_invoice_numbers = {
+            row.runtime_id: row.invoice_no for row in self.model.rows()
+        }
         changed = self.model.bulk_update_invoice_no(
             dialog.scope_positions(),
             invoice_no=dialog.invoice_no,
@@ -975,6 +1002,10 @@ class ReviewWindow(QMainWindow):
             old_invoice_no=dialog.old_invoice_no,
         )
         if changed:
+            for row in self.model.rows():
+                if row.invoice_no != previous_invoice_numbers.get(row.runtime_id):
+                    self._merge_origins[row.runtime_id] = (row,)
+            self._run_merge_review()
             self.statusBar().showMessage(
                 f"Đã cập nhật số HĐ cho {changed} dòng. Hãy kiểm tra và bấm Lưu.",
                 8000,
@@ -989,6 +1020,88 @@ class ReviewWindow(QMainWindow):
         if proxy_index.isValid():
             self.table.selectRow(proxy_index.row())
             self.table.scrollTo(proxy_index, QAbstractItemView.ScrollHint.PositionAtCenter)
+
+    def _run_merge_review(self, *, show_dialogs: bool = True) -> dict[str, str]:
+        """Gộp nhóm an toàn và hỏi người dùng khi một giá trị nguồn mâu thuẫn."""
+
+        source_kind = str(
+            _value(self._metadata, "source_kind", default="ASSISTANT")
+        ).split(".")[-1].upper()
+        if source_kind != "ASSISTANT" or self._merging_rows:
+            return {}
+        self._merging_rows = True
+        merged_into: dict[str, str] = {}
+        try:
+            while True:
+                rows = self.model.rows()
+                changed = False
+                eligible_positions = [
+                    index
+                    for index, row in enumerate(rows)
+                    if not self.model.validation_at(index).errors
+                    and has_valid_amounts((row,))
+                ]
+                eligible_rows = [rows[index] for index in eligible_positions]
+                for eligible_group in candidate_groups(
+                    eligible_rows, origins=self._merge_origins
+                ):
+                    positions = tuple(eligible_positions[index] for index in eligible_group)
+                    members = [rows[index] for index in positions]
+                    signature = tuple(
+                        (row.runtime_id, repr(row.to_object())) for row in members
+                    )
+                    if signature in self._declined_merge_signatures:
+                        continue
+                    conflicts = conflicting_fields(members)
+                    exact_duplicate = is_exact_duplicate_group(members)
+                    must_review = bool(conflicts or exact_duplicate or members[0].fee == "CB")
+                    selections: dict[str, Any] = {}
+                    if must_review:
+                        if not show_dialogs:
+                            continue
+                        dialog = ReviewMergeDialog(
+                            members,
+                            positions,
+                            conflicts,
+                            exact_duplicate=exact_duplicate,
+                            parent=self,
+                        )
+                        if dialog.exec() != QDialog.DialogCode.Accepted:
+                            self._declined_merge_signatures.add(signature)
+                            continue
+                        selections = dialog.selected_values()
+                    result = merged_row(members, selections)
+                    first_runtime_id = members[0].runtime_id
+                    joined_origins = tuple(
+                        origin
+                        for member in members
+                        for origin in self._merge_origins.get(member.runtime_id, (member,))
+                    )
+                    removed = self.model.merge_rows(positions, result)
+                    self._merge_origins[first_runtime_id] = joined_origins
+                    for row in removed:
+                        self._merge_origins.pop(row.runtime_id, None)
+                        merged_into[row.runtime_id] = first_runtime_id
+                        source_index = self._source_index_by_runtime.get(row.runtime_id)
+                        if source_index is not None and source_index < self._persisted_source_count:
+                            self._pending_deleted_source_indices.add(source_index)
+                    self.statusBar().showMessage(
+                        f"Đã gộp {len(members)} dòng thành 1 khoản "
+                        f"{result.amount:,} đ. Hãy kiểm tra và bấm Lưu.".replace(",", "."),
+                        10000,
+                    )
+                    changed = True
+                    break
+                if not changed:
+                    break
+        finally:
+            self._merging_rows = False
+        return merged_into
+
+    def _select_runtime_row(self, runtime_id: str) -> None:
+        source_row = self.model.find_runtime_id(runtime_id)
+        if source_row is not None:
+            self._select_source_row(source_row)
 
     def add_row(self) -> None:
         source_document_id = str(self.document_filter.currentData() or "")
@@ -1040,9 +1153,11 @@ class ReviewWindow(QMainWindow):
             return
         position = self.model.add_row(dialog.row_data())
         runtime_id = self.model.runtime_id_at(position)
+        self._merge_origins[runtime_id] = (self.model.row_at(position),)
         self._source_index_by_runtime[runtime_id] = self._next_source_item_index
         self._next_source_item_index += 1
-        self._select_source_row(position)
+        merged_into = self._run_merge_review()
+        self._select_runtime_row(merged_into.get(runtime_id, runtime_id))
 
     def edit_selected_row(self, _index: QModelIndex | None = None) -> None:
         if _index is not None and _index.isValid() and _index.column() in {
@@ -1074,7 +1189,9 @@ class ReviewWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return False
         self.model.update_row(source_row, dialog.row_data())
-        self._select_source_row(source_row)
+        self._merge_origins[runtime_id] = (self.model.row_at(source_row),)
+        merged_into = self._run_merge_review()
+        self._select_runtime_row(merged_into.get(runtime_id, runtime_id))
         return True
 
     def _apply_canonical_vessel_voyage(
@@ -1093,6 +1210,7 @@ class ReviewWindow(QMainWindow):
                 source_row,
                 ReviewRow.from_mapping(payload, runtime_id=current.runtime_id),
             )
+            self._merge_origins[current.runtime_id] = (self.model.row_at(source_row),)
 
     def delete_selected_row(self) -> None:
         source_rows = self._selected_source_rows()
@@ -1140,6 +1258,7 @@ class ReviewWindow(QMainWindow):
             return
         for source_row in source_rows:
             runtime_id = self.model.runtime_id_at(source_row)
+            self._merge_origins.pop(runtime_id, None)
             source_index = self._source_index_by_runtime.get(runtime_id)
             if source_index is not None:
                 self._pending_deleted_source_indices.add(source_index)
@@ -1214,6 +1333,10 @@ class ReviewWindow(QMainWindow):
             for index in range(self.model.rowCount())
         }
         self._next_source_item_index = self.model.rowCount()
+        self._persisted_source_count = self.model.rowCount()
+        self._merge_origins = {
+            row.runtime_id: (row,) for row in self.model.rows()
+        }
         self.reconciliationChanged.emit()
 
     def save_working(self) -> bool:
@@ -1240,6 +1363,7 @@ class ReviewWindow(QMainWindow):
             self._sync_pending_batch_deletions()
             self._apply_service_result(result)
             self.model.mark_clean()
+            self._persisted_source_count = self.model.rowCount()
             self._last_saved_at = (
                 _value(self._metadata, "last_saved_at") or datetime.now()
             )
@@ -1356,6 +1480,7 @@ class ReviewWindow(QMainWindow):
             self._status = "READY"
             self.status_value.setText(STATUS_VI["READY"])
             self.model.mark_clean()
+            self._persisted_source_count = self.model.rowCount()
             self.confirmed.emit(result if result is not None else self._metadata)
             self.batchUpdated.emit(result if result is not None else self._metadata)
             QMessageBox.information(
@@ -1418,6 +1543,10 @@ class ReviewWindow(QMainWindow):
                     self.model.runtime_id_at(index): index
                     for index in range(self.model.rowCount())
                 }
+                self._persisted_source_count = self.model.rowCount()
+                self._merge_origins = {
+                    row.runtime_id: (row,) for row in self.model.rows()
+                }
                 self._restore_reconciliation_presentations()
         self._update_action_state()
 
@@ -1451,8 +1580,19 @@ class ReviewWindow(QMainWindow):
         }
         self._pending_deleted_source_indices.clear()
         self._next_source_item_index = self.model.rowCount()
+        self._persisted_source_count = self.model.rowCount()
+        self._merge_origins = {
+            row.runtime_id: (row,) for row in self.model.rows()
+        }
+        self._declined_merge_signatures.clear()
         self._restore_reconciliation_presentations()
         self._update_action_state()
+        if self._last_saved_at is None and self._status != "READY":
+            self._run_merge_review(show_dialogs=False)
+            if self.isVisible():
+                QTimer.singleShot(0, lambda: self._run_merge_review(show_dialogs=True))
+            else:
+                self._pending_initial_merge_dialogs = True
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self.model.dirty:

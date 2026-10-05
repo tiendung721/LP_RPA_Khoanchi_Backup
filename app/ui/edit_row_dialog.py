@@ -123,6 +123,7 @@ class EditRowDialog(AppDialog):
         self.setModal(True)
         self._editing = row is not None
         self._original_rule: Any = None
+        self._original_fee: Any = None
         self._original_vessel_voyage_raw: Any = None
         self._validator = validator
         self._allow_negative = bool(allow_negative)
@@ -360,6 +361,12 @@ class EditRowDialog(AppDialog):
 
     def _fee_changed(self, *_args: Any) -> None:
         current = self.fee_combo.currentData()
+        changed_fee = self._editing and current != self._original_fee
+        self._form.setRowVisible(self.rule_combo, not self._editing or changed_fee)
+        if changed_fee and current == "CB" and self.rule_combo.currentData() != "HD":
+            self._select_combo_data(self.rule_combo, "HD")
+        elif changed_fee and current != "CB" and self.rule_combo.currentData() == "HD":
+            self._select_combo_data(self.rule_combo, None)
         if (
             carrier_is_managed_by_daily_sync(current)
             and not carrier_is_managed_by_daily_sync(self._last_fee)
@@ -414,6 +421,7 @@ class EditRowDialog(AppDialog):
         self._select_combo_data(
             self.container_count_basis_combo, value.container_count_basis or "UNKNOWN"
         )
+        self._original_fee = value.fee
         self._select_combo_data(self.fee_combo, value.fee)
         self._original_rule = value.rule
         self._select_combo_data(self.rule_combo, value.rule)
@@ -485,7 +493,11 @@ class EditRowDialog(AppDialog):
             bl=normalize_bl(self.bl_edit.text()),
             sqt=sqt,
             fee=self.fee_combo.currentData(),
-            rule=self._original_rule if self._editing else self.rule_combo.currentData(),
+            rule=(
+                self._original_rule
+                if self._editing and self.fee_combo.currentData() == self._original_fee
+                else self.rule_combo.currentData()
+            ),
             amount=amount,
             invoice_no=normalize_optional_text(self.invoice_no_edit.text()),
             carrier=normalize_optional_text(self.carrier_edit.text()),

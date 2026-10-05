@@ -711,8 +711,42 @@ class ReviewTableModel(QAbstractTableModel):
     def update_row(self, position: int, row: Any) -> None:
         if not (0 <= position < len(self._rows)):
             raise IndexError("Dòng cần sửa không tồn tại.")
-        self._rows[position] = coerce_review_row(row)
+        updated = coerce_review_row(row)
+        # Một thao tác sửa không tạo dòng nguồn mới. Giữ ID để các hồ sơ đối
+        # soát và chỉ số dòng nguồn vẫn trỏ về đúng khoản chi khi lưu.
+        updated.runtime_id = self._rows[position].runtime_id
+        self._rows[position] = updated
         self._after_mutation()
+
+    def merge_rows(self, positions: Iterable[int], merged: Any) -> list[ReviewRow]:
+        """Thay nhiều dòng bằng một dòng tổng trong một lần phát tín hiệu Qt."""
+
+        targets = sorted(set(positions))
+        if len(targets) < 2 or targets[0] < 0 or targets[-1] >= len(self._rows):
+            raise IndexError("Nhóm dòng cần gộp không hợp lệ.")
+        result = coerce_review_row(merged)
+        result.runtime_id = self._rows[targets[0]].runtime_id
+        removed = [self._rows[index] for index in targets[1:]]
+        old_total = sum(
+            row.amount for row in (self._rows[index] for index in targets)
+            if type(row.amount) is int
+        )
+        if type(result.amount) is not int or result.amount != old_total:
+            raise ValueError("Số tiền dòng gộp không bằng tổng tiền các dòng nguồn.")
+        self.beginResetModel()
+        self._rows[targets[0]] = result
+        for index in reversed(targets[1:]):
+            del self._rows[index]
+            del self._validation[index]
+        for row in removed:
+            self._lookup_presentations.pop(row.runtime_id, None)
+            self._contextual_warnings.pop(row.runtime_id, None)
+        self._revalidate(emit_signal=False)
+        self.endResetModel()
+        self._set_dirty(True)
+        self.validationChanged.emit(self._stats)
+        self.rowsChanged.emit()
+        return removed
 
     def bulk_update_invoice_no(
         self,
