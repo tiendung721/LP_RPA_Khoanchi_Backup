@@ -53,6 +53,8 @@ Bước 1 hoặc chọn JSON thủ công.
   SQT từ nhiều sheet trong cùng một lượt chạy PAD. JSON ghi sheet cho từng SQT để
   cập nhật đúng trạng thái sau khi nhập. SQT trùng ở nhiều sheet không được chọn vì
   PAD tìm trên web chỉ bằng SQT. Dòng `Đã nhập` vẫn được phép chạy lại.
+  Màn hình chọn có bộ lọc sheet; danh sách chính hiển thị HĐ theo loại phí, và
+  phần chi tiết cho biết số tiền, HĐ, dòng BK của từng khoản phí nguồn.
 - Mọi lần ghi BK đều dùng backup, working copy, kiểm tra lại và thay file
   nguyên tử; tác vụ chạy nền để không khóa giao diện.
 - Dòng cước biển thiếu số cont có một hành động duy nhất **Đối soát số cont**.

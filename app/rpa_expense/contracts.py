@@ -13,6 +13,25 @@ RPA_EXPENSE_OPERATION = "NHAP_KHOAN_CHI_BK"
 RPA_STATUS_NOT_IMPORTED = "Chưa nhập"
 RPA_STATUS_IMPORTED = "Đã nhập"
 
+# Cột tổng hợp gửi PAD và các khoản phí nguồn tạo ra cột đó trong BK.
+RPA_FEE_GROUPS = (
+    ("cuoc_bo_dong_hang", "Cước MB", (("CBDH", "Cước bộ đóng hàng"),)),
+    ("nang_ha_dong_hang", "N.hạ MB", (("NV", "Nâng vỏ"), ("HH", "Hạ hàng"))),
+    ("cuoc_bien", "Cước biển", (("CB", "Cước biển"),)),
+    (
+        "nang_do_vs_lam_lenh",
+        "N.hạ/VS/D/O/Lệnh",
+        (("NH", "Nâng hàng"), ("HV", "Hạ vỏ"), ("VSDL", "VS/D/O"), ("LL", "Làm lệnh")),
+    ),
+    ("cuoc_bo_tra_hang", "Cước MN", (("VTN", "Cước VTN"),)),
+    (
+        "luu_cont_qua_tai",
+        "Lưu cont/Quá tải",
+        (("LC", "Lưu cont"), ("QT", "Quá tải")),
+    ),
+    ("sua_chua_cont", "Sửa chữa", (("SC", "Sửa chữa"),)),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RpaSheetCandidate:
@@ -60,6 +79,17 @@ class RpaExpenseAmounts:
 
 
 @dataclass(frozen=True, slots=True)
+class RpaFeeEntry:
+    category_key: str
+    fee_key: str
+    fee_label: str
+    source_row: int
+    amount: int | None
+    invoice_number: str = ""
+    has_invoice_column: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class RpaSqtItem:
     sqt: str
     source_rows: tuple[int, ...]
@@ -68,6 +98,7 @@ class RpaSqtItem:
     invoice_numbers: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
     sheet_name: str = ""
+    fee_entries: tuple[RpaFeeEntry, ...] = ()
 
     @property
     def row_count(self) -> int:

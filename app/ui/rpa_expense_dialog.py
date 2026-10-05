@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any, Callable, Iterable
 
@@ -11,13 +12,18 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QComboBox,
+    QDialog,
     QDialogButtonBox,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -25,9 +31,11 @@ from PySide6.QtWidgets import (
 )
 
 from app.rpa_expense.contracts import (
+    RPA_FEE_GROUPS,
     RPA_STATUS_IMPORTED,
     RPA_STATUS_NOT_IMPORTED,
 )
+from app.services.excel.resolvers import MonthSheetService
 
 from .app_dialog import AppDialog
 from .presentation import dialog_intro, fit_window_to_screen
@@ -36,6 +44,7 @@ from .presentation import dialog_intro, fit_window_to_screen
 STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
 LATEST_BK_ROLE = Qt.ItemDataRole.UserRole + 2
 LATEST_PAD_ROLE = Qt.ItemDataRole.UserRole + 3
+SOURCE_ROLE = Qt.ItemDataRole.UserRole + 4
 
 
 class _SortableTableWidgetItem(QTableWidgetItem):
@@ -59,6 +68,14 @@ def _money(value: Any) -> str:
 
 
 class RpaSqtSelectionDialog(AppDialog):
+    MULTI_COLUMNS = (
+        "Chọn",
+        "Số quyết toán",
+        "Sheet BK",
+        "HĐ theo loại phí",
+        "Trạng thái nhập",
+        "Tổng khoản chi",
+    )
     COLUMNS = (
         "Chọn",
         "Số quyết toán",
@@ -124,6 +141,16 @@ class RpaSqtSelectionDialog(AppDialog):
             "rows_asc": (5, Qt.SortOrder.AscendingOrder),
             "rows_desc": (5, Qt.SortOrder.DescendingOrder),
         }
+        if self._multiple_sheets:
+            self._sort_options = {
+                "status_asc": (4, Qt.SortOrder.AscendingOrder),
+                "status_desc": (4, Qt.SortOrder.DescendingOrder),
+                "sqt_asc": (1, Qt.SortOrder.AscendingOrder),
+                "sqt_desc": (1, Qt.SortOrder.DescendingOrder),
+                "sheet_asc": (2, Qt.SortOrder.AscendingOrder),
+                "sheet_desc": (2, Qt.SortOrder.DescendingOrder),
+                "total_desc": (5, Qt.SortOrder.DescendingOrder),
+            }
         self.setObjectName("rpaSqtSelectionDialog")
         self.setWindowTitle("Chọn số quyết toán để nhập")
         self.setStyleSheet(
@@ -152,9 +179,17 @@ class RpaSqtSelectionDialog(AppDialog):
             """
         )
         self._build_ui()
-        fit_window_to_screen(self, 1200, 650)
+        fit_window_to_screen(
+            self, 1360 if self._multiple_sheets else 1200,
+            760 if self._multiple_sheets else 650,
+        )
+        if self._multiple_sheets:
+            self._update_responsive_layout()
 
     def _build_ui(self) -> None:
+        if self._multiple_sheets:
+            self._build_multi_sheet_ui()
+            return
         layout = QVBoxLayout(self)
         intro, _ = dialog_intro(
             (
@@ -246,20 +281,44 @@ class RpaSqtSelectionDialog(AppDialog):
         self.sqt_search.textChanged.connect(self._apply_filter)
         table_tools.addWidget(self.sqt_search)
         table_tools.addStretch()
+        if self._multiple_sheets:
+            table_tools.addWidget(QLabel("Sheet BK:"))
+            self.sheet_filter = QComboBox()
+            self.sheet_filter.setObjectName("rpaSheetFilterCombo")
+            self.sheet_filter.setMinimumWidth(155)
+            counts: dict[str, int] = {}
+            for item in self.plan.items:
+                counts[item.sheet_name] = counts.get(item.sheet_name, 0) + 1
+            self.sheet_filter.addItem(f"Tất cả ({len(self.plan.items)})", None)
+            months = MonthSheetService()
+            for sheet_name in sorted(
+                counts,
+                key=lambda value: (
+                    (parsed[1], parsed[0])
+                    if (parsed := months.parse_target_sheet(value)) else (0, 0)
+                ),
+                reverse=True,
+            ):
+                self.sheet_filter.addItem(
+                    f"{sheet_name} ({counts[sheet_name]})", sheet_name
+                )
+            self.sheet_filter.currentIndexChanged.connect(self._apply_filter)
+            table_tools.addWidget(self.sheet_filter)
         table_tools.addWidget(QLabel("Sắp xếp:"))
         self.sort_combo = QComboBox()
         self.sort_combo.setObjectName("rpaSortCombo")
+        self.sort_combo.setMinimumWidth(210)
         self.sort_combo.addItem("Trạng thái: Chưa nhập trước", "status_asc")
         self.sort_combo.addItem("Trạng thái: Đã nhập trước", "status_desc")
         self.sort_combo.addItem("Số quyết toán tăng dần", "sqt_asc")
         self.sort_combo.addItem("Số quyết toán giảm dần", "sqt_desc")
-        self.sort_combo.addItem("Dòng BK tăng dần", "rows_asc")
-        self.sort_combo.addItem("Dòng BK giảm dần", "rows_desc")
         if self._multiple_sheets:
-            self._sort_options["sheet_asc"] = (
-                len(self.COLUMNS), Qt.SortOrder.AscendingOrder
-            )
             self.sort_combo.addItem("Sheet BK tăng dần", "sheet_asc")
+            self.sort_combo.addItem("Sheet BK giảm dần", "sheet_desc")
+            self.sort_combo.addItem("Tổng tiền giảm dần", "total_desc")
+        else:
+            self.sort_combo.addItem("Dòng BK tăng dần", "rows_asc")
+            self.sort_combo.addItem("Dòng BK giảm dần", "rows_desc")
         self.sort_combo.currentIndexChanged.connect(self._apply_sort)
         table_tools.addWidget(self.sort_combo)
 
@@ -324,7 +383,7 @@ class RpaSqtSelectionDialog(AppDialog):
         self.selection_summary.setWordWrap(True)
         layout.addWidget(self.selection_summary)
 
-        columns = self.COLUMNS + (("Sheet BK",) if self._multiple_sheets else ())
+        columns = self.MULTI_COLUMNS if self._multiple_sheets else self.COLUMNS
         self.table = QTableWidget(0, len(columns))
         self.table.setObjectName("rpaSqtTable")
         self.table.setHorizontalHeaderLabels(list(columns))
@@ -337,6 +396,10 @@ class RpaSqtSelectionDialog(AppDialog):
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
         )
+        if self._multiple_sheets:
+            self.table.horizontalHeader().setSectionResizeMode(
+                3, QHeaderView.ResizeMode.Stretch
+            )
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.setHorizontalScrollMode(
             QAbstractItemView.ScrollMode.ScrollPerPixel
@@ -344,7 +407,7 @@ class RpaSqtSelectionDialog(AppDialog):
         self.table.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOn
         )
-        self.table.setWordWrap(False)
+        self.table.setWordWrap(self._multiple_sheets)
         layout.addWidget(self.table, 1)
 
         for item in self.plan.items:
@@ -355,6 +418,8 @@ class RpaSqtSelectionDialog(AppDialog):
             lambda *_: QTimer.singleShot(0, self._apply_filter)
         )
         self.table.itemChanged.connect(self._on_item_changed)
+        if self._multiple_sheets:
+            self.table.currentCellChanged.connect(self._show_detail)
         self._apply_sort()
         self._update_selection_summary()
 
@@ -372,7 +437,413 @@ class RpaSqtSelectionDialog(AppDialog):
         layout.addWidget(buttons)
         self._update_selection_summary()
 
+    def _build_multi_sheet_ui(self) -> None:
+        """Danh sách SQT luôn chiếm phần lớn chiều cao cửa sổ."""
+        self.setStyleSheet(self.styleSheet() + """
+            QLabel#rpaCompactTitle { font-size: 18px; font-weight: 700; color: #12304E; }
+            QLabel#rpaCountBadge {
+                color: #1D4ED8; background: #E8F1FF; border-radius: 10px;
+                padding: 4px 9px; font-weight: 600;
+            }
+            QWidget#rpaDetailPanel { background: #F8FBFF; border: 1px solid #D6E2EF; }
+            QFrame#rpaFeeCard {
+                background: #FFFFFF; border: 1px solid #D8E4F2;
+                border-radius: 6px;
+            }
+            QLabel#rpaSelectionSummaryLabel {
+                background: #F1F6FC; border: 1px solid #D6E2EF;
+                padding: 7px 10px; border-radius: 6px;
+            }
+            QPushButton#rpaDetailToggle { color: #1D4ED8; }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 9, 12, 9)
+        layout.setSpacing(7)
+
+        heading = QHBoxLayout()
+        heading.setSpacing(9)
+        title = QLabel("Chọn số quyết toán")
+        title.setObjectName("rpaCompactTitle")
+        heading.addWidget(title)
+        count = QLabel(f"{len(self.plan.items)} SQT trong BK")
+        count.setObjectName("rpaCountBadge")
+        count.setToolTip(
+            f"Vừa ghi BK: {len(self._latest_bk_sqt)} SQT; "
+            f"lượt nhập gần nhất: {len(self._latest_pad_sqt)} SQT."
+        )
+        heading.addWidget(count)
+        help_button = QPushButton("i")
+        help_button.setObjectName("rpaSelectionHelpButton")
+        help_button.setFixedSize(23, 23)
+        help_button.setToolTip(
+            "Có thể chọn lại SQT đã nhập để chạy lại. Trạng thái Đã nhập "
+            "chỉ cập nhật khi phần mềm quyết toán xác nhận lưu thành công."
+        )
+        heading.addWidget(help_button)
+        heading.addStretch()
+        layout.addLayout(heading)
+
+        if self.restore_info.get("found") and not (
+            self._latest_bk_sqt or self._latest_pad_sqt
+        ):
+            restored = int(self.restore_info.get("restored_count", 0) or 0)
+            saved = int(self.restore_info.get("saved_count", 0) or 0)
+            restore_row = QHBoxLayout()
+            self.restore_label = QLabel(
+                f"Đã khôi phục {restored}/{saved} SQT từ lần chạy gần nhất."
+            )
+            self.restore_label.setToolTip(
+                "Các SQT không còn hợp lệ hoặc đã thay đổi sẽ được bỏ qua."
+            )
+            restore_row.addWidget(self.restore_label, 1)
+            if self._clear_saved_callback is not None:
+                clear_saved = QPushButton("Xóa lựa chọn đã nhớ")
+                clear_saved.setObjectName("clearRememberedRpaSelectionButton")
+                clear_saved.clicked.connect(self._clear_remembered)
+                restore_row.addWidget(clear_saved)
+            layout.addLayout(restore_row)
+
+        self.sqt_search = QLineEdit()
+        self.sqt_search.setObjectName("rpaSqtSearchInput")
+        self.sqt_search.setPlaceholderText("Nhập SQT hoặc số hóa đơn...")
+        self.sqt_search.setClearButtonEnabled(True)
+        self.sqt_search.textChanged.connect(self._apply_filter)
+
+        self.group_filter = QComboBox()
+        self.group_filter.setObjectName("rpaGroupFilterCombo")
+        self.group_filter.addItem(f"Tất cả ({len(self.plan.items)})", "all")
+        self.group_filter.addItem(f"Vừa ghi BK ({len(self._latest_bk_sqt)})", "bk")
+        self.group_filter.addItem(
+            f"Lượt nhập gần nhất ({len(self._latest_pad_sqt)})", "latest"
+        )
+        self.group_filter.setCurrentIndex(
+            self.group_filter.findData(self._active_group_filter)
+        )
+        self.group_filter.currentIndexChanged.connect(
+            lambda *_: self._set_group_filter(str(self.group_filter.currentData()))
+        )
+
+        self.status_filter = QComboBox()
+        self.status_filter.setObjectName("rpaStatusFilterCombo")
+        imported_count = sum(
+            item.status == RPA_STATUS_IMPORTED for item in self.plan.items
+        )
+        self.status_filter.addItem(f"Tất cả ({len(self.plan.items)})", None)
+        self.status_filter.addItem(
+            f"Chưa nhập ({len(self.plan.items) - imported_count})",
+            RPA_STATUS_NOT_IMPORTED,
+        )
+        self.status_filter.addItem(
+            f"Đã nhập ({imported_count})", RPA_STATUS_IMPORTED
+        )
+        self.status_filter.currentIndexChanged.connect(
+            lambda *_: self._set_status_filter(self.status_filter.currentData())
+        )
+
+        self.sheet_filter = QComboBox()
+        self.sheet_filter.setObjectName("rpaSheetFilterCombo")
+        counts: dict[str, int] = {}
+        for item in self.plan.items:
+            counts[item.sheet_name] = counts.get(item.sheet_name, 0) + 1
+        self.sheet_filter.addItem(f"Tất cả ({len(self.plan.items)})", None)
+        months = MonthSheetService()
+        for sheet_name in sorted(
+            counts,
+            key=lambda value: (
+                (parsed[1], parsed[0])
+                if (parsed := months.parse_target_sheet(value)) else (0, 0)
+            ),
+            reverse=True,
+        ):
+            self.sheet_filter.addItem(
+                f"{sheet_name} ({counts[sheet_name]})", sheet_name
+            )
+        self.sheet_filter.currentIndexChanged.connect(self._apply_filter)
+
+        self.sort_combo = QComboBox()
+        self.sort_combo.setObjectName("rpaSortCombo")
+        for label, key in (
+            ("Trạng thái: Chưa nhập trước", "status_asc"),
+            ("Trạng thái: Đã nhập trước", "status_desc"),
+            ("Số quyết toán tăng dần", "sqt_asc"),
+            ("Số quyết toán giảm dần", "sqt_desc"),
+            ("Sheet BK tăng dần", "sheet_asc"),
+            ("Sheet BK giảm dần", "sheet_desc"),
+            ("Tổng tiền giảm dần", "total_desc"),
+        ):
+            self.sort_combo.addItem(label, key)
+        self.sort_combo.currentIndexChanged.connect(self._apply_sort)
+
+        def field(label: str, control: QWidget) -> QWidget:
+            wrapper = QWidget()
+            wrapper_layout = QVBoxLayout(wrapper)
+            wrapper_layout.setContentsMargins(0, 0, 0, 0)
+            wrapper_layout.setSpacing(3)
+            caption = QLabel(label)
+            caption.setStyleSheet("color: #59708C; font-size: 11px; font-weight: 600;")
+            wrapper_layout.addWidget(caption)
+            wrapper_layout.addWidget(control)
+            control.setMinimumHeight(32)
+            return wrapper
+
+        self._toolbar_fields = (
+            field("Tìm SQT hoặc số HĐ", self.sqt_search),
+            field("Nhóm hiển thị", self.group_filter),
+            field("Trạng thái nhập", self.status_filter),
+            field("Sheet BK", self.sheet_filter),
+            field("Sắp xếp", self.sort_combo),
+        )
+        bulk = QWidget()
+        bulk_layout = QHBoxLayout(bulk)
+        bulk_layout.setContentsMargins(0, 0, 0, 0)
+        bulk_layout.setSpacing(5)
+        select_all = QPushButton("Chọn hiển thị")
+        clear_all = QPushButton("Bỏ chọn")
+        select_all.setObjectName("selectAllRpaSqtButton")
+        clear_all.setObjectName("clearAllRpaSqtButton")
+        select_all.setToolTip("Chỉ chọn SQT hợp lệ đang hiển thị")
+        clear_all.setToolTip("Chỉ bỏ chọn SQT đang hiển thị")
+        select_all.clicked.connect(lambda: self._set_all(Qt.CheckState.Checked))
+        clear_all.clicked.connect(lambda: self._set_all(Qt.CheckState.Unchecked))
+        bulk_layout.addWidget(select_all)
+        bulk_layout.addWidget(clear_all)
+        self._toolbar_bulk = bulk
+        self._toolbar_grid = QGridLayout()
+        self._toolbar_grid.setContentsMargins(0, 0, 0, 0)
+        self._toolbar_grid.setHorizontalSpacing(8)
+        self._toolbar_grid.setVerticalSpacing(6)
+        layout.addLayout(self._toolbar_grid)
+
+        selection_row = QHBoxLayout()
+        self.selection_summary = QLabel()
+        self.selection_summary.setObjectName("rpaSelectionSummaryLabel")
+        selection_row.addWidget(self.selection_summary, 1)
+        self.detail_toggle = QPushButton("Ẩn chi tiết số HĐ")
+        self.detail_toggle.setObjectName("rpaDetailToggle")
+        self.detail_toggle.clicked.connect(self._toggle_detail)
+        selection_row.addWidget(self.detail_toggle)
+        layout.addLayout(selection_row)
+
+        self.table = QTableWidget(0, len(self.MULTI_COLUMNS))
+        self.table.setObjectName("rpaSqtTable")
+        self.table.setHorizontalHeaderLabels(list(self.MULTI_COLUMNS))
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        for column, width in enumerate((50, 106, 92, 0, 132, 136)):
+            if column == 3:
+                header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+            else:
+                header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+                header.resizeSection(column, width)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.table.setWordWrap(True)
+
+        self.detail_panel = QWidget()
+        self.detail_panel.setObjectName("rpaDetailPanel")
+        self.detail_panel.setMinimumWidth(340)
+        detail_layout = QVBoxLayout(self.detail_panel)
+        detail_layout.setContentsMargins(10, 10, 10, 10)
+        detail_layout.setSpacing(8)
+        self.detail_title = QLabel("Chọn một dòng SQT để xem phí và HĐ.")
+        self.detail_title.setObjectName("rpaFeeDetailTitle")
+        self.detail_title.setWordWrap(True)
+        detail_layout.addWidget(self.detail_title)
+        caption = QLabel("SỐ HĐ ĐI CÙNG TỪNG LOẠI PHÍ")
+        caption.setStyleSheet("color: #66809D; font-size: 11px; font-weight: 700;")
+        detail_layout.addWidget(caption)
+        self.detail_table = QTableWidget(0, 4, self.detail_panel)
+        self.detail_table.setObjectName("rpaFeeDetailTable")
+        self.detail_table.setHorizontalHeaderLabels(
+            ["Loại phí", "Số tiền", "Số HĐ", "Dòng BK"]
+        )
+        self.detail_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.detail_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self.detail_table.verticalHeader().setVisible(False)
+        self.detail_table.setWordWrap(True)
+        detail_header = self.detail_table.horizontalHeader()
+        detail_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for column, width in enumerate((120, 95, 95, 62)):
+            detail_header.resizeSection(column, width)
+        self.detail_table.hide()
+        self.detail_cards = QScrollArea()
+        self.detail_cards.setWidgetResizable(True)
+        self.detail_cards.setFrameShape(QFrame.Shape.NoFrame)
+        cards_container = QWidget()
+        self.detail_cards_layout = QVBoxLayout(cards_container)
+        self.detail_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.detail_cards_layout.setSpacing(7)
+        self.detail_cards_layout.addStretch()
+        self.detail_cards.setWidget(cards_container)
+        detail_layout.addWidget(self.detail_cards, 1)
+
+        self.body_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.body_splitter.setChildrenCollapsible(False)
+        self.body_splitter.addWidget(self.table)
+        self.body_splitter.addWidget(self.detail_panel)
+        self.body_splitter.setSizes([930, 390])
+        layout.addWidget(self.body_splitter, 1)
+
+        for item in self.plan.items:
+            self._add_item(item)
+        self.table.setSortingEnabled(True)
+        self.table.horizontalHeader().sortIndicatorChanged.connect(
+            lambda *_: QTimer.singleShot(0, self._apply_filter)
+        )
+        self.table.itemChanged.connect(self._on_item_changed)
+        self.table.currentCellChanged.connect(self._show_detail)
+
+        footer = QHBoxLayout()
+        self.footer_summary = QLabel()
+        self.footer_summary.setStyleSheet("color: #315779; font-weight: 600;")
+        footer.addWidget(self.footer_summary, 1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.setObjectName("rpaSqtDialogButtons")
+        self.run_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.run_button.setText("Bắt đầu nhập các số đã chọn")
+        self.run_button.setProperty("primary", True)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Hủy")
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        footer.addWidget(buttons)
+        layout.addLayout(footer)
+
+        self._detail_user_hidden = False
+        self._toolbar_mode = ""
+        self._detail_popup: QDialog | None = None
+        self._arrange_multi_toolbar("compact")
+        self._apply_sort()
+        self._update_selection_summary()
+
+    def _arrange_multi_toolbar(self, mode: str) -> None:
+        if self._toolbar_mode == mode:
+            return
+        self._toolbar_mode = mode
+        for widget in (*self._toolbar_fields, self._toolbar_bulk):
+            self._toolbar_grid.removeWidget(widget)
+        positions = (
+            [(0, column) for column in range(6)]
+            if mode == "wide" else
+            [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
+        )
+        for widget, (row, column) in zip(
+            (*self._toolbar_fields, self._toolbar_bulk), positions
+        ):
+            self._toolbar_grid.addWidget(widget, row, column)
+        for column in range(6):
+            self._toolbar_grid.setColumnStretch(
+                column, (2 if column == 0 else 1)
+                if mode == "wide" or column < 3 else 0
+            )
+
+    def _update_responsive_layout(self) -> None:
+        if not self._multiple_sheets or not hasattr(self, "detail_panel"):
+            return
+        narrow = self.width() < 1180
+        self._arrange_multi_toolbar("compact" if self.width() < 1390 else "wide")
+        show_panel = not narrow and not self._detail_user_hidden
+        self.detail_panel.setVisible(show_panel)
+        self.detail_toggle.setText(
+            "Ẩn chi tiết số HĐ" if show_panel else "Xem chi tiết số HĐ"
+        )
+        if not narrow and self._detail_popup is not None:
+            self._detail_popup.hide()
+
+    def _refresh_detail_cards(
+        self, detail_rows: list[tuple[str, str, str, str]]
+    ) -> None:
+        while self.detail_cards_layout.count():
+            child = self.detail_cards_layout.takeAt(0)
+            if child.widget() is not None:
+                child.widget().deleteLater()
+        for fee, amount, invoice, source_row in detail_rows:
+            card = QFrame()
+            card.setObjectName("rpaFeeCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 8, 10, 8)
+            card_layout.setSpacing(5)
+            top = QHBoxLayout()
+            fee_label = QLabel(fee)
+            fee_label.setWordWrap(True)
+            fee_label.setStyleSheet("font-weight: 700; color: #15304E;")
+            top.addWidget(fee_label, 1)
+            amount_label = QLabel(f"{amount} đ" if amount != "—" else "—")
+            amount_label.setStyleSheet("font-weight: 700; color: #154999;")
+            top.addWidget(amount_label)
+            card_layout.addLayout(top)
+            invoice_label = QLabel(f"Số HĐ: {invoice}  ·  Dòng BK: {source_row}")
+            invoice_label.setWordWrap(True)
+            invoice_label.setStyleSheet("color: #5B6F86;")
+            card_layout.addWidget(invoice_label)
+            self.detail_cards_layout.addWidget(card)
+        self.detail_cards_layout.addStretch()
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self._update_responsive_layout()
+
+    def _toggle_detail(self) -> None:
+        if self.width() >= 1180:
+            self._detail_user_hidden = not self._detail_user_hidden
+            self._update_responsive_layout()
+            return
+        if self._detail_popup is None:
+            popup = QDialog(self)
+            popup.setWindowTitle("Chi tiết phí và số HĐ")
+            popup.setMinimumSize(470, 390)
+            popup_layout = QVBoxLayout(popup)
+            self._popup_title = QLabel()
+            self._popup_title.setWordWrap(True)
+            popup_layout.addWidget(self._popup_title)
+            self._popup_table = QTableWidget(0, 4)
+            self._popup_table.setHorizontalHeaderLabels(
+                ["Loại phí", "Số tiền", "Số HĐ", "Dòng BK"]
+            )
+            self._popup_table.setEditTriggers(
+                QAbstractItemView.EditTrigger.NoEditTriggers
+            )
+            self._popup_table.setSelectionMode(
+                QAbstractItemView.SelectionMode.NoSelection
+            )
+            self._popup_table.verticalHeader().setVisible(False)
+            self._popup_table.horizontalHeader().setSectionResizeMode(
+                QHeaderView.ResizeMode.Stretch
+            )
+            popup_layout.addWidget(self._popup_table, 1)
+            close_button = QPushButton("Đóng")
+            close_button.clicked.connect(popup.close)
+            popup_layout.addWidget(close_button, 0, Qt.AlignmentFlag.AlignRight)
+            self._detail_popup = popup
+        self._sync_detail_popup()
+        self._detail_popup.show()
+        self._detail_popup.raise_()
+        self._detail_popup.activateWindow()
+
+    def _sync_detail_popup(self) -> None:
+        if self._detail_popup is None:
+            return
+        self._popup_title.setText(self.detail_title.text())
+        self._popup_table.setRowCount(self.detail_table.rowCount())
+        for row in range(self.detail_table.rowCount()):
+            for column in range(self.detail_table.columnCount()):
+                original = self.detail_table.item(row, column)
+                if original is not None:
+                    self._popup_table.setItem(row, column, original.clone())
+
     def _add_item(self, source: Any) -> None:
+        if self._multiple_sheets:
+            self._add_compact_item(source)
+            return
         row = self.table.rowCount()
         self.table.insertRow(row)
         check = QTableWidgetItem()
@@ -507,6 +978,89 @@ class RpaSqtSelectionDialog(AppDialog):
                 cell.setBackground(QColor("#FFF4CC"))
             self.table.setItem(row, column, cell)
 
+    @staticmethod
+    def _invoice_tokens(source: Any) -> list[str]:
+        grouped: OrderedDict[str, list[str]] = OrderedDict()
+        for entry in getattr(source, "fee_entries", ()):
+            invoice = str(entry.invoice_number or "").strip()
+            if not invoice:
+                continue
+            label = str(entry.fee_label)
+            values = grouped.setdefault(label, [])
+            if invoice.casefold() not in {value.casefold() for value in values}:
+                values.append(invoice)
+        if not grouped:
+            invoices = tuple(getattr(source, "invoice_numbers", ()) or ())
+            if invoices:
+                grouped["HĐ chưa gắn phí"] = list(invoices)
+        return [f"{label}: {', '.join(values)}" for label, values in grouped.items()]
+
+    @classmethod
+    def _invoice_summary(cls, source: Any, search_text: str = "") -> str:
+        tokens = cls._invoice_tokens(source)
+        if search_text:
+            tokens.sort(key=lambda value: search_text not in value.casefold())
+        if not tokens:
+            return "Chưa có số HĐ trong BK"
+        return "\n".join(
+            "  ·  ".join(tokens[index:index + 3])
+            for index in range(0, len(tokens), 3)
+        )
+
+    def _add_compact_item(self, source: Any) -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setRowHeight(row, 54)
+        check = QTableWidgetItem()
+        flags = Qt.ItemFlag.ItemIsSelectable
+        if source.can_run:
+            flags |= Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+            check.setCheckState(
+                Qt.CheckState.Checked
+                if str(source.sqt) in self._initial_selected_sqt
+                else Qt.CheckState.Unchecked
+            )
+        check.setFlags(flags)
+        check.setData(Qt.ItemDataRole.UserRole, source.sqt)
+        check.setData(SOURCE_ROLE, source)
+        check.setData(STATUS_ROLE, source.status)
+        check.setData(LATEST_BK_ROLE, str(source.sqt) in self._latest_bk_sqt)
+        check.setData(LATEST_PAD_ROLE, str(source.sqt) in self._latest_pad_sqt)
+        check.setToolTip(source.validation_message or "Chọn để gửi SQT sang PAD.")
+        if str(source.sqt) in self._skipped_sqt:
+            check.setBackground(QColor("#FFF4CC"))
+        self._checks.append(check)
+        self.table.setItem(row, 0, check)
+
+        sqt_sort = self._sqt_sort_key(source.sqt)
+        status_sort = (1 if source.status == RPA_STATUS_IMPORTED else 0, sqt_sort)
+        values = (
+            (str(source.sqt), sqt_sort),
+            (source.sheet_name, source.sheet_name.casefold()),
+            (self._invoice_summary(source), str(source.sqt)),
+            (
+                "✓ Đã nhập" if source.status == RPA_STATUS_IMPORTED else "● Chưa nhập",
+                status_sort,
+            ),
+            (f"{_money(source.amounts.total)} đ", source.amounts.total),
+        )
+        for column, (value, sort_value) in enumerate(values, 1):
+            cell = _SortableTableWidgetItem(value, sort_value)
+            cell.setToolTip(
+                value if column != 3 else self._invoice_summary(source)
+            )
+            if column == 3:
+                cell.setForeground(QColor("#174A75"))
+            elif column == 4:
+                cell.setForeground(
+                    QColor("#15803D") if source.status == RPA_STATUS_IMPORTED
+                    else QColor("#1D4ED8")
+                )
+                cell.setData(STATUS_ROLE, source.status)
+            if not source.can_run:
+                cell.setForeground(QColor("#8A3B32"))
+            self.table.setItem(row, column, cell)
+
     def _clear_remembered(self) -> None:
         if self._clear_saved_callback is None:
             return
@@ -545,6 +1099,9 @@ class RpaSqtSelectionDialog(AppDialog):
 
     def _apply_filter(self) -> None:
         if not hasattr(self, "table"):
+            return
+        if self._multiple_sheets:
+            self._apply_compact_filter()
             return
         search_text = (
             self.sqt_search.text().strip().casefold()
@@ -594,6 +1151,142 @@ class RpaSqtSelectionDialog(AppDialog):
             )
         self._update_selection_summary()
 
+    def _apply_compact_filter(self) -> None:
+        search_text = self.sqt_search.text().strip().casefold()
+        selected_sheet = self.sheet_filter.currentData()
+        visible_rows: list[int] = []
+        invoice_match_rows: list[int] = []
+        for row in range(self.table.rowCount()):
+            check = self.table.item(row, 0)
+            source = check.data(SOURCE_ROLE) if check is not None else None
+            if source is None:
+                continue
+            latest_bk = bool(check.data(LATEST_BK_ROLE))
+            latest_pad = bool(check.data(LATEST_PAD_ROLE))
+            group_matches = (
+                self._active_group_filter == "all"
+                or (self._active_group_filter == "bk" and latest_bk)
+                or (self._active_group_filter == "latest" and latest_pad)
+            )
+            invoice_matches = bool(search_text) and any(
+                search_text in str(value).casefold()
+                for value in source.invoice_numbers
+            )
+            search_matches = (
+                not search_text
+                or search_text in str(source.sqt).casefold()
+                or search_text in str(source.sheet_name).casefold()
+                or invoice_matches
+            )
+            visible = (
+                group_matches
+                and (self._active_status_filter is None
+                     or source.status == self._active_status_filter)
+                and (selected_sheet is None or source.sheet_name == selected_sheet)
+                and search_matches
+            )
+            self.table.setRowHidden(row, not visible)
+            if visible:
+                visible_rows.append(row)
+                if invoice_matches:
+                    invoice_match_rows.append(row)
+            invoice_cell = self.table.item(row, 3)
+            if invoice_cell is not None:
+                invoice_cell.setText(self._invoice_summary(source, search_text))
+                invoice_cell.setBackground(
+                    QColor("#FFF4CC") if invoice_matches
+                    else QColor("#FFFFFF")
+                )
+        if visible_rows:
+            current = self.table.currentRow()
+            preferred = (
+                invoice_match_rows[0] if invoice_match_rows and search_text
+                else current if current in visible_rows else visible_rows[0]
+            )
+            if current != preferred:
+                self.table.setCurrentCell(preferred, 1)
+            else:
+                self._show_detail()
+        else:
+            self.table.clearSelection()
+            self._show_detail()
+        self._update_selection_summary()
+
+    def _show_detail(self, *_args: Any) -> None:
+        if not self._multiple_sheets or not hasattr(self, "detail_table"):
+            return
+        row = self.table.currentRow()
+        check = self.table.item(row, 0) if row >= 0 else None
+        source = check.data(SOURCE_ROLE) if check is not None else None
+        if source is None or self.table.isRowHidden(row):
+            self.detail_title.setText("Chọn một dòng SQT để xem phí và HĐ theo dòng BK.")
+            self.detail_table.setRowCount(0)
+            self._refresh_detail_cards([])
+            if hasattr(self, "_detail_popup"):
+                self._sync_detail_popup()
+            return
+        self.detail_title.setText(
+            f"SQT {source.sqt} · {source.sheet_name} · "
+            f"Tổng khoản chi {_money(source.amounts.total)} đ"
+            + (f" · {source.validation_message}" if source.errors else "")
+        )
+        category_labels = {
+            key: label for key, label, _fees in RPA_FEE_GROUPS
+        }
+        fee_order = {
+            fee_key: (group_index, fee_index)
+            for group_index, (_key, _label, fees) in enumerate(RPA_FEE_GROUPS)
+            for fee_index, (fee_key, _fee_label) in enumerate(fees)
+        }
+        entries = sorted(
+            getattr(source, "fee_entries", ()),
+            key=lambda entry: (
+                *fee_order.get(entry.fee_key, (99, 99)), entry.source_row
+            ),
+        )
+        detail_rows: list[tuple[str, str, str, str]] = []
+        for entry in entries:
+            category = category_labels.get(entry.category_key, "")
+            label = (
+                entry.fee_label if not category or category == entry.fee_label
+                else f"{category} / {entry.fee_label}"
+            )
+            invoice = entry.invoice_number or (
+                "Chưa có HĐ" if entry.has_invoice_column else "Không có cột HĐ"
+            )
+            detail_rows.append((
+                label,
+                _money(entry.amount) if entry.amount is not None else "—",
+                invoice,
+                str(entry.source_row),
+            ))
+        covered_categories = {entry.category_key for entry in entries}
+        for key, label, _fees in RPA_FEE_GROUPS:
+            amount = source.amounts.to_dict().get(key, 0)
+            if amount and key not in covered_categories:
+                detail_rows.append((
+                    label, _money(amount), "HĐ chưa xác định",
+                    ", ".join(str(value) for value in source.source_rows),
+                ))
+        if not detail_rows:
+            detail_rows.append(("Chưa có phí", "0", "Chưa có HĐ", "—"))
+        self._refresh_detail_cards(detail_rows)
+        self.detail_table.setRowCount(len(detail_rows))
+        search_text = self.sqt_search.text().strip().casefold()
+        first_match: QTableWidgetItem | None = None
+        for detail_row, values in enumerate(detail_rows):
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                cell.setToolTip(value)
+                if column == 2 and search_text and search_text in value.casefold():
+                    cell.setBackground(QColor("#FFF4CC"))
+                    first_match = first_match or cell
+                self.detail_table.setItem(detail_row, column, cell)
+        if first_match is not None:
+            self.detail_table.scrollToItem(first_match)
+        if hasattr(self, "_detail_popup"):
+            self._sync_detail_popup()
+
     def _apply_sort(self, _index: int | None = None) -> None:
         if not hasattr(self, "table"):
             return
@@ -631,16 +1324,28 @@ class RpaSqtSelectionDialog(AppDialog):
                 for item in self.plan.items
                 if str(item.sqt) in selected_sqt
             )
-            self.selection_summary.setText(
-                f"Đã chọn: {len(selected)} số quyết toán — "
-                f"đang hiển thị {visible_selected}; "
-                f"{not_imported} chưa nhập, {imported} nhập lại · "
-                f"Tổng các khoản chi: {_money(total_amount)} đ"
-            )
+            if self._multiple_sheets:
+                self.selection_summary.setText(
+                    f"Đã chọn {len(selected)} SQT · "
+                    f"đang hiển thị {visible_selected} · "
+                    f"{not_imported} chưa nhập, {imported} nhập lại"
+                )
+                self.footer_summary.setText(
+                    f"{len(selected)} SQT đã chọn · {_money(total_amount)} đ"
+                )
+            else:
+                self.selection_summary.setText(
+                    f"Đã chọn: {len(selected)} số quyết toán — "
+                    f"đang hiển thị {visible_selected}; "
+                    f"{not_imported} chưa nhập, {imported} nhập lại · "
+                    f"Tổng các khoản chi: {_money(total_amount)} đ"
+                )
             if hasattr(self, "run_button"):
                 self.run_button.setText(f"Bắt đầu nhập {len(selected)} số đã chọn")
         else:
             self.selection_summary.setText("Chưa chọn số quyết toán nào")
+            if self._multiple_sheets:
+                self.footer_summary.setText("Chưa chọn SQT nào")
             if hasattr(self, "run_button"):
                 self.run_button.setText("Bắt đầu nhập các số đã chọn")
 

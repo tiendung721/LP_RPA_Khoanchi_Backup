@@ -131,8 +131,9 @@ def test_one_pad_selection_updates_sqt_in_two_bk_sheets(
     }
     dialog = RpaSqtSelectionDialog(plan)
     qtbot.addWidget(dialog)
-    assert dialog.table.columnCount() == len(dialog.COLUMNS) + 1
-    assert dialog.table.horizontalHeaderItem(len(dialog.COLUMNS)).text() == "Sheet BK"
+    assert dialog.table.columnCount() == len(dialog.MULTI_COLUMNS)
+    assert dialog.table.horizontalHeaderItem(2).text() == "Sheet BK"
+    assert dialog.table.horizontalHeaderItem(3).text() == "HĐ theo loại phí"
 
     prepared = service.prepare_selection(plan, ["101", "901"])
     payload = json.loads(prepared.selection_path.read_text(encoding="utf-8"))
@@ -205,6 +206,171 @@ def test_analyze_collects_distinct_invoices_from_multiple_bk_columns(
 
     plan = RpaExpenseService(_settings(tmp_path, bk)).analyze_sheet("T07 26")
     assert plan.items[0].invoice_numbers == ("HD-01", "SEA-02", "SEA-03")
+
+
+def test_fee_invoices_keep_their_fee_and_source_row_without_changing_pad_json(
+    qtbot, tmp_path: Path
+) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "T08 26"
+    headers = (
+        "SQT", "Cước bộ đóng hàng", "Số HĐ", "Nâng vỏ", "Hóa đơn",
+        "Hạ Hàng", "Hóa đơn", "Cước biển", "Hóa đơn cước biển",
+        "Lưu cont", "HD", "Quá tải", "HD", "GHI CHÚ",
+        "SỬA CHỮA", "HD",
+    )
+    for column, header in enumerate((*headers, *SUMMARY_HEADERS), 1):
+        sheet.cell(1, column).value = header
+    sheet.cell(2, 1).value = 900
+    for column, value in {
+        2: 100, 3: "MB-1", 4: 50, 5: "NV-1", 6: 20, 7: "HH-1",
+        8: 70, 9: "SEA-1", 10: 10, 11: "LC-1", 12: 5, 13: "QT-1",
+        15: 8, 16: "SC-1",
+    }.items():
+        sheet.cell(2, column).value = value
+    summary_start = len(headers) + 1
+    for offset, value in enumerate(("=A2", 100, 70, 70, 0, 0, 10, 8, 5, 15)):
+        sheet.cell(2, summary_start + offset).value = value
+    bk.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(bk)
+    workbook.close()
+
+    service = RpaExpenseService(_settings(tmp_path, bk))
+    plan = service.analyze_all_sheets()
+    item = plan.items[0]
+    assert {(entry.fee_label, entry.invoice_number, entry.source_row)
+            for entry in item.fee_entries} == {
+        ("Cước bộ đóng hàng", "MB-1", 2),
+        ("Nâng vỏ", "NV-1", 2),
+        ("Hạ hàng", "HH-1", 2),
+        ("Cước biển", "SEA-1", 2),
+        ("Lưu cont", "LC-1", 2),
+        ("Quá tải", "QT-1", 2),
+        ("Sửa chữa", "SC-1", 2),
+    }
+    dialog = RpaSqtSelectionDialog(plan)
+    qtbot.addWidget(dialog)
+    assert "Nâng vỏ: NV-1" in dialog.table.item(0, 3).text()
+    assert "Hạ hàng: HH-1" in dialog.table.item(0, 3).text()
+    assert any(
+        dialog.detail_table.item(row, 2).text() == "HH-1"
+        and dialog.detail_table.item(row, 3).text() == "2"
+        for row in range(dialog.detail_table.rowCount())
+    )
+    dialog.sqt_search.setText("QT-1")
+    assert dialog.table.item(0, 3).text().startswith("Quá tải: QT-1")
+    assert any(
+        dialog.detail_table.item(row, 2).text() == "QT-1"
+        and dialog.detail_table.item(row, 2).background().color().name()
+        == "#fff4cc"
+        for row in range(dialog.detail_table.rowCount())
+    )
+    payload_item = service.prepare_selection(plan, ["900"]).payload["items"][0]
+    assert "fee_entries" not in payload_item
+    assert "invoice_numbers" not in payload_item
+
+
+def test_sheet_dropdown_keeps_cross_month_checks_and_invoice_search(
+    qtbot, tmp_path: Path
+) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    _add_second_sheet(bk)
+    dialog = RpaSqtSelectionDialog(
+        RpaExpenseService(_settings(tmp_path, bk)).analyze_all_sheets()
+    )
+    qtbot.addWidget(dialog)
+    assert dialog.sheet_filter.itemText(0) == "Tất cả (4)"
+    assert dialog.sheet_filter.itemData(1) == "T08 26"
+
+    dialog.sheet_filter.setCurrentIndex(dialog.sheet_filter.findData("T07 26"))
+    visible = [
+        row for row in range(dialog.table.rowCount())
+        if not dialog.table.isRowHidden(row)
+    ]
+    assert {dialog.table.item(row, 1).text() for row in visible} == {"101", "102"}
+    first = next(row for row in visible if dialog.table.item(row, 1).text() == "101")
+    dialog.table.item(first, 0).setCheckState(Qt.CheckState.Checked)
+
+    dialog.sheet_filter.setCurrentIndex(dialog.sheet_filter.findData("T08 26"))
+    visible = [
+        row for row in range(dialog.table.rowCount())
+        if not dialog.table.isRowHidden(row)
+    ]
+    assert {dialog.table.item(row, 1).text() for row in visible} == {"901", "902"}
+    second = next(row for row in visible if dialog.table.item(row, 1).text() == "901")
+    dialog.table.item(second, 0).setCheckState(Qt.CheckState.Checked)
+    assert set(dialog.selected_sqt) == {"101", "901"}
+
+    dialog.sqt_search.setText("HD-901-2")
+    assert [
+        dialog.table.item(row, 1).text()
+        for row in range(dialog.table.rowCount())
+        if not dialog.table.isRowHidden(row)
+    ] == ["901"]
+    assert "SQT 901" in dialog.detail_title.text()
+    assert any(
+        dialog.detail_table.item(row, 2).text() == "HD-901-2"
+        for row in range(dialog.detail_table.rowCount())
+    )
+    dialog.sqt_search.clear()
+    assert set(dialog.selected_sqt) == {"101", "901"}
+
+
+def test_multi_sheet_dialog_keeps_sqt_list_visible_when_resized(
+    qtbot, tmp_path: Path
+) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    _add_second_sheet(bk)
+    dialog = RpaSqtSelectionDialog(
+        RpaExpenseService(_settings(tmp_path, bk)).analyze_all_sheets()
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.resize(1100, 750)
+    qtbot.wait(20)
+
+    assert not dialog.detail_panel.isVisible()
+    assert dialog.table.height() >= 300
+    assert dialog.table.rowCount() == 4
+    dialog.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    checked_before = set(dialog.selected_sqt)
+
+    dialog.findChild(QPushButton, "rpaDetailToggle").click()
+    assert dialog._detail_popup is not None
+    assert dialog._detail_popup.isVisible()
+    assert dialog._popup_table.rowCount() == dialog.detail_table.rowCount()
+
+    dialog.resize(1400, 760)
+    qtbot.wait(20)
+    assert dialog.detail_panel.isVisible()
+    assert not dialog._detail_popup.isVisible()
+    assert set(dialog.selected_sqt) == checked_before
+
+
+def test_seal_invoice_is_labeled_as_outside_pad(tmp_path: Path) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    workbook = load_workbook(bk)
+    try:
+        sheet = workbook["T07 26"]
+        sheet.insert_cols(3)
+        sheet.cell(1, 3).value = "Số HĐ Seal"
+        sheet.cell(2, 3).value = "SEAL-1"
+        workbook.save(bk)
+    finally:
+        workbook.close()
+    service = RpaExpenseService(_settings(tmp_path, bk))
+    item = service.analyze_sheet("T07 26").items[0]
+    assert any(
+        entry.invoice_number == "SEAL-1"
+        and entry.fee_label == "Phí Seal (không gửi PAD)"
+        for entry in item.fee_entries
+    )
+    assert "SEAL-1" not in str(item.to_payload())
 
 
 def test_prepare_json_and_mark_all_source_rows_after_success(

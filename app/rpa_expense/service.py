@@ -21,7 +21,11 @@ from app.services.excel.payment_sync import (
     PaymentSyncError,
     find_summary_start,
 )
-from app.services.excel.posting import INVOICE_NUMBER_HEADER_NAMES
+from app.services.excel.posting import (
+    FEE_HEADER_ALIASES,
+    FEE_INVOICE_HEADER_ALIASES,
+    INVOICE_NUMBER_HEADER_NAMES,
+)
 from app.services.excel.resolvers import MonthSheetService
 from app.services.excel.workbook import (
     ExcelLockService,
@@ -33,9 +37,11 @@ from .contracts import (
     RPA_EXPENSE_OPERATION,
     RPA_STATUS_IMPORTED,
     RPA_STATUS_NOT_IMPORTED,
+    RPA_FEE_GROUPS,
     PreparedRpaSelection,
     RpaExpenseAmounts,
     RpaExpensePlan,
+    RpaFeeEntry,
     RpaSheetCandidate,
     RpaSqtItem,
 )
@@ -269,6 +275,12 @@ class RpaExpenseService:
     def _extract_items(self, worksheet: Any) -> tuple[RpaSqtItem, ...]:
         columns = self._summary_columns(worksheet)
         invoice_columns = self._invoice_columns(worksheet)
+        fee_columns = self._fee_invoice_columns(worksheet)
+        paired_invoice_columns = {
+            invoice_column
+            for _fee_column, invoice_column in fee_columns.values()
+            if invoice_column is not None
+        }
         status_column = self._optional_status_column(worksheet)
         evaluator = ArithmeticFormulaEvaluator(worksheet)
         groups: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
@@ -288,6 +300,7 @@ class RpaExpenseService:
                     "rows": [],
                     "statuses": [],
                     "invoice_numbers": [],
+                    "fee_entries": [],
                     "amounts": {
                         key: 0
                         for key in SUMMARY_KEYS
@@ -297,6 +310,7 @@ class RpaExpenseService:
                 },
             )
             group["rows"].append(row_number)
+            invoice_values: dict[int, str] = {}
             for column in invoice_columns:
                 cell = worksheet.cell(row_number, column)
                 invoice_value = cell.value
@@ -306,11 +320,58 @@ class RpaExpenseService:
                     except PaymentSyncError:
                         continue
                 invoice = self._invoice_text(invoice_value)
+                invoice_values[column] = invoice
                 if invoice and not any(
                     value.casefold() == invoice.casefold()
                     for value in group["invoice_numbers"]
                 ):
                     group["invoice_numbers"].append(invoice)
+            for category_key, _category_label, fee_specs in RPA_FEE_GROUPS:
+                for fee_key, fee_label in fee_specs:
+                    pair = fee_columns.get(fee_key)
+                    if pair is None:
+                        continue
+                    fee_column, invoice_column = pair
+                    try:
+                        fee_amount = self._money_value(
+                            evaluator, worksheet.cell(row_number, fee_column)
+                        )
+                    except RpaExpenseError:
+                        fee_amount = None
+                    invoice = invoice_values.get(invoice_column, "")
+                    if fee_amount in (0, None) and not invoice:
+                        continue
+                    group["fee_entries"].append(
+                        RpaFeeEntry(
+                            category_key=category_key,
+                            fee_key=fee_key,
+                            fee_label=fee_label,
+                            source_row=row_number,
+                            amount=fee_amount,
+                            invoice_number=invoice,
+                            has_invoice_column=invoice_column is not None,
+                        )
+                    )
+            for invoice_column, invoice in invoice_values.items():
+                if invoice and invoice_column not in paired_invoice_columns:
+                    header = normalize_header(
+                        worksheet.cell(1, invoice_column).value
+                    )
+                    group["fee_entries"].append(
+                        RpaFeeEntry(
+                            category_key="other",
+                            fee_key="OTHER",
+                            fee_label=(
+                                "Phí Seal (không gửi PAD)"
+                                if header == normalize_header("Số HĐ Seal")
+                                else "HĐ chưa gắn phí"
+                            ),
+                            source_row=row_number,
+                            amount=None,
+                            invoice_number=invoice,
+                            has_invoice_column=True,
+                        )
+                    )
             status_value = (
                 worksheet.cell(row_number, status_column).value
                 if status_column is not None
@@ -531,6 +592,61 @@ class RpaExpenseService:
         )
 
     @staticmethod
+    def _fee_invoice_columns(
+        worksheet: Any,
+    ) -> dict[str, tuple[int, int | None]]:
+        summary_start = find_summary_start(worksheet)
+        if summary_start is None:
+            return {}
+        headers = {
+            column: normalize_header(worksheet.cell(1, column).value)
+            for column in range(1, summary_start)
+        }
+        notes_columns = [
+            column for column, value in headers.items()
+            if value == normalize_header("GHI CHÚ")
+        ]
+        notes_column = min(notes_columns) if notes_columns else None
+        result: dict[str, tuple[int, int | None]] = {}
+        for _category_key, _category_label, fee_specs in RPA_FEE_GROUPS:
+            for fee_key, _fee_label in fee_specs:
+                aliases = {
+                    normalize_header(value)
+                    for value in FEE_HEADER_ALIASES[fee_key]
+                }
+                matches = [
+                    column for column, value in headers.items()
+                    if value in aliases
+                    and not (
+                        fee_key == "CBDH"
+                        and value == normalize_header("ĐƠN GIÁ")
+                        and notes_column is not None
+                        and column >= notes_column
+                    )
+                ]
+                if len(matches) != 1:
+                    continue
+                fee_column = matches[0]
+                invoice_column: int | None = None
+                if fee_key in FEE_INVOICE_HEADER_ALIASES:
+                    invoice_aliases = {
+                        normalize_header(value)
+                        for value in FEE_INVOICE_HEADER_ALIASES[fee_key]
+                    }
+                    invoice_matches = [
+                        column for column, value in headers.items()
+                        if value in invoice_aliases
+                    ]
+                    if len(invoice_matches) == 1:
+                        invoice_column = invoice_matches[0]
+                elif fee_key != "LL" and (
+                    headers.get(fee_column + 1) in INVOICE_NUMBER_HEADER_NAMES
+                ):
+                    invoice_column = fee_column + 1
+                result[fee_key] = fee_column, invoice_column
+        return result
+
+    @staticmethod
     def _invoice_text(value: Any) -> str:
         if value is None or isinstance(value, bool):
             return ""
@@ -590,6 +706,7 @@ class RpaExpenseService:
             invoice_numbers=tuple(group["invoice_numbers"]),
             errors=tuple(dict.fromkeys(group["errors"])),
             sheet_name=sheet_name,
+            fee_entries=tuple(group["fee_entries"]),
         )
 
     @staticmethod
