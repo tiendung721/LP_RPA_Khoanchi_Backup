@@ -82,6 +82,13 @@ class RpaExpenseController(QObject):
             self.plan_ready,
         )
 
+    def analyze_all_sheets(self) -> None:
+        self._submit(
+            "analysis",
+            lambda: self.service.analyze_all_sheets(self.progress.emit),
+            self.plan_ready,
+        )
+
     def launch(self, plan: Any, selected_sqt: Iterable[str]) -> None:
         values = tuple(selected_sqt)
 

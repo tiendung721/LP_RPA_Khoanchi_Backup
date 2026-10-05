@@ -15,11 +15,14 @@ def _path_key(path: str | Path) -> str:
     return str(Path(path).expanduser().resolve(strict=False)).casefold()
 
 
-def _item_signature(item: Any) -> str:
+def _item_signature(item: Any, *, include_sheet: bool = False) -> str:
     amounts = getattr(item, "amounts", None)
     values = amounts.to_dict() if callable(getattr(amounts, "to_dict", None)) else {}
+    signature = {"sqt": str(getattr(item, "sqt", "")), "amounts": values}
+    if include_sheet:
+        signature["sheet_name"] = str(getattr(item, "sheet_name", ""))
     raw = json.dumps(
-        {"sqt": str(getattr(item, "sqt", "")), "amounts": values},
+        signature,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -89,7 +92,10 @@ class RpaChoiceService:
                 "version": self.PAYLOAD_VERSION,
                 "selected_sqt": list(selected),
                 "signatures": {
-                    value: _item_signature(lookup[value]) for value in selected
+                    value: _item_signature(
+                        lookup[value], include_sheet=not bool(plan.sheet_name)
+                    )
+                    for value in selected
                 },
             },
         )
@@ -120,7 +126,9 @@ class RpaChoiceService:
                 or (
                     isinstance(signatures, dict)
                     and sqt in signatures
-                    and signatures[sqt] != _item_signature(item)
+                    and signatures[sqt] != _item_signature(
+                        item, include_sheet=not bool(plan.sheet_name)
+                    )
                 )
             ):
                 skipped.append(sqt)

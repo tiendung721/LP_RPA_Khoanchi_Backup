@@ -9,6 +9,7 @@ import sys
 import tempfile
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -171,79 +172,7 @@ class RpaExpenseService:
             if sheet_name not in workbook.sheetnames:
                 raise RpaExpenseError(f"Không tìm thấy sheet {sheet_name}.")
             worksheet = workbook[sheet_name]
-            columns = self._summary_columns(worksheet)
-            invoice_columns = self._invoice_columns(worksheet)
-            status_column = self._optional_status_column(worksheet)
-            evaluator = ArithmeticFormulaEvaluator(worksheet)
-            groups: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
-            first_row = 2
-            max_row = int(worksheet.max_row or 0)
-            for row_number in range(first_row, max_row + 1):
-                try:
-                    sqt_value = evaluator.value(
-                        worksheet.cell(row_number, columns["sqt"])
-                    )
-                except PaymentSyncError:
-                    # Dòng không có QT hợp lệ không thuộc danh sách RPA.
-                    continue
-                sqt = normalize_sqt(sqt_value)
-                if not sqt:
-                    continue
-                group = groups.setdefault(
-                    sqt,
-                    {
-                        "rows": [],
-                        "statuses": [],
-                        "invoice_numbers": [],
-                        "amounts": {
-                            key: 0
-                            for key in SUMMARY_KEYS
-                            if key
-                            not in {"sqt", "luu_cont", "qua_tai"}
-                        },
-                        "errors": [],
-                    },
-                )
-                group["rows"].append(row_number)
-                for column in invoice_columns:
-                    cell = worksheet.cell(row_number, column)
-                    invoice_value = cell.value
-                    if cell.data_type == "f":
-                        try:
-                            invoice_value = evaluator.value(cell)
-                        except PaymentSyncError:
-                            continue
-                    invoice = self._invoice_text(invoice_value)
-                    if invoice and not any(
-                        value.casefold() == invoice.casefold()
-                        for value in group["invoice_numbers"]
-                    ):
-                        group["invoice_numbers"].append(invoice)
-                status_value = (
-                    worksheet.cell(row_number, status_column).value
-                    if status_column is not None
-                    else None
-                )
-                group["statuses"].append(normalize_rpa_status(status_value))
-                for key in (
-                    "cuoc_bo_dong_hang",
-                    "nang_ha_dong_hang",
-                    "cuoc_bien",
-                    "nang_do_vs_lam_lenh",
-                    "cuoc_bo_tra_hang",
-                    "luu_cont_qua_tai",
-                    "sua_chua_cont",
-                ):
-                    cell = worksheet.cell(row_number, columns[key])
-                    try:
-                        amount = self._money_value(evaluator, cell)
-                    except RpaExpenseError as exc:
-                        group["errors"].append(
-                            f"{cell.coordinate}: {exc}"
-                        )
-                        continue
-                    group["amounts"][key] += amount
-            items = tuple(self._build_item(sqt, value) for sqt, value in groups.items())
+            items = self._extract_items(worksheet)
         finally:
             workbook.close()
         self.gateway.assert_unchanged(
@@ -272,6 +201,143 @@ class RpaExpenseService:
             latest_pad_sqt=latest_pad_sqt,
         )
 
+    def analyze_all_sheets(
+        self, progress_callback: ProgressCallback = None
+    ) -> RpaExpensePlan:
+        target = self._target_path()
+        _progress(progress_callback, "Đang đọc tất cả sheet tháng trong BK…")
+        self.lock_service.ensure_readable(target)
+        fingerprint = self.gateway.fingerprint(target)
+        workbook = self.gateway.load(target, read_only=False, data_only=False)
+        items: list[RpaSqtItem] = []
+        sheet_names: list[str] = []
+        try:
+            for name in workbook.sheetnames:
+                if self.months.parse_target_sheet(name) is None:
+                    continue
+                sheet_names.append(name)
+                _progress(progress_callback, f"Đang đọc dữ liệu {name}…")
+                try:
+                    items.extend(self._extract_items(workbook[name]))
+                except RpaExpenseError as exc:
+                    raise RpaExpenseError(f"Sheet {name}: {exc}") from exc
+        finally:
+            workbook.close()
+        self.gateway.assert_unchanged(target, fingerprint, label="File BK")
+        if not sheet_names:
+            raise RpaExpenseError("File BK không có sheet tháng dạng TMM YY.")
+        if not items:
+            raise RpaExpenseError("Các sheet tháng trong BK không có SQT hợp lệ.")
+
+        # PAD tìm trên web bằng SQT, nên một SQT ở hai sheet không thể chọn an toàn.
+        sheets_by_sqt: dict[str, set[str]] = {}
+        for item in items:
+            sheets_by_sqt.setdefault(item.sqt, set()).add(item.sheet_name)
+        items = [
+            replace(
+                item,
+                errors=(
+                    *item.errors,
+                    "SQT trùng ở nhiều sheet BK; PAD chỉ tìm bằng SQT.",
+                ),
+            )
+            if len(sheets_by_sqt[item.sqt]) > 1
+            else item
+            for item in items
+        ]
+        latest_bk_revisions: list[tuple[str, int]] = []
+        latest_pad_sqt: list[str] = []
+        if self.tracking_repository is not None:
+            for name in sheet_names:
+                snapshot = self.tracking_repository.snapshot(target, name)
+                latest_bk_revisions.extend(snapshot.latest_bk_revisions.items())
+                latest_pad_sqt.extend(snapshot.latest_pad_sqt)
+        _progress(
+            progress_callback,
+            f"Đã đọc {len(items)} SQT trên {len(sheet_names)} sheet; "
+            f"{sum(item.can_run for item in items)} SQT có thể chạy.",
+        )
+        return RpaExpensePlan(
+            target,
+            "",
+            fingerprint,
+            tuple(items),
+            latest_bk_revisions=tuple(latest_bk_revisions),
+            latest_pad_sqt=tuple(latest_pad_sqt),
+        )
+
+    def _extract_items(self, worksheet: Any) -> tuple[RpaSqtItem, ...]:
+        columns = self._summary_columns(worksheet)
+        invoice_columns = self._invoice_columns(worksheet)
+        status_column = self._optional_status_column(worksheet)
+        evaluator = ArithmeticFormulaEvaluator(worksheet)
+        groups: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+        for row_number in range(2, int(worksheet.max_row or 0) + 1):
+            try:
+                sqt_value = evaluator.value(
+                    worksheet.cell(row_number, columns["sqt"])
+                )
+            except PaymentSyncError:
+                continue
+            sqt = normalize_sqt(sqt_value)
+            if not sqt:
+                continue
+            group = groups.setdefault(
+                sqt,
+                {
+                    "rows": [],
+                    "statuses": [],
+                    "invoice_numbers": [],
+                    "amounts": {
+                        key: 0
+                        for key in SUMMARY_KEYS
+                        if key not in {"sqt", "luu_cont", "qua_tai"}
+                    },
+                    "errors": [],
+                },
+            )
+            group["rows"].append(row_number)
+            for column in invoice_columns:
+                cell = worksheet.cell(row_number, column)
+                invoice_value = cell.value
+                if cell.data_type == "f":
+                    try:
+                        invoice_value = evaluator.value(cell)
+                    except PaymentSyncError:
+                        continue
+                invoice = self._invoice_text(invoice_value)
+                if invoice and not any(
+                    value.casefold() == invoice.casefold()
+                    for value in group["invoice_numbers"]
+                ):
+                    group["invoice_numbers"].append(invoice)
+            status_value = (
+                worksheet.cell(row_number, status_column).value
+                if status_column is not None
+                else None
+            )
+            group["statuses"].append(normalize_rpa_status(status_value))
+            for key in (
+                "cuoc_bo_dong_hang",
+                "nang_ha_dong_hang",
+                "cuoc_bien",
+                "nang_do_vs_lam_lenh",
+                "cuoc_bo_tra_hang",
+                "luu_cont_qua_tai",
+                "sua_chua_cont",
+            ):
+                cell = worksheet.cell(row_number, columns[key])
+                try:
+                    amount = self._money_value(evaluator, cell)
+                except RpaExpenseError as exc:
+                    group["errors"].append(f"{cell.coordinate}: {exc}")
+                    continue
+                group["amounts"][key] += amount
+        return tuple(
+            self._build_item(sqt, value, worksheet.title)
+            for sqt, value in groups.items()
+        )
+
     def prepare_selection(
         self,
         plan: RpaExpensePlan,
@@ -297,6 +363,10 @@ class RpaExpenseService:
             raise RpaExpenseError(
                 "Có SQT chưa đủ điều kiện chạy RPA: " + detail
             )
+        selected_sheets = {
+            lookup[value].sheet_name or plan.sheet_name for value in selected
+        }
+        request_sheet = next(iter(selected_sheets)) if len(selected_sheets) == 1 else None
         self.gateway.assert_unchanged(
             plan.bk_path, plan.fingerprint, label="File BK"
         )
@@ -322,7 +392,7 @@ class RpaExpenseService:
                 Path(getattr(self.settings, "data_root", Path.cwd())).resolve()
             ),
             "bk_file": str(plan.bk_path.resolve()),
-            "sheet_name": plan.sheet_name,
+            "sheet_name": request_sheet,
             "source_fingerprint": plan.fingerprint.to_dict(),
             "items": [
                 {
@@ -331,7 +401,7 @@ class RpaExpenseService:
                         {"bk_revision": revision}
                         if self.tracking_repository is not None
                         and (revision := self.tracking_repository.bk_revision(
-                            plan.bk_path, plan.sheet_name, value
+                            plan.bk_path, lookup[value].sheet_name or plan.sheet_name, value
                         )) is not None
                         else {}
                     ),
@@ -379,13 +449,18 @@ class RpaExpenseService:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self._write_json_atomic(self.latest_launched_path, payload)
         if self.tracking_repository is not None:
-            self.tracking_repository.record_latest_pad(
-                payload["bk_file"],
-                str(payload["sheet_name"]),
-                (item.get("sqt") for item in payload["items"]),
-                run_id=str(payload["run_id"]),
-                launched_at=launched_at,
-            )
+            selected_by_sheet: dict[str, list[str]] = {}
+            for item in payload["items"]:
+                sheet = str(item.get("sheet_name") or payload["sheet_name"] or "")
+                selected_by_sheet.setdefault(sheet, []).append(str(item["sqt"]))
+            for sheet, sqt_values in selected_by_sheet.items():
+                self.tracking_repository.record_latest_pad(
+                    payload["bk_file"],
+                    sheet,
+                    sqt_values,
+                    run_id=str(payload["run_id"]),
+                    launched_at=launched_at,
+                )
         return self.latest_launched_path.resolve()
 
     def load_latest_launched(self) -> dict[str, Any] | None:
@@ -497,7 +572,9 @@ class RpaExpenseService:
         return amount
 
     @staticmethod
-    def _build_item(sqt: str, group: dict[str, Any]) -> RpaSqtItem:
+    def _build_item(
+        sqt: str, group: dict[str, Any], sheet_name: str
+    ) -> RpaSqtItem:
         statuses = list(group["statuses"])
         status = (
             RPA_STATUS_IMPORTED
@@ -512,6 +589,7 @@ class RpaExpenseService:
             amounts=amounts,
             invoice_numbers=tuple(group["invoice_numbers"]),
             errors=tuple(dict.fromkeys(group["errors"])),
+            sheet_name=sheet_name,
         )
 
     @staticmethod

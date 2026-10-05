@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from .app_dialog import AppDialog
+from .bulk_invoice_dialog import BulkInvoiceDialog
 from .presentation import fit_window_to_screen
 from .edit_row_dialog import EditRowDialog
 from .inline_action_delegate import InlineActionDelegate
@@ -595,10 +596,17 @@ class ReviewWindow(QMainWindow):
         self.add_button.setObjectName("addRowButton")
         self.edit_button = QPushButton("Sửa dòng")
         self.edit_button.setObjectName("editRowButton")
+        self.bulk_invoice_button = QPushButton("Gán/đổi số HĐ")
+        self.bulk_invoice_button.setObjectName("bulkInvoiceButton")
         self.delete_button = QPushButton("Xóa dòng")
         self.delete_button.setObjectName("deleteRowButton")
         self.delete_button.setProperty("danger", True)
-        for button in (self.add_button, self.edit_button, self.delete_button):
+        for button in (
+            self.add_button,
+            self.edit_button,
+            self.bulk_invoice_button,
+            self.delete_button,
+        ):
             action_toolbar.addWidget(button)
         root.addLayout(action_toolbar)
 
@@ -739,6 +747,7 @@ class ReviewWindow(QMainWindow):
         self.clear_filter_button.clicked.connect(self.clear_filters)
         self.add_button.clicked.connect(self.add_row)
         self.edit_button.clicked.connect(self.edit_selected_row)
+        self.bulk_invoice_button.clicked.connect(self.bulk_edit_invoice_numbers)
         self.delete_button.clicked.connect(self.delete_selected_row)
         self.raw_button.clicked.connect(self.show_raw_json)
         self.confirm_button.clicked.connect(self.confirm_batch)
@@ -749,6 +758,7 @@ class ReviewWindow(QMainWindow):
         self.model.validationChanged.connect(self._update_stats)
         self.model.rowsChanged.connect(self._update_visible_count)
         self.model.rowsChanged.connect(self._refresh_document_filter)
+        self.model.rowsChanged.connect(self._update_action_state)
         self.model.rowsChanged.connect(self._restore_reconciliation_presentations)
         self.lookup_action_delegate.clicked.connect(
             self._lookup_action_clicked
@@ -884,8 +894,20 @@ class ReviewWindow(QMainWindow):
             if self.table.model()
             else 0
         )
-        self.edit_button.setEnabled(selected_count == 1)
-        self.delete_button.setEnabled(selected_count > 0)
+        self.edit_button.setEnabled(selected_count == 1 and not self._saving)
+        self.delete_button.setEnabled(selected_count > 0 and not self._saving)
+        is_bang_ke = (
+            str(_value(self._metadata, "source_kind", default="ASSISTANT"))
+            .split(".")[-1]
+            .upper()
+            == "BANG_KE"
+        )
+        self.bulk_invoice_button.setVisible(is_bang_ke)
+        self.bulk_invoice_button.setEnabled(
+            is_bang_ke
+            and not self._saving
+            and any(row.fee != "LL" for row in self.model.rows())
+        )
         self.delete_button.setText(
             f"Xóa {selected_count} dòng" if selected_count > 1 else "Xóa dòng"
         )
@@ -930,6 +952,33 @@ class ReviewWindow(QMainWindow):
             if (source_index := self.proxy_model.mapToSource(proxy_index)).isValid()
         }
         return sorted(source_rows)
+
+    def bulk_edit_invoice_numbers(self) -> None:
+        if not self.bulk_invoice_button.isEnabled():
+            return
+        selected_positions = self._selected_source_rows()
+        preferred_document = str(self.document_filter.currentData() or "")
+        if not preferred_document and selected_positions:
+            preferred_document = self.model.row_at(selected_positions[0]).source_document_id
+        dialog = BulkInvoiceDialog(
+            self.model.rows(),
+            selected_positions=selected_positions,
+            document_id=preferred_document,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        changed = self.model.bulk_update_invoice_no(
+            dialog.scope_positions(),
+            invoice_no=dialog.invoice_no,
+            mode=dialog.mode,
+            old_invoice_no=dialog.old_invoice_no,
+        )
+        if changed:
+            self.statusBar().showMessage(
+                f"Đã cập nhật số HĐ cho {changed} dòng. Hãy kiểm tra và bấm Lưu.",
+                8000,
+            )
 
     def _select_source_row(self, source_row: int) -> None:
         source_index = self.model.index(source_row, ReviewTableModel.COLUMN_NO)
@@ -1339,8 +1388,7 @@ class ReviewWindow(QMainWindow):
         self.confirm_button.setText("Đang lưu…" if saving else "Lưu")
         self.confirm_button.setEnabled(not saving and self.model.stats.error == 0)
         self.add_button.setEnabled(not saving)
-        self.edit_button.setEnabled(not saving and self._selected_source_row() is not None)
-        self.delete_button.setEnabled(not saving and self._selected_source_row() is not None)
+        self._update_action_state()
 
     def _apply_service_result(self, result: Any) -> None:
         if result is None:
@@ -1371,6 +1419,7 @@ class ReviewWindow(QMainWindow):
                     for index in range(self.model.rowCount())
                 }
                 self._restore_reconciliation_presentations()
+        self._update_action_state()
 
     def replace_review(self, review: Any) -> None:
         """Nạp lại batch từ service mà không tái tạo cửa sổ."""
@@ -1403,6 +1452,7 @@ class ReviewWindow(QMainWindow):
         self._pending_deleted_source_indices.clear()
         self._next_source_item_index = self.model.rowCount()
         self._restore_reconciliation_presentations()
+        self._update_action_state()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self.model.dirty:

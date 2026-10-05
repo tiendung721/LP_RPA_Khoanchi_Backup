@@ -690,7 +690,7 @@ class MainWindow(QMainWindow):
             )
             return
         try:
-            self._rpa_expense.load_sheets()
+            self._rpa_expense.analyze_all_sheets()
         except Exception as exc:
             self._rpa_failed(exc)
 
@@ -698,7 +698,7 @@ class MainWindow(QMainWindow):
     def _rpa_started(self, phase: str) -> None:
         labels = {
             "sheets": "Đang đọc danh sách sheet BK…",
-            "analysis": "Đang tổng hợp dữ liệu theo SQT…",
+            "analysis": "Đang đọc tất cả sheet BK và tổng hợp SQT…",
             "launch": "Đang tạo dữ liệu và khởi chạy PAD…",
         }
         message = labels.get(phase, "Đang chuẩn bị dữ liệu RPA…")

@@ -272,6 +272,44 @@ def coerce_review_row(value: Any) -> ReviewRow:
     raise TypeError(f"Không thể chuyển kiểu {type(value).__name__} thành dòng dữ liệu.")
 
 
+def bulk_invoice_change_positions(
+    rows: Sequence[ReviewRow],
+    positions: Iterable[int],
+    *,
+    invoice_no: str,
+    mode: str,
+    old_invoice_no: str | None = None,
+) -> list[int]:
+    """Tính các dòng thực sự đổi số HĐ; LL không tham gia thao tác hàng loạt."""
+
+    new_value = " ".join(invoice_no.split())
+    if not new_value:
+        raise ValueError("Vui lòng nhập số HĐ mới.")
+    if mode not in {"fill", "replace", "overwrite"}:
+        raise ValueError("Cách cập nhật số HĐ không hợp lệ.")
+    old_key = " ".join((old_invoice_no or "").split()).casefold()
+    if mode == "replace" and not old_key:
+        raise ValueError("Vui lòng chọn số HĐ cũ cần đổi.")
+
+    changed: list[int] = []
+    for position in sorted(set(positions)):
+        if not 0 <= position < len(rows):
+            raise IndexError("Dòng cần cập nhật không tồn tại.")
+        row = rows[position]
+        if row.fee == "LL":
+            continue
+        current = " ".join(row.invoice_no.split()) if isinstance(row.invoice_no, str) else ""
+        current_key = current.casefold()
+        if current_key == new_value.casefold():
+            continue
+        if mode == "fill" and current:
+            continue
+        if mode == "replace" and current_key != old_key:
+            continue
+        changed.append(position)
+    return changed
+
+
 def validate_row(row: ReviewRow, *, allow_negative: bool = False) -> RowValidation:
     """Kiểm tra các lỗi chặn/cảnh báo độc lập của một dòng."""
 
@@ -675,6 +713,29 @@ class ReviewTableModel(QAbstractTableModel):
             raise IndexError("Dòng cần sửa không tồn tại.")
         self._rows[position] = coerce_review_row(row)
         self._after_mutation()
+
+    def bulk_update_invoice_no(
+        self,
+        positions: Iterable[int],
+        *,
+        invoice_no: str,
+        mode: str,
+        old_invoice_no: str | None = None,
+    ) -> int:
+        changed = bulk_invoice_change_positions(
+            self._rows,
+            positions,
+            invoice_no=invoice_no,
+            mode=mode,
+            old_invoice_no=old_invoice_no,
+        )
+        if not changed:
+            return 0
+        new_value = " ".join(invoice_no.split())
+        for position in changed:
+            self._rows[position].invoice_no = new_value
+        self._after_mutation()
+        return len(changed)
 
     def remove_row(self, position: int) -> ReviewRow:
         return self.remove_rows([position])[0]

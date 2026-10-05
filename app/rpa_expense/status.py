@@ -70,7 +70,12 @@ class RpaExpenseStatusService:
         target = ensure_supported_workbook(selection["bk_file"]).resolve()
         if not target.is_file():
             raise RpaExpenseStatusError(f"Không tìm thấy file BK: {target}")
-        sheet_name = str(selection["sheet_name"])
+        # JSON cũ có sheet ở cấp request; JSON nhiều tháng ghi sheet cho từng SQT.
+        sheet_name = str(item.get("sheet_name") or selection["sheet_name"] or "")
+        if not sheet_name:
+            raise RpaExpenseStatusError(
+                f"SQT {target_sqt} không có sheet BK trong request RPA."
+            )
         run_id = str(selection["run_id"])
         raw_revision = item.get("bk_revision", item.get("pending_revision"))
         try:

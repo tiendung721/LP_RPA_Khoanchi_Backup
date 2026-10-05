@@ -49,9 +49,10 @@ Bước 1 hoặc chọn JSON thủ công.
   dòng sau các khóa trên, người dùng phải chọn đúng sheet/dòng/SQT.
   Nhiều dòng JSON cùng nhắm một ô phí không được cộng; người dùng chọn đúng một
   dòng để ghi, còn ô đã có giá trị chỉ cho giữ nguyên, ghi đè hoặc bỏ qua.
-- Bước 4 (RPA) vẫn chỉ cho chọn một sheet BK, tổng hợp các dòng theo SQT, chọn nhiều SQT và gọi
-  BAT riêng để chạy PAD nhập khoản chi lên phần mềm quyết toán. Dòng `Đã nhập`
-  vẫn được phép chạy lại.
+- Bước 4 (RPA) đọc tất cả sheet tháng BK, tổng hợp các dòng theo SQT và cho chọn
+  SQT từ nhiều sheet trong cùng một lượt chạy PAD. JSON ghi sheet cho từng SQT để
+  cập nhật đúng trạng thái sau khi nhập. SQT trùng ở nhiều sheet không được chọn vì
+  PAD tìm trên web chỉ bằng SQT. Dòng `Đã nhập` vẫn được phép chạy lại.
 - Mọi lần ghi BK đều dùng backup, working copy, kiểm tra lại và thay file
   nguyên tử; tác vụ chạy nền để không khóa giao diện.
 - Dòng cước biển thiếu số cont có một hành động duy nhất **Đối soát số cont**.

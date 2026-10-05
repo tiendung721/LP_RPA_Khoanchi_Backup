@@ -87,6 +87,7 @@ class RpaSqtSelectionDialog(AppDialog):
     ) -> None:
         super().__init__(parent)
         self.plan = plan
+        self._multiple_sheets = not bool(plan.sheet_name)
         self._initial_selected_sqt = {
             str(value) for value in initial_selected_sqt
         }
@@ -112,9 +113,7 @@ class RpaSqtSelectionDialog(AppDialog):
         self._clear_saved_callback = clear_saved_callback
         self._checks: list[QTableWidgetItem] = []
         self._active_group_filter = (
-            "bk"
-            if self._latest_bk_sqt
-            else "all"
+            "bk" if self._latest_bk_sqt and not self._multiple_sheets else "all"
         )
         self._active_status_filter: str | None = None
         self._sort_options = {
@@ -158,7 +157,11 @@ class RpaSqtSelectionDialog(AppDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         intro, _ = dialog_intro(
-            f"Chọn số quyết toán trong trang tính {self.plan.sheet_name}",
+            (
+                "Chọn số quyết toán từ các sheet tháng trong BK"
+                if self._multiple_sheets
+                else f"Chọn số quyết toán trong trang tính {self.plan.sheet_name}"
+            ),
             "Có thể chọn lại số đã nhập nếu cần chạy lại. "
             "Trạng thái chỉ đổi thành “Đã nhập” khi phần mềm quyết toán xác nhận lưu thành công.",
         )
@@ -252,6 +255,11 @@ class RpaSqtSelectionDialog(AppDialog):
         self.sort_combo.addItem("Số quyết toán giảm dần", "sqt_desc")
         self.sort_combo.addItem("Dòng BK tăng dần", "rows_asc")
         self.sort_combo.addItem("Dòng BK giảm dần", "rows_desc")
+        if self._multiple_sheets:
+            self._sort_options["sheet_asc"] = (
+                len(self.COLUMNS), Qt.SortOrder.AscendingOrder
+            )
+            self.sort_combo.addItem("Sheet BK tăng dần", "sheet_asc")
         self.sort_combo.currentIndexChanged.connect(self._apply_sort)
         table_tools.addWidget(self.sort_combo)
 
@@ -316,9 +324,10 @@ class RpaSqtSelectionDialog(AppDialog):
         self.selection_summary.setWordWrap(True)
         layout.addWidget(self.selection_summary)
 
-        self.table = QTableWidget(0, len(self.COLUMNS))
+        columns = self.COLUMNS + (("Sheet BK",) if self._multiple_sheets else ())
+        self.table = QTableWidget(0, len(columns))
         self.table.setObjectName("rpaSqtTable")
-        self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(list(columns))
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
@@ -453,6 +462,9 @@ class RpaSqtSelectionDialog(AppDialog):
             amounts.sua_chua_cont,
             source.validation_message or "Hợp lệ",
         )
+        if self._multiple_sheets:
+            values += (source.sheet_name,)
+            sort_values += (source.sheet_name.casefold(),)
         for column, (value, sort_value) in enumerate(
             zip(values, sort_values), 1
         ):
@@ -502,7 +514,7 @@ class RpaSqtSelectionDialog(AppDialog):
         self._initial_selected_sqt.clear()
         self._set_all(Qt.CheckState.Unchecked, visible_only=False)
         if hasattr(self, "restore_label"):
-            self.restore_label.setText("Đã xóa lựa chọn ghi nhớ của trang tính này.")
+            self.restore_label.setText("Đã xóa lựa chọn ghi nhớ của file BK này.")
 
     def _set_all(
         self, state: Qt.CheckState, *, visible_only: bool = True
@@ -557,6 +569,10 @@ class RpaSqtSelectionDialog(AppDialog):
             )
             sqt_item = self.table.item(row, 1)
             invoice_item = self.table.item(row, 2)
+            sheet_item = (
+                self.table.item(row, len(self.COLUMNS))
+                if self._multiple_sheets else None
+            )
             search_matches = (
                 not search_text
                 or (
@@ -566,6 +582,10 @@ class RpaSqtSelectionDialog(AppDialog):
                 or (
                     invoice_item is not None
                     and search_text in invoice_item.text().strip().casefold()
+                )
+                or (
+                    sheet_item is not None
+                    and search_text in sheet_item.text().strip().casefold()
                 )
             )
             self.table.setRowHidden(
@@ -690,6 +710,12 @@ class RpaLatestDataDialog(AppDialog):
     ) -> None:
         super().__init__(parent)
         self.payload = dict(payload)
+        items = self.payload.get("items")
+        self._sheet_names = {
+            str(item.get("sheet_name") or self.payload.get("sheet_name") or "")
+            for item in items if isinstance(item, Mapping)
+        } if isinstance(items, list) else set()
+        self._multiple_sheets = len(self._sheet_names) > 1
         self.setObjectName("rpaLatestDataDialog")
         self.setWindowTitle("Dữ liệu của lần nhập gần nhất")
         self._build_ui()
@@ -697,7 +723,15 @@ class RpaLatestDataDialog(AppDialog):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        sheet_name = str(self.payload.get("sheet_name") or "—")
+        sheet_name = (
+            "nhiều sheet BK"
+            if self._multiple_sheets
+            else str(
+                self.payload.get("sheet_name")
+                or next(iter(self._sheet_names), "")
+                or "—"
+            )
+        )
         run_id = str(self.payload.get("run_id") or "—")
         timestamp = str(
             self.payload.get("launched_at")
@@ -714,9 +748,10 @@ class RpaLatestDataDialog(AppDialog):
 
         items = self.payload.get("items")
         values = items if isinstance(items, list) else []
-        self.table = QTableWidget(0, len(self.COLUMNS))
+        columns = self.COLUMNS + (("Sheet BK",) if self._multiple_sheets else ())
+        self.table = QTableWidget(0, len(columns))
         self.table.setObjectName("rpaLatestDataTable")
-        self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(list(columns))
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
@@ -753,6 +788,8 @@ class RpaLatestDataDialog(AppDialog):
             *(_money(value) for value in amount_values),
             _money(sum(int(value or 0) for value in amount_values)),
         )
+        if self._multiple_sheets:
+            cells += (source.get("sheet_name") or "—",)
         row = self.table.rowCount()
         self.table.insertRow(row)
         for column, value in enumerate(cells):

@@ -67,6 +67,7 @@ class RpaSqtItem:
     amounts: RpaExpenseAmounts
     invoice_numbers: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+    sheet_name: str = ""
 
     @property
     def row_count(self) -> int:
@@ -90,6 +91,7 @@ class RpaSqtItem:
     def to_payload(self) -> dict[str, Any]:
         return {
             "sqt": self.sqt,
+            "sheet_name": self.sheet_name,
             "source_rows": list(self.source_rows),
             "status_before": self.status,
             "amounts": self.amounts.to_dict(),

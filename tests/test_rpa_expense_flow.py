@@ -75,6 +75,20 @@ def _settings(tmp_path: Path, bk: Path) -> AppSettings:
     )
 
 
+def _add_second_sheet(path: Path, *, duplicate_sqt: bool = False) -> None:
+    workbook = load_workbook(path)
+    try:
+        sheet = workbook.copy_worksheet(workbook["T07 26"])
+        sheet.title = "T08 26"
+        if not duplicate_sqt:
+            for row, sqt in ((2, 901), (3, 901), (4, 902)):
+                sheet.cell(row, 1).value = sqt
+                sheet.cell(row, 2).value = f"HD-{sqt}-{row}"
+        workbook.save(path)
+    finally:
+        workbook.close()
+
+
 def test_analyze_groups_rows_and_imported_items_remain_runnable(
     tmp_path: Path,
 ) -> None:
@@ -98,6 +112,74 @@ def test_analyze_groups_rows_and_imported_items_remain_runnable(
 
     assert second.status == RPA_STATUS_IMPORTED
     assert second.can_run
+
+
+def test_one_pad_selection_updates_sqt_in_two_bk_sheets(
+    qtbot, tmp_path: Path
+) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    _add_second_sheet(bk)
+    settings = _settings(tmp_path, bk)
+    service = RpaExpenseService(settings)
+    plan = service.analyze_all_sheets()
+
+    assert plan.sheet_name == ""
+    assert {(item.sqt, item.sheet_name) for item in plan.items} == {
+        ("101", "T07 26"), ("102", "T07 26"),
+        ("901", "T08 26"), ("902", "T08 26"),
+    }
+    dialog = RpaSqtSelectionDialog(plan)
+    qtbot.addWidget(dialog)
+    assert dialog.table.columnCount() == len(dialog.COLUMNS) + 1
+    assert dialog.table.horizontalHeaderItem(len(dialog.COLUMNS)).text() == "Sheet BK"
+
+    prepared = service.prepare_selection(plan, ["101", "901"])
+    payload = json.loads(prepared.selection_path.read_text(encoding="utf-8"))
+    assert payload["sheet_name"] is None
+    assert [(item["sqt"], item["sheet_name"]) for item in payload["items"]] == [
+        ("101", "T07 26"), ("901", "T08 26")
+    ]
+    status = RpaExpenseStatusService(backup_dir=settings.paths.excel_backup_dir)
+    status.mark_imported(prepared.selection_path, "901")
+    workbook = load_workbook(bk)
+    try:
+        status_column = 3 + len(SUMMARY_HEADERS)
+        assert workbook["T08 26"].cell(2, status_column).value == RPA_STATUS_IMPORTED
+        assert workbook["T07 26"].cell(2, status_column).value is None
+    finally:
+        workbook.close()
+    status.mark_imported(prepared.selection_path, "101")
+    workbook = load_workbook(bk)
+    try:
+        assert workbook["T07 26"].cell(2, status_column).value == RPA_STATUS_IMPORTED
+        assert workbook["T07 26"].cell(3, status_column).value == RPA_STATUS_IMPORTED
+    finally:
+        workbook.close()
+
+
+def test_duplicate_sqt_across_sheets_cannot_be_sent_to_pad(tmp_path: Path) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    _add_second_sheet(bk, duplicate_sqt=True)
+    plan = RpaExpenseService(_settings(tmp_path, bk)).analyze_all_sheets()
+    assert plan.runnable_count == 0
+    assert all("SQT trùng" in item.validation_message for item in plan.items)
+
+
+def test_status_helper_still_reads_legacy_single_sheet_json(tmp_path: Path) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    settings = _settings(tmp_path, bk)
+    service = RpaExpenseService(settings)
+    prepared = service.prepare_selection(service.analyze_sheet("T07 26"), ["101"])
+    payload = json.loads(prepared.selection_path.read_text(encoding="utf-8"))
+    payload["items"][0].pop("sheet_name")
+    prepared.selection_path.write_text(json.dumps(payload), encoding="utf-8")
+    result = RpaExpenseStatusService(
+        backup_dir=settings.paths.excel_backup_dir
+    ).mark_imported(prepared.selection_path, "101")
+    assert result["sheet_name"] == "T07 26"
 
 
 def test_analyze_collects_distinct_invoices_from_multiple_bk_columns(
@@ -397,6 +479,26 @@ def test_latest_rpa_snapshot_changes_only_after_recording_a_successful_launch(
     assert service.load_latest_launched()["run_id"] == first.run_id
 
 
+def test_multi_sheet_launch_history_tracks_each_sheet(tmp_path: Path) -> None:
+    bk = tmp_path / "Output" / "BK.xlsx"
+    _build_bk(bk)
+    _add_second_sheet(bk)
+    database = Database(tmp_path / "app.db")
+    try:
+        tracking = RpaTrackingRepository(database)
+        service = RpaExpenseService(
+            _settings(tmp_path, bk), tracking_repository=tracking
+        )
+        prepared = service.prepare_selection(
+            service.analyze_all_sheets(), ["101", "901"]
+        )
+        service.record_launched(prepared)
+        assert tracking.snapshot(bk, "T07 26").latest_pad_sqt == ("101",)
+        assert tracking.snapshot(bk, "T08 26").latest_pad_sqt == ("901",)
+    finally:
+        database.close()
+
+
 def test_latest_rpa_dialog_displays_every_sent_sqt(qtbot) -> None:
     payload = {
         "run_id": "run-1",
@@ -418,6 +520,21 @@ def test_latest_rpa_dialog_displays_every_sent_sqt(qtbot) -> None:
     assert dialog.table.rowCount() == 2
     assert dialog.table.item(0, 0).text() == "101"
     assert dialog.table.item(1, 0).text() == "102"
+
+
+def test_latest_rpa_dialog_shows_source_sheet_for_multi_sheet_run(qtbot) -> None:
+    dialog = RpaLatestDataDialog({
+        "run_id": "run-1",
+        "sheet_name": None,
+        "items": [
+            {"sqt": "101", "sheet_name": "T07 26", "amounts": {}},
+            {"sqt": "901", "sheet_name": "T08 26", "amounts": {}},
+        ],
+    })
+    qtbot.addWidget(dialog)
+    assert dialog.table.columnCount() == len(dialog.COLUMNS) + 1
+    assert dialog.table.item(0, len(dialog.COLUMNS)).text() == "T07 26"
+    assert dialog.table.item(1, len(dialog.COLUMNS)).text() == "T08 26"
 
 
 def test_rpa_choices_restore_imported_sqt_and_reject_changed_amounts(
