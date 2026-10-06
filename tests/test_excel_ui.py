@@ -48,7 +48,7 @@ from app.ui.settings_page import SettingsPage
 from app.ui.workflow_page import WorkflowPage
 
 
-def test_step_three_has_three_primary_actions_and_statuses(qtbot) -> None:
+def test_step_three_has_four_primary_actions_and_statuses(qtbot) -> None:
     page = WorkflowPage()
     qtbot.addWidget(page)
 
@@ -59,6 +59,7 @@ def test_step_three_has_three_primary_actions_and_statuses(qtbot) -> None:
         page.sync_daily_button,
         page.post_expenses_button,
         page.sync_payment_button,
+        page.export_carrier_button,
     ]
     assert page.sync_daily_button.text() == "Đồng bộ"
     assert page.post_expenses_button.text() == "Nhập vào BK"
@@ -373,6 +374,7 @@ def test_step_three_locks_all_excel_actions_while_running(qtbot) -> None:
     assert not page.sync_daily_button.isEnabled()
     assert not page.post_expenses_button.isEnabled()
     assert not page.sync_payment_button.isEnabled()
+    assert not page.export_carrier_button.isEnabled()
     assert page.sync_daily_button.text() == "Đang đồng bộ…"
     assert "Đang đọc file Hàng ngày" in page.sync_status_label.text()
 
@@ -381,6 +383,7 @@ def test_step_three_locks_all_excel_actions_while_running(qtbot) -> None:
     assert page.sync_daily_button.isEnabled()
     assert page.post_expenses_button.isEnabled()
     assert page.sync_payment_button.isEnabled()
+    assert page.export_carrier_button.isEnabled()
     assert page.sync_daily_button.text() == "Đồng bộ"
 
 

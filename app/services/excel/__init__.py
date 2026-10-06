@@ -6,6 +6,13 @@ from .configuration import (
     ExcelConfigurationService,
     validate_configuration,
 )
+from .carrier_export import (
+    CarrierCandidate,
+    CarrierExportError,
+    CarrierExportPreview,
+    CarrierExportResult,
+    CarrierExportService,
+)
 from .daily_sync import (
     SOURCE_HEADER_ALIASES,
     SYNC_FIELDS,
@@ -100,6 +107,11 @@ from .workbook import (
 )
 
 __all__ = [
+    "CarrierCandidate",
+    "CarrierExportError",
+    "CarrierExportPreview",
+    "CarrierExportResult",
+    "CarrierExportService",
     "BASE_HEADER_ALIASES",
     "FEE_HEADER_ALIASES",
     "INVOICE_HEADER_NAMES",

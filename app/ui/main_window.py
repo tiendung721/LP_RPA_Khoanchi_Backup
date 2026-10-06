@@ -13,6 +13,7 @@ from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.excel.review import CorrectionIssue, SourceDataChangedError
+from app.services.excel.carrier_export import CarrierExportPreview, CarrierExportResult
 from app.services.excel.workbook import (
     WorkbookChangedError,
     WorkbookLockedError,
@@ -47,6 +49,7 @@ from .excel_dialogs import (
     PostingAllocationDialog,
     RepostSelectionDialog,
 )
+from .carrier_export_dialog import CarrierSelectionDialog
 from .excel_summary_dialogs import (
     ExcelCompletionDialog,
     ExcelConfirmationDialog,
@@ -314,6 +317,7 @@ class MainWindow(QMainWindow):
         self.workflow_page.sync_payment_requested.connect(
             self.start_payment_sync
         )
+        self.workflow_page.export_carrier_requested.connect(self.start_carrier_export)
         self.workflow_page.run_rpa_expense_requested.connect(
             self.start_rpa_expense
         )
@@ -641,6 +645,68 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             self._show_excel_error(exc, operation="payment_sync")
+
+    @Slot()
+    def start_carrier_export(self) -> None:
+        if self._missing_excel_configuration(require_daily=False):
+            return
+        if self._excel_tasks is None or self._excel_tasks.is_busy:
+            QMessageBox.information(self, "Excel đang chạy", "Hãy chờ tác vụ Excel hiện tại hoàn tất.")
+            return
+        self._excel_context = "workflow"
+        try:
+            service = self._excel_tasks.carrier_export_service
+            candidates = service.source_sheet_candidates()
+            dialog = MonthSelectionDialog(
+                candidates, self, title="Chọn sheet BK xuất theo bên VT",
+                preselect_first=False, show_recommendations=False, multi_select=True,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                self._excel_context = None
+                return
+            names = dialog.selected_sheet_names
+            if not names:
+                self._excel_context = None
+                return
+            self._excel_tasks.submit("carrier_export", service.analyze, names, with_progress=True)
+        except Exception as exc:
+            self._show_excel_error(exc, operation="carrier_export")
+
+    def _choose_carrier_export(self, preview: CarrierExportPreview) -> None:
+        if not preview.carriers:
+            QMessageBox.information(
+                self, "Không có bên VT", "Các sheet đã chọn không có khoản phí trong Nam xác định được bên VT. "
+                f"Có {preview.unresolved_count} dòng chưa xác định."
+            )
+            return
+        dialog = CarrierSelectionDialog(preview, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.carrier_key:
+            return
+        default_dir = str(_attribute(self._settings, "output_dir", default="") or "")
+        directory = QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu file bên VT", default_dir)
+        if not directory:
+            return
+        service = self._excel_tasks.carrier_export_service
+        filename = service.output_filename(preview, dialog.carrier_key)
+        target = Path(directory) / filename
+        overwrite = False
+        if target.exists():
+            response = QMessageBox.question(
+                self, "File đã tồn tại", f"{target.name} đã tồn tại. Bạn có muốn thay file này?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return
+            overwrite = True
+        self._excel_context = "workflow"
+        try:
+            self._excel_tasks.submit(
+                "carrier_export", service.export, preview, dialog.carrier_key,
+                directory, overwrite=overwrite, with_progress=True,
+            )
+        except Exception as exc:
+            self._show_excel_error(exc, operation="carrier_export")
 
     def _missing_rpa_configuration(self) -> bool:
         bk = str(
@@ -1681,6 +1747,21 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _excel_completed(self, result: Any) -> None:
+        if isinstance(result, CarrierExportPreview):
+            self.workflow_page.set_excel_result("carrier_export", f"Đã quét {len(result.sheet_names)} tháng; có {len(result.carriers)} bên VT, {result.unresolved_count} dòng chưa xác định.")
+            QTimer.singleShot(0, lambda preview=result: self._choose_carrier_export(preview))
+            return
+        if isinstance(result, CarrierExportResult):
+            self.workflow_page.set_excel_result("carrier_export", result)
+            self._load_excel_history()
+            QMessageBox.information(
+                self, "Đã xuất Excel theo bên VT",
+                f"Đã xuất {result.row_count} dòng cho {result.carrier_name}.\n"
+                f"Tổng tiền: {result.total:,.0f} đ\n"
+                f"Dòng chưa xác định bên VT: {result.unresolved_count}\n\n"
+                f"File: {result.target_path}",
+            )
+            return
         MainWindow._clear_excel_review(self)
         if self._excel_context == "configuration":
             valid = bool(_attribute(result, "is_valid", default=False))
@@ -2065,6 +2146,7 @@ class MainWindow(QMainWindow):
             ("DAILY_SYNC", "sync"),
             ("EXPENSE_POSTING", "posting"),
             ("PAYMENT_SYNC", "payment_sync"),
+            ("CARRIER_EXPORT", "carrier_export"),
         ):
             try:
                 record = repository.get_latest(
@@ -2075,12 +2157,25 @@ class MainWindow(QMainWindow):
                 LOGGER.exception("Không đọc được lịch sử %s.", operation)
                 continue
             if record is None:
+                if ui_operation == "carrier_export":
+                    self._latest_carrier_export_path = None
                 self._latest_excel_outcomes.pop(ui_operation, None)
                 availability = getattr(
                     self.workflow_page, "set_latest_excel_data_available", None
                 )
                 if callable(availability):
                     availability(ui_operation, False)
+                continue
+            if ui_operation == "carrier_export":
+                target = _attribute(record, "target_path", default=None)
+                self._latest_carrier_export_path = Path(target) if target else None
+                self.workflow_page.set_latest_excel_data_available(
+                    ui_operation, bool(target and Path(target).is_file())
+                )
+                self.workflow_page.set_excel_result(
+                    ui_operation,
+                    f"{_attribute(record, 'changed_items', default=0)} dòng → {target}",
+                )
                 continue
             outcomes = _attribute(record, "item_outcomes", default=()) or ()
             self._latest_excel_outcomes[ui_operation] = list(outcomes)
@@ -2123,6 +2218,12 @@ class MainWindow(QMainWindow):
             normalized = self.workflow_page._excel_operation(operation)
         except Exception:
             normalized = str(operation)
+        if normalized == "carrier_export":
+            self._open_workbook_path(
+                getattr(self, "_latest_carrier_export_path", None),
+                label="file xuất theo bên VT",
+            )
+            return
         outcomes = list(self._latest_excel_outcomes.get(normalized, ()))
         if not outcomes:
             QMessageBox.information(

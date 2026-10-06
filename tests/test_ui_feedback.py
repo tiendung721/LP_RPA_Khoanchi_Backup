@@ -145,11 +145,13 @@ def test_excel_actions_are_three_distinct_vertical_rows(qtbot) -> None:
         page.daily_sync_action,
         page.expense_posting_action,
         page.payment_sync_action,
+        page.carrier_export_action,
     )
     buttons = (
         page.sync_daily_button,
         page.post_expenses_button,
         page.sync_payment_button,
+        page.export_carrier_button,
     )
 
     assert all(
@@ -158,4 +160,4 @@ def test_excel_actions_are_three_distinct_vertical_rows(qtbot) -> None:
     )
     indexes = [page.step3_card.layout().indexOf(row) for row in action_rows]
     assert indexes == sorted(indexes)
-    assert len(set(indexes)) == 3
+    assert len(set(indexes)) == 4

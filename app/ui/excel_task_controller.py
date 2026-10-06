@@ -78,12 +78,14 @@ class ExcelTaskController(QObject):
     SYNC_OPERATION = "sync"
     POSTING_OPERATION = "posting"
     PAYMENT_SYNC_OPERATION = "payment_sync"
+    CARRIER_EXPORT_OPERATION = "carrier_export"
 
     def __init__(
         self,
         daily_sync_service: Any | None = None,
         expense_posting_service: Any | None = None,
         payment_sync_service: Any | None = None,
+        carrier_export_service: Any | None = None,
         draft_service: Any | None = None,
         parent: QObject | None = None,
     ) -> None:
@@ -91,6 +93,7 @@ class ExcelTaskController(QObject):
         self.daily_sync_service = daily_sync_service
         self.expense_posting_service = expense_posting_service
         self.payment_sync_service = payment_sync_service
+        self.carrier_export_service = carrier_export_service
         self.draft_service = draft_service
         self._executor = ThreadPoolExecutor(
             max_workers=1,
@@ -129,6 +132,8 @@ class ExcelTaskController(QObject):
             "payment",
         }:
             return cls.PAYMENT_SYNC_OPERATION
+        if value in {"carrier_export", "export_carrier", "xlsx_by_carrier"}:
+            return cls.CARRIER_EXPORT_OPERATION
         raise ValueError(f"Nghiệp vụ Excel không hợp lệ: {operation!r}")
 
     @property
@@ -151,6 +156,7 @@ class ExcelTaskController(QObject):
         daily_sync_service: Any | None = None,
         expense_posting_service: Any | None = None,
         payment_sync_service: Any | None = None,
+        carrier_export_service: Any | None = None,
     ) -> None:
         """Thay service sau khi settings/runtime được cập nhật."""
 
@@ -162,6 +168,8 @@ class ExcelTaskController(QObject):
             self.expense_posting_service = expense_posting_service
         if payment_sync_service is not None:
             self.payment_sync_service = payment_sync_service
+        if carrier_export_service is not None:
+            self.carrier_export_service = carrier_export_service
 
     def submit(
         self,

@@ -17,6 +17,7 @@ class ExcelOperation(str, Enum):
     DAILY_SYNC = "DAILY_SYNC"
     EXPENSE_POSTING = "EXPENSE_POSTING"
     PAYMENT_SYNC = "PAYMENT_SYNC"
+    CARRIER_EXPORT = "CARRIER_EXPORT"
 
 
 class ExcelRunStatus(str, Enum):
