@@ -9,10 +9,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from PySide6.QtCore import QLockFile
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.application import ApplicationRuntime, configured_data_root
-from app.config import AppPaths
+from app.config import AppPaths, software_root
 from app.constants import APP_NAME
 from app.logging_setup import install_exception_hook
 from app.ui.main_window import MainWindow
@@ -53,6 +54,9 @@ def run(arguments: Sequence[str] | None = None) -> int:
     application.setOrganizationName("Kikai")
     application.setApplicationVersion(APP_VERSION)
     application.setQuitOnLastWindowClosed(True)
+    icon = QIcon(str(software_root() / "Assets" / "KIKAI_PM.ico"))
+    if not icon.isNull():
+        application.setWindowIcon(icon)
     apply_application_theme(application)
 
     runtime: ApplicationRuntime | None = None

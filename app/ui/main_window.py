@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QCloseEvent, QDesktopServices
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.config import software_root
 from app.services.excel.review import CorrectionIssue, SourceDataChangedError
 from app.services.excel.carrier_export import CarrierExportPreview, CarrierExportResult
 from app.services.excel.workbook import (
@@ -49,7 +50,9 @@ from .excel_dialogs import (
     PostingAllocationDialog,
     RepostSelectionDialog,
 )
-from .carrier_export_dialog import CarrierSelectionDialog
+from .carrier_export_dialog import (
+    CarrierAllocationDialog, CarrierRunSelectionDialog, CarrierSelectionDialog,
+)
 from .excel_summary_dialogs import (
     ExcelCompletionDialog,
     ExcelConfirmationDialog,
@@ -263,10 +266,20 @@ class MainWindow(QMainWindow):
         )
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(13, 20, 13, 15)
+        logo = QPixmap(str(software_root() / "Assets" / "KIKAI_brand_white.png"))
+        if not logo.isNull():
+            brand_logo = QLabel()
+            brand_logo.setObjectName("brandLogo")
+            brand_logo.setAccessibleName("KIKAI Solution")
+            brand_logo.setContentsMargins(9, 0, 9, 0)
+            brand_logo.setPixmap(
+                logo.scaledToWidth(188, Qt.TransformationMode.SmoothTransformation)
+            )
+            sidebar_layout.addWidget(brand_logo)
         brand = QLabel("TRỢ LÝ DỮ LIỆU\nQUYẾT TOÁN")
         brand.setStyleSheet(
             "color: white; font-size: 13pt; font-weight: 700; "
-            "letter-spacing: 0.5px; padding: 4px 9px 16px 9px;"
+            "letter-spacing: 0.5px; padding: 7px 9px 16px 9px;"
         )
         sidebar_layout.addWidget(brand)
         self.navigation = QListWidget()
@@ -656,6 +669,22 @@ class MainWindow(QMainWindow):
         self._excel_context = "workflow"
         try:
             service = self._excel_tasks.carrier_export_service
+            saved_runs = service.saved_runs() if callable(getattr(service, "saved_runs", None)) else []
+            if saved_runs:
+                run_dialog = CarrierRunSelectionDialog(saved_runs, self)
+                if run_dialog.exec() != QDialog.DialogCode.Accepted:
+                    self._excel_context = None
+                    return
+                if run_dialog.resume_run_id is not None:
+                    selected_run = next(
+                        run for run in saved_runs if run.id == run_dialog.resume_run_id
+                    )
+                    names = tuple(selected_run.item_outcomes["sheet_names"])
+                    self._excel_tasks.submit(
+                        "carrier_export", service.analyze, names,
+                        resume_run_id=selected_run.id, with_progress=True,
+                    )
+                    return
             candidates = service.source_sheet_candidates()
             dialog = MonthSelectionDialog(
                 candidates, self, title="Chọn sheet BK xuất theo bên VT",
@@ -673,10 +702,17 @@ class MainWindow(QMainWindow):
             self._show_excel_error(exc, operation="carrier_export")
 
     def _choose_carrier_export(self, preview: CarrierExportPreview) -> None:
+        if preview.allocation_rows:
+            service = self._excel_tasks.carrier_export_service
+            allocation_dialog = CarrierAllocationDialog(preview, service, self)
+            if allocation_dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            preview = allocation_dialog.resolved_preview or preview
         if not preview.carriers:
             QMessageBox.information(
                 self, "Không có bên VT", "Các sheet đã chọn không có khoản phí trong Nam xác định được bên VT. "
-                f"Có {preview.unresolved_count} dòng chưa xác định."
+                f"Có {preview.unresolved_count} dòng chưa xác định, trong đó "
+                f"{preview.missing_carrier_count} dòng trống Bên VT."
             )
             return
         dialog = CarrierSelectionDialog(preview, self)
@@ -1748,7 +1784,12 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _excel_completed(self, result: Any) -> None:
         if isinstance(result, CarrierExportPreview):
-            self.workflow_page.set_excel_result("carrier_export", f"Đã quét {len(result.sheet_names)} tháng; có {len(result.carriers)} bên VT, {result.unresolved_count} dòng chưa xác định.")
+            self.workflow_page.set_excel_result(
+                "carrier_export",
+                f"Đã quét {len(result.sheet_names)} tháng; "
+                f"{len(result.allocation_rows)} dòng có nhiều bên VT, "
+                f"{result.missing_carrier_count} dòng trống Bên VT.",
+            )
             QTimer.singleShot(0, lambda preview=result: self._choose_carrier_export(preview))
             return
         if isinstance(result, CarrierExportResult):

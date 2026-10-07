@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QScrollArea
+from PySide6.QtWidgets import QLabel, QScrollArea
 
 from app.ui.main_window import MainWindow
 from app.ui.workflow_page import WorkflowPage
@@ -94,13 +94,10 @@ def test_four_latest_data_buttons_are_independent_and_emit_their_flow(qtbot) -> 
     assert page.view_rpa_expense_button.text() == "Xem dữ liệu đã gửi ›"
 
 
-def test_four_workflow_groups_fit_minimum_window_without_scroll(qtbot) -> None:
+def test_four_workflow_groups_keep_aligned_actions_when_window_resizes(qtbot) -> None:
     window = MainWindow(settings={}, start_watcher=False)
     qtbot.addWidget(window)
-    window.resize(980, 650)
     window.show()
-    qtbot.wait(20)
-
     page = window.workflow_page
     cards = (
         page.step1_card,
@@ -108,30 +105,62 @@ def test_four_workflow_groups_fit_minimum_window_without_scroll(qtbot) -> None:
         page.step3_card,
         page.step4_card,
     )
+    action_rows = (
+        page.daily_sync_action,
+        page.expense_posting_action,
+        page.payment_sync_action,
+        page.carrier_export_action,
+    )
+    buttons = (
+        page.sync_daily_button,
+        page.post_expenses_button,
+        page.sync_payment_button,
+        page.export_carrier_button,
+    )
+    scroll = page.findChild(QScrollArea, "workflowScrollArea")
+    assert scroll is not None
 
-    assert page.findChildren(QScrollArea) == []
-    assert all(card.isVisible() for card in cards)
-    assert all(page.rect().contains(card.geometry()) for card in cards)
-    assert len({card.geometry().left() for card in cards}) == 1
-    assert [card.geometry().top() for card in cards] == sorted(
-        card.geometry().top() for card in cards
-    )
-    assert all(
-        following.geometry().top() - previous.geometry().bottom() <= 16
-        for previous, following in zip(cards, cards[1:])
-    )
-    assert page.open_assistant_button.width() == page.review_button.width()
-    assert page.review_button.width() == page.run_rpa_expense_button.width()
-    assert all(
-        row.rect().contains(button.geometry())
-        for row, button in (
-            (page.daily_sync_action, page.sync_daily_button),
-            (page.expense_posting_action, page.post_expenses_button),
-            (page.payment_sync_action, page.sync_payment_button),
+    for width, height, compact in ((980, 650, True), (1600, 950, False)):
+        window.resize(width, height)
+        qtbot.wait(20)
+
+        assert page._excel_compact is compact
+        assert all(card.isVisible() for card in cards)
+        assert all(scroll.widget().rect().contains(card.geometry()) for card in cards)
+        assert len({card.geometry().left() for card in cards}) == 1
+        assert [card.geometry().top() for card in cards] == sorted(
+            card.geometry().top() for card in cards
         )
-    )
+        assert all(
+            row.rect().contains(button.geometry())
+            for row, button in zip(action_rows, buttons)
+        )
+        assert len({button.geometry().left() for button in buttons}) == 1
+        assert len({button.size().toTuple() for button in buttons}) == 1
+        assert buttons[0].height() >= 38
+        title_positions = []
+        status_positions = []
+        for row in action_rows:
+            labels = row.findChildren(QLabel)
+            title_positions.append(
+                next(label.geometry().left() for label in labels if label.property("actionTitle"))
+            )
+            status_positions.append(
+                next(label.geometry().left() for label in labels if label.property("muted"))
+            )
+        assert len(set(title_positions)) == 1
+        assert len(set(status_positions)) == 1
+        assert page.open_assistant_button.width() == page.review_button.width()
+        assert page.review_button.width() == page.run_rpa_expense_button.width()
+        if compact:
+            assert scroll.verticalScrollBar().maximum() > 0
+            scroll.ensureWidgetVisible(page.carrier_export_action)
+            assert scroll.verticalScrollBar().value() > 0
+        else:
+            assert scroll.verticalScrollBar().maximum() == 0
+
     status_right_edges = {
-        badge.mapTo(page, badge.rect().topRight()).x()
+        badge.mapTo(scroll.widget(), badge.rect().topRight()).x()
         for badge in (
             page.assistant_status,
             page.file_status_badge,

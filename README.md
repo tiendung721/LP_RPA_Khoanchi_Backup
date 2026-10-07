@@ -137,6 +137,12 @@ Script kiểm tra Python 3.12 64-bit, tạo `.venv` nếu cần, cài dependency
 và mở ứng dụng. Lần đầu cần Internet để tải thư viện. Các lần sau không gọi
 `pip` nếu `requirements.txt` không thay đổi và môi trường vẫn hợp lệ.
 
+Để có biểu tượng KIKAI trên Desktop, nhấp đúp `Tao_loi_tat_PM.bat` trong thư mục
+ứng dụng. Script tạo shortcut **KIKAI Solution PM** trỏ tới `run_app.bat` và dùng
+icon `Assets/KIKAI_PM.ico`. Khi chuyển thư mục ứng dụng sang máy khác hoặc đổi vị
+trí, chạy lại `Tao_loi_tat_PM.bat` trên máy đó để shortcut nhận đường dẫn mới.
+Không gửi riêng shortcut `.lnk` từ máy cũ.
+
 Để cài dependency phục vụ test:
 
 ```powershell

@@ -8,11 +8,13 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -110,9 +112,22 @@ class WorkflowPage(QWidget):
 
     def _build_ui(self) -> None:
         self.setObjectName("workflowPage")
-        layout = QVBoxLayout(self)
+        page_layout = QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        self.workflow_scroll = QScrollArea()
+        self.workflow_scroll.setObjectName("workflowScrollArea")
+        self.workflow_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.workflow_scroll.setWidgetResizable(True)
+        self.workflow_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        content = QWidget()
+        content.setObjectName("workflowContent")
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(22, 16, 22, 18)
         layout.setSpacing(6)
+        self.workflow_scroll.setWidget(content)
+        page_layout.addWidget(self.workflow_scroll)
 
         title = QLabel("Tác vụ quyết toán")
         title.setObjectName("pageTitle")
@@ -249,29 +264,16 @@ class WorkflowPage(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
-        step3 = QGridLayout(self.step3_card)
+        step3 = QVBoxLayout(self.step3_card)
         step3.setContentsMargins(14, 11, 14, 12)
-        step3.setHorizontalSpacing(10)
-        step3.setVerticalSpacing(0)
-        step3.setColumnStretch(1, 1)
-
-        step3_intro = QWidget()
-        step3_intro.setMinimumWidth(170)
-        step3_intro.setMaximumWidth(200)
-        step3_intro.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Expanding,
-        )
-        intro3 = QVBoxLayout(step3_intro)
-        intro3.setContentsMargins(0, 0, 0, 0)
-        intro3.setSpacing(4)
+        step3.setSpacing(3)
         category3 = QLabel("XỬ LÝ EXCEL")
         category3.setProperty("cardCategory", True)
-        intro3.addWidget(category3)
+        step3.addWidget(category3)
         name3 = QLabel("Xử lý và đồng bộ dữ liệu Excel")
         name3.setProperty("sectionTitle", True)
         name3.setWordWrap(True)
-        intro3.addWidget(name3)
+        step3.addWidget(name3)
 
         self.step3_card.setToolTip(
             "Mỗi tác vụ sử dụng một luồng dữ liệu riêng và hiển thị "
@@ -349,10 +351,9 @@ class WorkflowPage(QWidget):
         ):
             view_button.setProperty("link", True)
             view_button.setEnabled(False)
-            view_button.setMinimumWidth(0)
-            view_button.setMaximumWidth(105)
+            view_button.setFixedWidth(105)
             view_button.setSizePolicy(
-                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Fixed,
                 QSizePolicy.Policy.Fixed,
             )
         for button in (
@@ -361,16 +362,17 @@ class WorkflowPage(QWidget):
             self.sync_payment_button,
             self.export_carrier_button,
         ):
-            button.setFixedWidth(110)
+            button.setFixedWidth(140)
+            button.setMinimumHeight(38)
             button.setSizePolicy(
                 QSizePolicy.Policy.Fixed,
                 QSizePolicy.Policy.Fixed,
         )
         self.excel_loading_bar = LinearLoadingBar()
         self.excel_loading_bar.setAccessibleName("Tiến trình xử lý Excel")
-        intro3.addWidget(self.excel_loading_bar)
-        intro3.addStretch(1)
-        step3.addWidget(step3_intro, 0, 0, 3, 1)
+        step3.addWidget(self.excel_loading_bar)
+        step3.addSpacing(4)
+        self._excel_action_layouts: list[tuple[QBoxLayout, QFrame]] = []
 
         def add_excel_action(
             title_text: str,
@@ -378,19 +380,17 @@ class WorkflowPage(QWidget):
             status_label: QLabel,
             button: QPushButton,
             view_button: QPushButton,
-            row_index: int,
         ) -> QFrame:
             action = QFrame()
             action.setProperty("taskRow", True)
             action.setToolTip(description)
             action_layout = QHBoxLayout(action)
-            action_layout.setContentsMargins(10, 5, 5, 5)
+            action_layout.setContentsMargins(10, 5, 8, 5)
             action_layout.setSpacing(8)
             action_title = QLabel(title_text)
             action_title.setProperty("actionTitle", True)
             action_title.setToolTip(description)
-            action_title.setMinimumWidth(100)
-            action_title.setMaximumWidth(125)
+            action_title.setFixedWidth(145)
             action_title.setSizePolicy(
                 QSizePolicy.Policy.Preferred,
                 QSizePolicy.Policy.Preferred,
@@ -400,11 +400,17 @@ class WorkflowPage(QWidget):
                 QSizePolicy.Policy.Ignored,
                 QSizePolicy.Policy.Preferred,
             )
-            action_layout.addWidget(action_title)
-            action_layout.addWidget(status_label, 1)
-            action_layout.addWidget(button)
-            action_layout.addWidget(view_button)
-            step3.addWidget(action, row_index, 1)
+            details_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+            details_layout.setContentsMargins(0, 0, 0, 0)
+            details_layout.setSpacing(8)
+            details_layout.addWidget(action_title)
+            details_layout.addWidget(status_label, 1)
+            action_layout.addLayout(details_layout, 1)
+            action_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+            action_layout.addWidget(view_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            action.setMinimumHeight(52)
+            step3.addWidget(action)
+            self._excel_action_layouts.append((details_layout, action))
             return action
 
         self.daily_sync_action = add_excel_action(
@@ -413,7 +419,6 @@ class WorkflowPage(QWidget):
             self.sync_status_label,
             self.sync_daily_button,
             self.view_daily_sync_button,
-            0,
         )
         self.expense_posting_action = add_excel_action(
             "Khoản chi → BK",
@@ -421,7 +426,6 @@ class WorkflowPage(QWidget):
             self.posting_status_label,
             self.post_expenses_button,
             self.view_expense_posting_button,
-            1,
         )
         self.payment_sync_action = add_excel_action(
             "BK → Thanh toán",
@@ -429,7 +433,6 @@ class WorkflowPage(QWidget):
             self.payment_sync_status_label,
             self.sync_payment_button,
             self.view_payment_sync_button,
-            2,
         )
         self.carrier_export_action = add_excel_action(
             "BK → Bên VT",
@@ -437,8 +440,9 @@ class WorkflowPage(QWidget):
             self.carrier_export_status_label,
             self.export_carrier_button,
             self.view_carrier_export_button,
-            3,
         )
+        self._excel_compact = False
+        self._set_excel_compact(True)
         workflow_grid.addWidget(self.step3_card, 2, 0)
 
         self.step4_card = QFrame()
@@ -518,6 +522,24 @@ class WorkflowPage(QWidget):
             self.PAYMENT_SYNC_OPERATION: self.sync_payment_button.text(),
             self.CARRIER_EXPORT_OPERATION: self.export_carrier_button.text(),
         }
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self._set_excel_compact(self.width() < 980)
+
+    def _set_excel_compact(self, compact: bool) -> None:
+        if self._excel_compact == compact:
+            return
+        self._excel_compact = compact
+        for details_layout, action in self._excel_action_layouts:
+            if compact:
+                details_layout.setDirection(QBoxLayout.Direction.TopToBottom)
+                details_layout.setSpacing(2)
+                action.setMinimumHeight(72)
+            else:
+                details_layout.setDirection(QBoxLayout.Direction.LeftToRight)
+                details_layout.setSpacing(8)
+                action.setMinimumHeight(52)
 
     def set_configuration(self, settings: Any | None) -> None:
         self._settings = settings
