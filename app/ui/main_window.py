@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from app.config import software_root
 from app.services.excel.review import CorrectionIssue, SourceDataChangedError
 from app.services.excel.carrier_export import CarrierExportPreview, CarrierExportResult
+from app.services.excel.posting_export import PostingExportResult
 from app.services.excel.workbook import (
     WorkbookChangedError,
     WorkbookLockedError,
@@ -331,6 +332,7 @@ class MainWindow(QMainWindow):
             self.start_payment_sync
         )
         self.workflow_page.export_carrier_requested.connect(self.start_carrier_export)
+        self.workflow_page.export_posting_requested.connect(self.start_posting_export)
         self.workflow_page.run_rpa_expense_requested.connect(
             self.start_rpa_expense
         )
@@ -700,6 +702,53 @@ class MainWindow(QMainWindow):
             self._excel_tasks.submit("carrier_export", service.analyze, names, with_progress=True)
         except Exception as exc:
             self._show_excel_error(exc, operation="carrier_export")
+
+    @Slot()
+    def start_posting_export(self) -> None:
+        if self._excel_tasks is None or self._excel_tasks.is_busy:
+            QMessageBox.information(self, "Excel đang chạy", "Hãy chờ tác vụ Excel hiện tại hoàn tất.")
+            return
+        service = getattr(self._excel_tasks, "posting_export_service", None)
+        if service is None:
+            QMessageBox.warning(self, "Chưa thể xuất", "Dịch vụ xuất kết quả nhập BK chưa sẵn sàng.")
+            return
+        try:
+            preview = service.latest_preview()
+            if preview is None:
+                QMessageBox.information(self, "Chưa có dữ liệu", "Chưa có lượt nhập BK hoàn tất với dữ liệu để xuất.")
+                return
+            output_dir = str(_attribute(self._settings, "output_dir", default="") or "").strip()
+            default_dir = Path(output_dir) if output_dir else Path.home()
+            suggested = (
+                preview.last_export_path
+                if preview.last_export_path is not None and preview.last_export_path.parent.is_dir()
+                else default_dir / preview.filename
+            )
+            filename, _selected_filter = QFileDialog.getSaveFileName(
+                self, "Lưu kết quả nhập BK", str(suggested), "Excel Workbook (*.xlsx)"
+            )
+            if not filename:
+                return
+            target = Path(filename)
+            if target.suffix.lower() != ".xlsx":
+                target = target.with_suffix(".xlsx")
+            overwrite = False
+            if target.exists():
+                answer = QMessageBox.question(
+                    self, "File đã tồn tại", f"{target.name} đã tồn tại. Bạn có muốn thay file này?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+                overwrite = True
+            self._excel_context = "workflow"
+            self._excel_tasks.submit(
+                "posting_export", service.export, preview.run_id, target,
+                overwrite=overwrite, with_progress=True,
+            )
+        except Exception as exc:
+            self._show_excel_error(exc, operation="posting_export")
 
     def _choose_carrier_export(self, preview: CarrierExportPreview) -> None:
         if preview.allocation_rows:
@@ -1803,6 +1852,15 @@ class MainWindow(QMainWindow):
                 f"File: {result.target_path}",
             )
             return
+        if isinstance(result, PostingExportResult):
+            self._load_excel_history()
+            QMessageBox.information(
+                self, "Đã xuất kết quả nhập BK",
+                f"Đã xuất {result.row_count} dòng của {result.invoice_count} HĐ.\n"
+                f"Tổng tiền ghi lượt này: {result.written_total:,.0f} đ\n\n"
+                f"File: {result.target_path}",
+            )
+            return
         MainWindow._clear_excel_review(self)
         if self._excel_context == "configuration":
             valid = bool(_attribute(result, "is_valid", default=False))
@@ -2063,6 +2121,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Sẵn sàng", 3000)
         self._excel_operation = None
         self._excel_context = None
+        if operation == "posting_export":
+            self._load_excel_history()
 
     def _show_excel_error(
         self,
@@ -2252,6 +2312,27 @@ class MainWindow(QMainWindow):
                     f"bỏ qua {_attribute(record, 'skipped_items', default=0)}"
                 )
             self.workflow_page.set_excel_result(ui_operation, summary)
+        service = getattr(self._excel_tasks, "posting_export_service", None)
+        try:
+            preview = service.latest_preview() if service is not None else None
+        except Exception:
+            LOGGER.exception("Không đọc được dữ liệu xuất kết quả nhập BK.")
+            preview = None
+        self._latest_posting_export_path = (
+            preview.last_export_path if preview is not None else None
+        )
+        available_file = bool(
+            self._latest_posting_export_path and self._latest_posting_export_path.is_file()
+        )
+        self.workflow_page.set_latest_excel_data_available("posting_export", available_file)
+        if preview is None:
+            self.workflow_page.set_posting_export_available(False)
+        else:
+            self.workflow_page.set_posting_export_available(
+                True,
+                f"Lượt #{preview.run_id}: {preview.invoice_count} HĐ, "
+                f"{preview.row_count} dòng; đã ghi {preview.written_total:,.0f} đ",
+            )
 
     @Slot(str)
     def show_latest_excel_data(self, operation: str) -> None:
@@ -2263,6 +2344,12 @@ class MainWindow(QMainWindow):
             self._open_workbook_path(
                 getattr(self, "_latest_carrier_export_path", None),
                 label="file xuất theo bên VT",
+            )
+            return
+        if normalized == "posting_export":
+            self._open_workbook_path(
+                getattr(self, "_latest_posting_export_path", None),
+                label="file kết quả nhập BK",
             )
             return
         outcomes = list(self._latest_excel_outcomes.get(normalized, ()))

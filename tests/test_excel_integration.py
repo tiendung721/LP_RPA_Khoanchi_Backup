@@ -151,6 +151,7 @@ class _PostingHistoryRepository:
     def __init__(self) -> None:
         self.items: list[dict[str, Any]] = []
         self.metadata: dict[str, Any] = {}
+        self.export_snapshots: dict[int, dict[str, Any]] = {}
 
     def successful_source_indices(self, _batch_hash: str) -> set[int]:
         return set()
@@ -159,6 +160,9 @@ class _PostingHistoryRepository:
         self.items.extend(dict(item) for item in items)
         self.metadata = dict(values)
         return []
+
+    def save_export_snapshot(self, run_id: int, snapshot: dict[str, Any]) -> None:
+        self.export_snapshots[run_id] = snapshot
 
 
 def _sha256(path: Path) -> str:
@@ -450,6 +454,8 @@ def test_posting_reader_accepts_v1_review_fields_without_using_them_for_amount(
             "rule": "CV",
             "invoice_no": "000130/HD",
             "invoice_date": None,
+            "invoice_container_count": None,
+            "container_count_basis": "UNKNOWN",
                 "carrier": "Vận tải ABC",
                 "amount": 2_484_000,
                 "input_sqt": None,
@@ -1556,7 +1562,12 @@ def test_posting_allocates_two_documents_to_two_months_in_one_atomic_apply(
         )
     workbook.save(target)
     workbook.close()
-    service = _posting_service(ready, target, runtime)
+    runs = _RunHistoryRepository()
+    postings = _PostingHistoryRepository()
+    service = _posting_service(
+        ready, target, runtime,
+        run_repository=runs, posting_repository=postings,
+    )
 
     unassigned = service.analyze()
     assert len(unassigned.source_groups) == 2
@@ -1576,6 +1587,12 @@ def test_posting_allocates_two_documents_to_two_months_in_one_atomic_apply(
     result = service.apply(plan, {})
     assert result.target_sheets == ("T06 26", "T07 26")
     assert result.posted_source_items == 15
+    snapshot = postings.export_snapshots[result.run_id]
+    assert snapshot["invoice_count"] == 2
+    assert snapshot["row_count"] == 15
+    assert {row["source_document_name"] for row in snapshot["rows"]} == {
+        "Hoa_don_A.pdf", "Hoa_don_B.pdf"
+    }
     assert len(list((runtime / "Backup").glob("*.xlsx"))) == 1
     workbook = load_workbook(target, data_only=False)
     try:
@@ -2885,6 +2902,7 @@ def test_posting_history_preserves_keep_action_and_cell_value(
     assert postings.items[0]["value_after"] == existing
     assert postings.items[0]["match_reason"] == "CONTAINER_ONLY"
     assert postings.metadata["batch_id"] == 71
+    assert postings.export_snapshots[result.run_id]["rows"][0]["status"] == "Giữ nguyên"
     assert not (runtime_dir / "Backup").exists()
 
 

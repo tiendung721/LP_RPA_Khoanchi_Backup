@@ -182,6 +182,50 @@ class ExpensePostingRepository:
             database if isinstance(database, Database) else Database(database)
         )
 
+    def save_export_snapshot(self, run_id: int, snapshot: Mapping[str, Any]) -> None:
+        """Giữ dữ liệu nguồn và kết quả thực ghi của một lượt nhập BK."""
+
+        with self.database.transaction(immediate=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO expense_posting_exports (run_id, snapshot_json)
+                VALUES (?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET snapshot_json = excluded.snapshot_json
+                """,
+                (run_id, _json_text(dict(snapshot))),
+            )
+
+    def get_export_snapshot(self, run_id: int) -> dict[str, Any] | None:
+        row = self.database.query_one(
+            "SELECT snapshot_json FROM expense_posting_exports WHERE run_id = ?",
+            (run_id,),
+        )
+        if row is None:
+            return None
+        value = _json_value(row["snapshot_json"])
+        return dict(value) if isinstance(value, dict) else None
+
+    def get_export_path(self, run_id: int) -> Path | None:
+        row = self.database.query_one(
+            "SELECT last_export_path FROM expense_posting_exports WHERE run_id = ?",
+            (run_id,),
+        )
+        value = row["last_export_path"] if row is not None else None
+        return Path(str(value)) if value else None
+
+    def set_export_path(self, run_id: int, path: str | Path) -> None:
+        with self.database.transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE expense_posting_exports
+                SET last_export_path = ?, exported_at = ?
+                WHERE run_id = ?
+                """,
+                (str(path), local_now_iso(), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"Không có dữ liệu xuất của lượt nhập #{run_id}.")
+
     def create_item(
         self,
         *,

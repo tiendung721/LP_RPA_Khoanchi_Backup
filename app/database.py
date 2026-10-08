@@ -170,7 +170,11 @@ class Database:
                 self._migration_26(connection)
                 connection.execute("PRAGMA user_version = 26")
                 current_version = 26
-            self._ensure_schema_26(connection)
+            if current_version < 27:
+                self._migration_27(connection)
+                connection.execute("PRAGMA user_version = 27")
+                current_version = 27
+            self._ensure_schema_27(connection)
             if current_version != SQLITE_SCHEMA_VERSION:
                 raise DatabaseError("Không thể nâng cấp database đến phiên bản hiện tại.")
 
@@ -1665,6 +1669,27 @@ class Database:
                 run_id TEXT NOT NULL,
                 launched_at TEXT NOT NULL,
                 PRIMARY KEY (workbook_key, sheet_name, row_number)
+            )
+            """
+        )
+
+    @staticmethod
+    def _migration_27(connection: sqlite3.Connection) -> None:
+        """Lưu ảnh chụp đầy đủ của từng lượt nhập để xuất Excel sau khi khởi động lại."""
+
+        Database._ensure_schema_27(connection)
+
+    @staticmethod
+    def _ensure_schema_27(connection: sqlite3.Connection) -> None:
+        Database._ensure_schema_26(connection)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS expense_posting_exports (
+                run_id INTEGER PRIMARY KEY,
+                snapshot_json TEXT NOT NULL,
+                last_export_path TEXT,
+                exported_at TEXT,
+                FOREIGN KEY (run_id) REFERENCES excel_runs(id) ON DELETE CASCADE
             )
             """
         )

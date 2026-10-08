@@ -69,6 +69,7 @@ from .posting import (
     ExpensePostingService,
     classify_target_cell,
 )
+from .posting_export import PostingExportService, PostingExportPreview, PostingExportResult
 from .payment_sync import (
     DATE_HEADER,
     SUMMARY_HEADERS,
@@ -133,6 +134,9 @@ __all__ = [
     "FieldWriteOutcome",
     "ExpensePostingError",
     "ExpensePostingService",
+    "PostingExportService",
+    "PostingExportPreview",
+    "PostingExportResult",
     "HeaderResolution",
     "HeaderResolutionError",
     "HeaderResolver",

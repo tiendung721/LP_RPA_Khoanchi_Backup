@@ -41,6 +41,7 @@ from app.services.excel import (
     DailySyncService,
     ExcelConfigurationService,
     ExpensePostingService,
+    PostingExportService,
     PaymentSyncService,
 )
 from app.services.excel.drafts import ExcelDraftService
@@ -122,6 +123,7 @@ class ApplicationRuntime:
             expense_posting_service=self.expense_posting_service,
             payment_sync_service=self.payment_sync_service,
             carrier_export_service=self.carrier_export_service,
+            posting_export_service=self.posting_export_service,
             draft_service=self.excel_draft_service,
         )
         self.rpa_expense_service = RpaExpenseService(
@@ -181,6 +183,10 @@ class ApplicationRuntime:
             settings,
             run_repository=self.excel_run_repository,
         )
+        self.posting_export_service = PostingExportService(
+            self.excel_run_repository,
+            self.expense_posting_repository,
+        )
         self.excel_configuration_service = ExcelConfigurationService(settings)
 
     def apply_settings(self, settings: AppSettings) -> AppSettings:
@@ -217,6 +223,7 @@ class ApplicationRuntime:
                 expense_posting_service=self.expense_posting_service,
                 payment_sync_service=self.payment_sync_service,
                 carrier_export_service=self.carrier_export_service,
+                posting_export_service=self.posting_export_service,
             )
         self.rpa_expense_service = RpaExpenseService(
             settings,

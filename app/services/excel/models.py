@@ -18,6 +18,7 @@ class ExcelOperation(str, Enum):
     EXPENSE_POSTING = "EXPENSE_POSTING"
     PAYMENT_SYNC = "PAYMENT_SYNC"
     CARRIER_EXPORT = "CARRIER_EXPORT"
+    POSTING_EXPORT = "POSTING_EXPORT"
 
 
 class ExcelRunStatus(str, Enum):
@@ -599,6 +600,7 @@ class PostingPlan:
     target_sheets: set[str] = field(default_factory=set)
     source_groups: list[PostingSourceGroup] = field(default_factory=list)
     split_document_ids: set[str] = field(default_factory=set)
+    source_rows: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def operation(self) -> ExcelOperation:

@@ -44,6 +44,13 @@ Bước 1 hoặc chọn JSON thủ công.
 - Với từng chứng từ/hóa đơn, ứng dụng tìm dòng trong sheet tháng được chọn và hai
   tháng liền trước, rồi ghi khoản chi ngay tại sheet chứa dòng tìm thấy. Ứng dụng
   không sao chép hoặc tạo dòng kế hoạch mới.
+- Sau một lượt nhập BK hoàn tất, bấm **Kết quả nhập BK → Excel / Xuất Excel** ở
+  Bước 3 để lưu một file `.xlsx` gồm một sheet. File có tất cả dòng khoản chi của
+  lượt nguồn đã xác nhận, kể cả dòng giữ nguyên, bỏ qua hoặc đã nhập từ trước;
+  mỗi dòng có tên file HĐ nguồn và kết quả đối chiếu trong BK. Nút xuất dùng lượt
+  nhập hoàn tất gần nhất, vẫn dùng được sau khi mở lại ứng dụng. Tổng tiền ghi
+  lượt này chỉ tính ô phí thực ghi một lần; điều chỉnh cộng/trừ tính theo phần
+  chênh lệch của lần điều chỉnh.
 - Nguồn Bảng kê đối chiếu riêng trên toàn bộ các sheet tháng theo thứ tự ưu tiên:
   SQT có sẵn trong JSON; container duy nhất; container + B/L; cuối cùng mới dùng
   tàu/chuyến khi B/L không có hoặc dòng BK không có B/L.

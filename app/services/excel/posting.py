@@ -435,6 +435,7 @@ class ExpensePostingService:
                 source_kind=source_kind,
                 source_groups=source_groups,
                 split_document_ids=set(split_document_ids or ()),
+                source_rows=[dict(row) for row in document_rows],
                 target_sheets={
                     item.sheet_name for item in items if item.sheet_name is not None
                 },
@@ -751,7 +752,7 @@ class ExpensePostingService:
                 ),
                 item_outcomes=posting_outcomes(actions),
             )
-            self._finish_result(result)
+            self._finish_result(result, plan=plan, actions=actions)
             return result
         except Exception as exc:
             if workbook_replaced and backup_path is not None:
@@ -1032,6 +1033,7 @@ class ExpensePostingService:
             reconciliation_source_count=plan.reconciliation_source_count,
             confirmation_required=plan.confirmation_required,
             confirmation_done=plan.confirmation_done,
+            source_rows=plan.source_rows,
         )
         self._update_run(
             plan.run_id,
@@ -1234,6 +1236,7 @@ class ExpensePostingService:
             confirmation_required=plan.confirmation_required,
             confirmation_done=plan.confirmation_done,
             source_kind="BANG_KE",
+            source_rows=plan.source_rows,
             target_sheets={
                 item.sheet_name for item in items if item.sheet_name is not None
             },
@@ -1453,7 +1456,7 @@ class ExpensePostingService:
                 ),
                 item_outcomes=posting_outcomes(actions),
             )
-            self._finish_result(result)
+            self._finish_result(result, plan=plan, actions=actions)
             return result
         except Exception as exc:
             if replaced and backup_path is not None:
@@ -1722,7 +1725,7 @@ class ExpensePostingService:
                 ),
                 item_outcomes=posting_outcomes(actions),
             )
-            self._finish_result(result)
+            self._finish_result(result, plan=plan, actions=actions)
             return result
         except Exception as exc:
             if replaced and backup_path is not None:
@@ -1799,6 +1802,8 @@ class ExpensePostingService:
                     "rule": rule.strip().upper() if isinstance(rule, str) else None,
                     "invoice_no": invoice_no,
                     "invoice_date": row.invoice_date,
+                    "invoice_container_count": row.invoice_container_count,
+                    "container_count_basis": row.container_count_basis,
                     "carrier": carrier,
                     "amount": amount,
                     "input_sqt": input_sqt,
@@ -4986,7 +4991,26 @@ class ExpensePostingService:
         if self.run_repository is not None and run_id is not None:
             self.run_repository.update_run(run_id, **changes)
 
-    def _finish_result(self, result: PostingResult) -> None:
+    def _finish_result(
+        self,
+        result: PostingResult,
+        *,
+        plan: PostingPlan | None = None,
+        actions: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
+        save_snapshot = getattr(self.posting_repository, "save_export_snapshot", None)
+        if (
+            callable(save_snapshot)
+            and plan is not None
+            and plan.source_rows
+            and result.run_id is not None
+        ):
+            from .posting_export import build_posting_export_snapshot
+
+            save_snapshot(
+                result.run_id,
+                build_posting_export_snapshot(plan, actions, result),
+            )
         if self.rpa_tracking_repository is not None:
             changed_by_sheet: dict[str, set[str]] = defaultdict(set)
             changed_rows: set[tuple[str, int, str]] = set()

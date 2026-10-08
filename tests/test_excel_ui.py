@@ -48,7 +48,7 @@ from app.ui.settings_page import SettingsPage
 from app.ui.workflow_page import WorkflowPage
 
 
-def test_step_three_has_four_primary_actions_and_statuses(qtbot) -> None:
+def test_step_three_has_posting_export_action_and_status(qtbot) -> None:
     page = WorkflowPage()
     qtbot.addWidget(page)
 
@@ -58,11 +58,22 @@ def test_step_three_has_four_primary_actions_and_statuses(qtbot) -> None:
     assert primary_buttons == [
         page.sync_daily_button,
         page.post_expenses_button,
+        page.export_posting_button,
         page.sync_payment_button,
         page.export_carrier_button,
     ]
     assert page.sync_daily_button.text() == "Đồng bộ"
     assert page.post_expenses_button.text() == "Nhập vào BK"
+    assert page.export_posting_button.text() == "Xuất Excel"
+    assert not page.export_posting_button.isEnabled()
+    page.set_posting_export_available(True, "Lượt #1: 2 HĐ")
+    assert page.export_posting_button.isEnabled()
+    with qtbot.waitSignal(page.export_posting_requested):
+        page.export_posting_button.click()
+    page.set_excel_running("posting_export")
+    assert not page.export_posting_button.isEnabled()
+    page.set_excel_idle("posting_export")
+    assert page.export_posting_button.isEnabled()
     assert page.sync_payment_button.text() == "Đồng bộ"
     assert page.sync_status_label.text() == "Đồng bộ gần nhất: —"
     assert page.posting_status_label.text() == "Nhập khoản chi gần nhất: —"

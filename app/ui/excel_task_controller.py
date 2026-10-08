@@ -79,6 +79,7 @@ class ExcelTaskController(QObject):
     POSTING_OPERATION = "posting"
     PAYMENT_SYNC_OPERATION = "payment_sync"
     CARRIER_EXPORT_OPERATION = "carrier_export"
+    POSTING_EXPORT_OPERATION = "posting_export"
 
     def __init__(
         self,
@@ -86,6 +87,7 @@ class ExcelTaskController(QObject):
         expense_posting_service: Any | None = None,
         payment_sync_service: Any | None = None,
         carrier_export_service: Any | None = None,
+        posting_export_service: Any | None = None,
         draft_service: Any | None = None,
         parent: QObject | None = None,
     ) -> None:
@@ -94,6 +96,7 @@ class ExcelTaskController(QObject):
         self.expense_posting_service = expense_posting_service
         self.payment_sync_service = payment_sync_service
         self.carrier_export_service = carrier_export_service
+        self.posting_export_service = posting_export_service
         self.draft_service = draft_service
         self._executor = ThreadPoolExecutor(
             max_workers=1,
@@ -134,6 +137,8 @@ class ExcelTaskController(QObject):
             return cls.PAYMENT_SYNC_OPERATION
         if value in {"carrier_export", "export_carrier", "xlsx_by_carrier"}:
             return cls.CARRIER_EXPORT_OPERATION
+        if value in {"posting_export", "export_posting", "expense_export"}:
+            return cls.POSTING_EXPORT_OPERATION
         raise ValueError(f"Nghiệp vụ Excel không hợp lệ: {operation!r}")
 
     @property
@@ -157,6 +162,7 @@ class ExcelTaskController(QObject):
         expense_posting_service: Any | None = None,
         payment_sync_service: Any | None = None,
         carrier_export_service: Any | None = None,
+        posting_export_service: Any | None = None,
     ) -> None:
         """Thay service sau khi settings/runtime được cập nhật."""
 
@@ -170,6 +176,8 @@ class ExcelTaskController(QObject):
             self.payment_sync_service = payment_sync_service
         if carrier_export_service is not None:
             self.carrier_export_service = carrier_export_service
+        if posting_export_service is not None:
+            self.posting_export_service = posting_export_service
 
     def submit(
         self,
@@ -242,7 +250,9 @@ class ExcelTaskController(QObject):
             return self.start_sync(**analyze_kwargs)
         if normalized == self.POSTING_OPERATION:
             return self.start_posting(**analyze_kwargs)
-        return self.start_payment_sync(**analyze_kwargs)
+        if normalized == self.PAYMENT_SYNC_OPERATION:
+            return self.start_payment_sync(**analyze_kwargs)
+        raise ValueError(f"Tác vụ {normalized} không dùng pha phân tích.")
 
     def _start_analysis(
         self,

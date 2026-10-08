@@ -59,6 +59,7 @@ class WorkflowPage(QWidget):
     post_expenses_requested = Signal()
     sync_payment_requested = Signal()
     export_carrier_requested = Signal()
+    export_posting_requested = Signal()
     run_rpa_expense_requested = Signal()
     view_latest_excel_requested = Signal(str)
     view_latest_rpa_requested = Signal()
@@ -67,6 +68,7 @@ class WorkflowPage(QWidget):
     POSTING_OPERATION = "posting"
     PAYMENT_SYNC_OPERATION = "payment_sync"
     CARRIER_EXPORT_OPERATION = "carrier_export"
+    POSTING_EXPORT_OPERATION = "posting_export"
 
     def __init__(
         self,
@@ -89,6 +91,10 @@ class WorkflowPage(QWidget):
         self.post_expenses_button.clicked.connect(self.post_expenses_requested)
         self.sync_payment_button.clicked.connect(self.sync_payment_requested)
         self.export_carrier_button.clicked.connect(self.export_carrier_requested)
+        self.export_posting_button.clicked.connect(self.export_posting_requested)
+        self.view_posting_export_button.clicked.connect(
+            lambda: self.view_latest_excel_requested.emit(self.POSTING_EXPORT_OPERATION)
+        )
         self.run_rpa_expense_button.clicked.connect(
             self.run_rpa_expense_requested
         )
@@ -317,6 +323,11 @@ class WorkflowPage(QWidget):
         self.carrier_export_status_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
+        self.posting_export_status_label = QLabel("Chưa có lượt nhập BK để xuất")
+        self.posting_export_status_label.setObjectName("postingExportStatusLabel")
+        self.posting_export_status_label.setWordWrap(True)
+        self.posting_export_status_label.setProperty("muted", True)
+        self.posting_export_status_label.setMinimumWidth(0)
         self.sync_daily_button = QPushButton("Đồng bộ")
         self.sync_daily_button.setObjectName("syncDailyWorkbookButton")
         self.sync_daily_button.setProperty("primary", True)
@@ -333,6 +344,11 @@ class WorkflowPage(QWidget):
         self.export_carrier_button.setObjectName("exportCarrierWorkbookButton")
         self.export_carrier_button.setProperty("primary", True)
         self.export_carrier_button.setAccessibleName("Xuất phí trong Nam theo bên vận tải từ BK")
+        self.export_posting_button = QPushButton("Xuất Excel")
+        self.export_posting_button.setObjectName("exportPostingWorkbookButton")
+        self.export_posting_button.setProperty("primary", True)
+        self.export_posting_button.setAccessibleName("Xuất các khoản chi của lượt nhập BK gần nhất")
+        self.export_posting_button.setEnabled(False)
         self.view_daily_sync_button = QPushButton("Chưa có dữ liệu")
         self.view_daily_sync_button.setObjectName("viewLatestDailySyncButton")
         self.view_expense_posting_button = QPushButton("Chưa có dữ liệu")
@@ -343,11 +359,14 @@ class WorkflowPage(QWidget):
         self.view_payment_sync_button.setObjectName("viewLatestPaymentSyncButton")
         self.view_carrier_export_button = QPushButton("Chưa có file")
         self.view_carrier_export_button.setObjectName("viewLatestCarrierExportButton")
+        self.view_posting_export_button = QPushButton("Chưa có file")
+        self.view_posting_export_button.setObjectName("viewLatestPostingExportButton")
         for view_button in (
             self.view_daily_sync_button,
             self.view_expense_posting_button,
             self.view_payment_sync_button,
             self.view_carrier_export_button,
+            self.view_posting_export_button,
         ):
             view_button.setProperty("link", True)
             view_button.setEnabled(False)
@@ -361,6 +380,7 @@ class WorkflowPage(QWidget):
             self.post_expenses_button,
             self.sync_payment_button,
             self.export_carrier_button,
+            self.export_posting_button,
         ):
             button.setFixedWidth(140)
             button.setMinimumHeight(38)
@@ -426,6 +446,13 @@ class WorkflowPage(QWidget):
             self.posting_status_label,
             self.post_expenses_button,
             self.view_expense_posting_button,
+        )
+        self.posting_export_action = add_excel_action(
+            "Kết quả nhập BK → Excel",
+            "Xuất tất cả khoản chi của lượt nhập BK gần nhất, kèm file nguồn và trạng thái.",
+            self.posting_export_status_label,
+            self.export_posting_button,
+            self.view_posting_export_button,
         )
         self.payment_sync_action = add_excel_action(
             "BK → Thanh toán",
@@ -514,6 +541,7 @@ class WorkflowPage(QWidget):
         self.daily_sync_status_label = self.sync_status_label
         self.expense_posting_status_label = self.posting_status_label
         self._excel_running_operation: str | None = None
+        self._posting_export_available = False
         self._rpa_running = False
         self._rpa_button_text = self.run_rpa_expense_button.text()
         self._excel_button_texts = {
@@ -521,6 +549,7 @@ class WorkflowPage(QWidget):
             self.POSTING_OPERATION: self.post_expenses_button.text(),
             self.PAYMENT_SYNC_OPERATION: self.sync_payment_button.text(),
             self.CARRIER_EXPORT_OPERATION: self.export_carrier_button.text(),
+            self.POSTING_EXPORT_OPERATION: self.export_posting_button.text(),
         }
 
     def resizeEvent(self, event: Any) -> None:
@@ -660,6 +689,8 @@ class WorkflowPage(QWidget):
             return WorkflowPage.PAYMENT_SYNC_OPERATION
         if value in {"carrier_export", "export_carrier", "xlsx_by_carrier"}:
             return WorkflowPage.CARRIER_EXPORT_OPERATION
+        if value in {"posting_export", "export_posting", "expense_export"}:
+            return WorkflowPage.POSTING_EXPORT_OPERATION
         raise ValueError(f"Nghiệp vụ Excel không hợp lệ: {operation!r}")
 
     def set_excel_running(self, operation: Any, message: str = "") -> None:
@@ -673,12 +704,14 @@ class WorkflowPage(QWidget):
             self.post_expenses_button,
             self.sync_payment_button,
             self.export_carrier_button,
+            self.export_posting_button,
         ):
             set_button_loading(button, False)
         self.sync_daily_button.setEnabled(False)
         self.post_expenses_button.setEnabled(False)
         self.sync_payment_button.setEnabled(False)
         self.export_carrier_button.setEnabled(False)
+        self.export_posting_button.setEnabled(False)
         self.run_rpa_expense_button.setEnabled(False)
         if normalized == self.SYNC_OPERATION:
             set_button_loading(self.sync_daily_button, True)
@@ -699,10 +732,14 @@ class WorkflowPage(QWidget):
                 "Đồng bộ BK → Thanh toán: "
                 f"{message or 'Đang phân tích dữ liệu…'}"
             )
-        else:
+        elif normalized == self.CARRIER_EXPORT_OPERATION:
             set_button_loading(self.export_carrier_button, True)
             self.export_carrier_button.setText("Đang xuất…")
             self.carrier_export_status_label.setText(message or "Đang đọc dữ liệu BK…")
+        else:
+            set_button_loading(self.export_posting_button, True)
+            self.export_posting_button.setText("Đang xuất…")
+            self.posting_export_status_label.setText(message or "Đang dựng file Excel…")
 
     def set_excel_progress(self, operation: Any, message: str) -> None:
         normalized = self._excel_operation(operation)
@@ -714,8 +751,10 @@ class WorkflowPage(QWidget):
             self.payment_sync_status_label.setText(
                 f"Đồng bộ BK → Thanh toán: {message}"
             )
-        else:
+        elif normalized == self.CARRIER_EXPORT_OPERATION:
             self.carrier_export_status_label.setText(f"Xuất theo bên VT: {message}")
+        else:
+            self.posting_export_status_label.setText(f"Xuất kết quả nhập BK: {message}")
 
     def set_excel_result(self, operation: Any, result: Any = None) -> None:
         """Cập nhật kết quả gần nhất từ dataclass, mapping hoặc chuỗi."""
@@ -737,11 +776,13 @@ class WorkflowPage(QWidget):
             self.payment_sync_status_label.setText(
                 f"Đồng bộ BK → Thanh toán gần nhất: {message}"
             )
-        else:
+        elif normalized == self.CARRIER_EXPORT_OPERATION:
             self.carrier_export_status_label.setText(f"Xuất theo bên VT gần nhất: {message}")
+        else:
+            self.posting_export_status_label.setText(f"Xuất kết quả nhập BK: {message}")
 
     def set_excel_idle(self, operation: Any | None = None) -> None:
-        """Khôi phục hai nút sau khi controller phát ``finished``."""
+        """Khôi phục các nút sau khi controller phát ``finished``."""
 
         if operation is not None:
             self._excel_operation(operation)
@@ -752,6 +793,7 @@ class WorkflowPage(QWidget):
             self.post_expenses_button,
             self.sync_payment_button,
             self.export_carrier_button,
+            self.export_posting_button,
         ):
             set_button_loading(button, False)
         self.sync_daily_button.setText(
@@ -766,11 +808,15 @@ class WorkflowPage(QWidget):
         self.export_carrier_button.setText(
             self._excel_button_texts[self.CARRIER_EXPORT_OPERATION]
         )
+        self.export_posting_button.setText(
+            self._excel_button_texts[self.POSTING_EXPORT_OPERATION]
+        )
         enabled = not self._rpa_running
         self.sync_daily_button.setEnabled(enabled)
         self.post_expenses_button.setEnabled(enabled)
         self.sync_payment_button.setEnabled(enabled)
         self.export_carrier_button.setEnabled(enabled)
+        self.export_posting_button.setEnabled(enabled and self._posting_export_available)
         self.run_rpa_expense_button.setEnabled(enabled)
 
     def set_excel_actions_enabled(self, enabled: bool) -> None:
@@ -780,6 +826,7 @@ class WorkflowPage(QWidget):
         self.post_expenses_button.setEnabled(enabled)
         self.sync_payment_button.setEnabled(enabled)
         self.export_carrier_button.setEnabled(enabled)
+        self.export_posting_button.setEnabled(enabled and self._posting_export_available)
         self.run_rpa_expense_button.setEnabled(enabled and not self._rpa_running)
 
     def set_rpa_running(self, message: str = "") -> None:
@@ -790,6 +837,7 @@ class WorkflowPage(QWidget):
         self.post_expenses_button.setEnabled(False)
         self.sync_payment_button.setEnabled(False)
         self.export_carrier_button.setEnabled(False)
+        self.export_posting_button.setEnabled(False)
         self.run_rpa_expense_button.setEnabled(False)
         self.run_rpa_expense_button.setText("Đang chuẩn bị…")
         self.rpa_expense_status_label.setText(
@@ -818,10 +866,26 @@ class WorkflowPage(QWidget):
             self.POSTING_OPERATION: self.view_expense_posting_button,
             self.PAYMENT_SYNC_OPERATION: self.view_payment_sync_button,
             self.CARRIER_EXPORT_OPERATION: self.view_carrier_export_button,
+            self.POSTING_EXPORT_OPERATION: self.view_posting_export_button,
         }
         button = buttons[normalized]
-        button.setText(("Mở file ›" if available else "Chưa có file") if normalized == self.CARRIER_EXPORT_OPERATION else ("Xem lại ›" if available else "Chưa có dữ liệu"))
+        if normalized in {self.CARRIER_EXPORT_OPERATION, self.POSTING_EXPORT_OPERATION}:
+            button.setText("Mở file ›" if available else "Chưa có file")
+        else:
+            button.setText("Xem lại ›" if available else "Chưa có dữ liệu")
         button.setEnabled(bool(available))
+
+    def set_posting_export_available(self, available: bool, message: str = "") -> None:
+        self._posting_export_available = bool(available)
+        self.export_posting_button.setEnabled(
+            bool(available) and not self._rpa_running and self._excel_running_operation is None
+        )
+        self.posting_export_status_label.setText(
+            message or (
+                "Sẵn sàng xuất lượt nhập gần nhất"
+                if available else "Chưa có lượt nhập BK để xuất"
+            )
+        )
 
     def set_latest_rpa_data_available(self, available: bool) -> None:
         self.view_rpa_expense_button.setText(
@@ -839,6 +903,7 @@ class WorkflowPage(QWidget):
             self.post_expenses_button.setEnabled(True)
             self.sync_payment_button.setEnabled(True)
             self.export_carrier_button.setEnabled(True)
+            self.export_posting_button.setEnabled(self._posting_export_available)
             self.run_rpa_expense_button.setEnabled(True)
 
     @property
