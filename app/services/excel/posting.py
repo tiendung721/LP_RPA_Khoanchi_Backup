@@ -2682,6 +2682,7 @@ class ExpensePostingService:
                 selected = candidates[0]
                 item.match_reason = "UNIQUE_CONTAINER"
             elif len(candidates) > 1:
+                unmatched_bl_candidates: list[RowCandidate] | None = None
                 if item.bl:
                     matching_bl = bl_matches(candidates, item.bl)
                     if not matching_bl:
@@ -2691,6 +2692,7 @@ class ExpensePostingService:
                             if not candidate.bl_keys
                         ]
                         if unknown_bl:
+                            unmatched_bl_candidates = candidates
                             candidates = ordered_candidates(unknown_bl)
                         else:
                             item.row_candidates = candidates
@@ -2747,7 +2749,11 @@ class ExpensePostingService:
                             candidates = aliases
 
                 if selected is None:
-                    item.row_candidates = ordered_candidates(candidates)
+                    # The blank-B/L fallback may help automatic matching, but
+                    # it must not hide other container rows from manual review.
+                    item.row_candidates = ordered_candidates(
+                        unmatched_bl_candidates or candidates
+                    )
                     conflicts.append(
                         self._item_conflict(
                             batch_hash,

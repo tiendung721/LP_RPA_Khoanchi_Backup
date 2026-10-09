@@ -861,6 +861,110 @@ def test_bang_ke_duplicate_container_rejects_known_bl_mismatch(
     assert plan.conflicts[0].conflict_type is ConflictType.BL_MISMATCH
 
 
+def test_bang_ke_bl_mismatch_keeps_all_container_rows_selectable(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "bang-ke.json"
+    target = tmp_path / "BK.xlsx"
+    container = "VIMU2250494"
+    source_bl = "VOC022609HPHSGN0013"
+    _save_bang_ke_ready(
+        ready,
+        [
+            {
+                "container": container,
+                "bl": source_bl,
+                "vessel_name": "BIENDONG MARINER MB2630S",
+                "fee": fee,
+                "amount": amount,
+            }
+            for fee, amount in (
+                ("VSDL", 310_000),
+                ("NH", 517_320),
+                ("HV", 350_000),
+            )
+        ],
+    )
+    workbook = Workbook()
+    september = _new_full_posting_sheet(workbook, "T09 26")
+    _add_full_plan_row(
+        september, 2, sqt=857, container=container,
+        closing_date="2026-09-03", bl="VOC22609HPHSGN0013",
+    )
+    september.cell(2, 7).value = "BIENDONG MARINER MB2630S"
+    august = _new_full_posting_sheet(workbook, "T08 26")
+    _add_full_plan_row(
+        august, 43, sqt=795, container=container,
+        closing_date="2026-08-12",
+    )
+    august.cell(43, 7).value = "BIENDONG MARINER MB2627S"
+    workbook.save(target)
+    workbook.close()
+
+    service = ExpensePostingService(_BangKeProvider(ready), bk_path=target)
+    plan = service.analyze(batch_id=1)
+    assert len(plan.items) == 3
+    assert len(plan.conflicts) == 3
+    assert all(
+        conflict.conflict_type is ConflictType.MULTIPLE_CONTAINER_MATCH
+        and {(candidate.source_sheet, candidate.row, candidate.sqt)
+             for candidate in conflict.row_candidates}
+        == {("T08 26", 43, 795), ("T09 26", 2, 857)}
+        for conflict in plan.conflicts
+    )
+
+    refined = service.refine(
+        plan,
+        {
+            plan.conflicts[0].conflict_id: {
+                "action": "SELECT_ROW",
+                "selected_source_sheet": "T09 26",
+                "selected_row": 2,
+            }
+        },
+    )
+    assert not refined.conflicts
+    assert {(item.sheet_name, item.target_row, item.source_sqt)
+            for item in refined.items} == {("T09 26", 2, 857)}
+
+
+def test_bang_ke_blank_bl_vessel_match_still_selects_row_automatically(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "bang-ke.json"
+    target = tmp_path / "BK.xlsx"
+    container = "OOLU2961703"
+    _save_bang_ke_ready(
+        ready,
+        [{
+            "container": container,
+            "bl": "SOURCE-BL",
+            "vessel_name": "VSC PROMOTE 2613S",
+        }],
+    )
+    workbook = Workbook()
+    august = _new_full_posting_sheet(workbook, "T08 26")
+    _add_full_plan_row(
+        august, 2, sqt=801, container=container, closing_date="2026-08-01",
+    )
+    august.cell(2, 7).value = "VSC PROMOTE 2613S"
+    september = _new_full_posting_sheet(workbook, "T09 26")
+    _add_full_plan_row(
+        september, 2, sqt=901, container=container,
+        closing_date="2026-09-01", bl="OTHER-BL",
+    )
+    september.cell(2, 7).value = "VSC PROMOTE 2617S"
+    workbook.save(target)
+    workbook.close()
+
+    plan = ExpensePostingService(_BangKeProvider(ready), bk_path=target).analyze(
+        batch_id=1
+    )
+    assert not plan.conflicts
+    assert plan.items[0].sheet_name == "T08 26"
+    assert plan.items[0].match_reason == "CONTAINER_VESSEL_EXACT"
+
+
 def test_bang_ke_vessel_alias_disambiguates_duplicate_container(
     tmp_path: Path,
 ) -> None:
