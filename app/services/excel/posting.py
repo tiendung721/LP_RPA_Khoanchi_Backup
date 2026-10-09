@@ -1175,6 +1175,26 @@ class ExpensePostingService:
                     raise ExpensePostingError("Dòng BK được chọn không hợp lệ.")
                 selected_by_key[self._bang_ke_item_key(item)] = choice
                 item.match_reason = "MANUAL"
+            elif conflict.conflict_type in {
+                ConflictType.INVOICE_COLUMN_MISSING,
+                ConflictType.INVOICE_VALUE_CONFLICT,
+                ConflictType.MULTIPLE_SOURCE_INVOICES,
+            }:
+                if action is ResolutionAction.SELECT_INVOICE:
+                    selected_invoice = self._resolution_attr(value, "selected_invoice")
+                    if _invoice_key(selected_invoice) not in {
+                        _invoice_key(candidate) for candidate in item.invoice_candidates
+                    }:
+                        raise ExpensePostingError("Số HĐ được chọn không hợp lệ.")
+                    item.selected_invoice = str(selected_invoice)
+                elif action in {
+                    ResolutionAction.SKIP_INVOICE,
+                    ResolutionAction.KEEP_EXISTING,
+                    ResolutionAction.OVERWRITE,
+                }:
+                    item.invoice_action = action
+                else:
+                    raise ExpensePostingError("Cách xử lý Số HĐ không hợp lệ.")
             elif action is ResolutionAction.SKIP:
                 item.action = ResolutionAction.SKIP
                 item.status = PostingItemStatus.USER_SKIPPED
@@ -1198,6 +1218,8 @@ class ExpensePostingService:
                 item.selected_source_sheet, item.selected_source_row = choice
                 item.status = PostingItemStatus.PLANNED
                 item.action = None
+                item.invoice_action = None
+                item.selected_invoice = None
 
         _progress(progress_callback, "Đang kiểm tra lại các dòng BK đã chọn…")
         workbook = self.gateway.load(plan.target_path, read_only=False)
@@ -1323,6 +1345,52 @@ class ExpensePostingService:
                             status = PostingItemStatus.POSTED
                         else:
                             status = PostingItemStatus.USER_SKIPPED
+                invoice_column: int | None = None
+                invoice_cell: Any = None
+                invoice_before: Any = None
+                invoice_after: Any = None
+                invoice_write = False
+                selected_invoice: str | None = None
+                invoice_action = item.invoice_action
+                if (
+                    status in {PostingItemStatus.POSTED, PostingItemStatus.ALREADY_EXISTS}
+                    and item.selected_fee != "LL"
+                    and item.invoice_candidates
+                ):
+                    selected_invoice = item.selected_invoice or item.invoice_candidates[0]
+                    invoice_column = item.invoice_column
+                    if invoice_column is None:
+                        if invoice_action not in {
+                            ResolutionAction.SKIP_INVOICE,
+                            ResolutionAction.KEEP_EXISTING,
+                        }:
+                            raise ExpensePostingError(
+                                "Cột Số HĐ chưa được nhận diện và chưa có quyết định bỏ qua."
+                            )
+                    else:
+                        invoice_cell = workbook[str(item.sheet_name)].cell(
+                            int(item.target_row), invoice_column
+                        )
+                        invoice_before = invoice_cell.value
+                        invoice_after = invoice_before
+                        if _invoice_key(invoice_before) == _invoice_key(selected_invoice):
+                            invoice_action = ResolutionAction.KEEP_EXISTING
+                        elif _invoice_text(invoice_before) is None:
+                            invoice_action = ResolutionAction.OVERWRITE
+                            invoice_after = selected_invoice
+                            invoice_write = True
+                        elif invoice_action is ResolutionAction.OVERWRITE:
+                            invoice_after = selected_invoice
+                            invoice_write = True
+                        elif invoice_action not in {
+                            ResolutionAction.KEEP_EXISTING,
+                            ResolutionAction.SKIP_INVOICE,
+                        }:
+                            raise ExpensePostingError(
+                                f"Ô Số HĐ {invoice_cell.coordinate} chưa có quyết định được áp dụng."
+                            )
+                    if invoice_write:
+                        status = PostingItemStatus.POSTED
                 record = self._action_record(
                     item,
                     item.selected_fee,
@@ -1336,7 +1404,18 @@ class ExpensePostingService:
                 record.update(
                     {
                         "amount_write": amount_write,
-                        "invoice_write": False,
+                        "invoice_no": item.invoice_candidates[0]
+                        if len(item.invoice_candidates) == 1
+                        else None,
+                        "invoice_selected": selected_invoice,
+                        "invoice_target_column": invoice_column,
+                        "invoice_target_cell": (
+                            invoice_cell.coordinate if invoice_cell is not None else None
+                        ),
+                        "invoice_value_before": invoice_before,
+                        "invoice_value_after": invoice_after,
+                        "invoice_action": invoice_action,
+                        "invoice_write": invoice_write,
                         "carrier_write": False,
                     }
                 )
@@ -1345,7 +1424,10 @@ class ExpensePostingService:
         finally:
             workbook.close()
 
-        write_actions = [action for action in actions if action["amount_write"]]
+        write_actions = [
+            action for action in actions
+            if action["amount_write"] or action["invoice_write"]
+        ]
         working_path: Path | None = None
         backup_path: Path | None = None
         after_fingerprint = plan.target_fingerprint
@@ -1371,6 +1453,9 @@ class ExpensePostingService:
                     worksheet = write_book[sheet_name]
                     base = self._resolve_base_headers(worksheet)
                     fee_columns = self._resolve_fee_columns(worksheet, base)
+                    invoice_columns = self._resolve_invoice_columns(
+                        worksheet, base, fee_columns
+                    )
                     update_column = self._ensure_update_column(worksheet)
                     timestamp = self.clock().replace(tzinfo=None, microsecond=0)
                     update_meta[sheet_name] = (update_column, timestamp)
@@ -1383,7 +1468,17 @@ class ExpensePostingService:
                                 f"Cột phí {fee} trên {sheet_name} không còn khớp header."
                             )
                         row = int(action["target_row"])
-                        worksheet.cell(row, column).value = action["value_after"]
+                        if action["amount_write"]:
+                            worksheet.cell(row, column).value = action["value_after"]
+                        if action["invoice_write"]:
+                            invoice_column = int(action["invoice_target_column"])
+                            if invoice_columns.get(fee) != invoice_column:
+                                raise ExpensePostingError(
+                                    f"Cột Số HĐ của phí {fee} trên {sheet_name} không còn khớp header."
+                                )
+                            worksheet.cell(row, invoice_column).value = action[
+                                "invoice_value_after"
+                            ]
                         updated_rows.add(row)
                     self._reset_rpa_statuses(worksheet, sheet_actions)
                     for row in updated_rows:
@@ -1441,7 +1536,10 @@ class ExpensePostingService:
                 sheet_name=", ".join(target_sheets) or None,
                 target_sheets=target_sheets,
                 posted_source_items=posted,
-                written_cells=len(write_actions),
+                written_cells=sum(bool(action["amount_write"]) for action in write_actions),
+                invoice_written_cells=sum(
+                    bool(action["invoice_write"]) for action in write_actions
+                ),
                 skipped_source_items=skipped,
                 already_existing_items=already,
                 conflict_count=0,
@@ -2544,7 +2642,9 @@ class ExpensePostingService:
         *,
         batch_hash: str,
     ) -> tuple[list[PostingItem], list[PostingConflict]]:
-        sheets: dict[str, tuple[Any, HeaderResolution, dict[str, int]]] = {}
+        sheets: dict[
+            str, tuple[Any, HeaderResolution, dict[str, int], dict[str, int]]
+        ] = {}
         all_candidates: list[RowCandidate] = []
         by_container: dict[str, list[RowCandidate]] = defaultdict(list)
         by_sqt: dict[int, list[RowCandidate]] = defaultdict(list)
@@ -2554,7 +2654,10 @@ class ExpensePostingService:
             worksheet = workbook[name]
             base = self._resolve_base_headers(worksheet)
             fee_columns = self._resolve_fee_columns(worksheet, base)
-            sheets[name] = (worksheet, base, fee_columns)
+            invoice_columns = self._resolve_invoice_columns(
+                worksheet, base, fee_columns
+            )
+            sheets[name] = (worksheet, base, fee_columns, invoice_columns)
             candidates = [
                 candidate
                 for values in self._container_index(
@@ -2791,7 +2894,9 @@ class ExpensePostingService:
             item.selected_source_row = selected.row
             item.target_row = selected.row
             item.source_sqt = selected.sqt
-            worksheet, _base, fee_columns = sheets[selected.source_sheet]
+            worksheet, _base, fee_columns, invoice_columns = sheets[
+                selected.source_sheet
+            ]
             item.target_column = fee_columns.get(item.selected_fee)
             if item.target_column is None:
                 conflicts.append(
@@ -2841,6 +2946,15 @@ class ExpensePostingService:
                 conflict = self._cell_conflict(batch_hash, item_index, item)
                 if conflict is not None:
                     conflicts.append(conflict)
+            invoice_conflict = self._set_invoice_state(
+                worksheet,
+                item,
+                item_index=item_index,
+                batch_hash=batch_hash,
+                invoice_columns=invoice_columns,
+            )
+            if invoice_conflict is not None:
+                conflicts.append(invoice_conflict)
         return items, conflicts
 
     def _resolve_base_headers(self, worksheet: Any) -> HeaderResolution:

@@ -598,6 +598,203 @@ def test_bang_ke_posts_across_sheets_ensures_gia_han_and_adds_negative(
         workbook.close()
 
 
+def test_bang_ke_writes_assigned_invoices_to_matching_fee_columns(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "bang_ke_ready.json"
+    target = tmp_path / "BK.xlsx"
+    container = "DRYU3045911"
+    fees = ("VSDL", "SEAL", "QT", "LC", "NH", "HV", "SC")
+    _save_bang_ke_ready(
+        ready,
+        (
+            {
+                "sqt": 101,
+                "container": container,
+                "fee": fee,
+                "amount": (index + 1) * 100,
+                "invoice_no": f"000{index + 1}",
+            }
+            for index, fee in enumerate(fees)
+        ),
+    )
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T01 26")
+    _add_full_plan_row(
+        sheet, 2, sqt=101, container=container, closing_date="2026-01-10"
+    )
+    workbook.save(target)
+    workbook.close()
+
+    service = ExpensePostingService(
+        _BangKeProvider(ready),
+        bk_path=target,
+        temp_dir=tmp_path / "Temp",
+        backup_dir=tmp_path / "Backup",
+    )
+    plan = service.analyze(batch_id=1)
+    assert not plan.conflicts
+    result = service.apply(plan, {})
+    assert result.written_cells == len(fees)
+    assert result.invoice_written_cells == len(fees)
+
+    workbook = load_workbook(target)
+    try:
+        sheet = workbook["T01 26"]
+        base = service._resolve_base_headers(sheet)
+        fee_columns = service._resolve_fee_columns(sheet, base)
+        invoice_columns = service._resolve_invoice_columns(sheet, base, fee_columns)
+        for index, fee in enumerate(fees):
+            assert sheet.cell(2, fee_columns[fee]).value == (index + 1) * 100
+            assert sheet.cell(2, invoice_columns[fee]).value == f"000{index + 1}"
+    finally:
+        workbook.close()
+
+
+def test_bang_ke_can_write_only_invoice_when_amount_already_matches(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "bang_ke_ready.json"
+    target = tmp_path / "BK.xlsx"
+    container = "DRYU3045911"
+    _save_bang_ke_ready(
+        ready,
+        [{"sqt": 101, "container": container, "amount": 100,
+          "invoice_no": "000123"}],
+    )
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T01 26")
+    _add_full_plan_row(
+        sheet, 2, sqt=101, container=container, closing_date="2026-01-10"
+    )
+    sheet.cell(2, FULL_POSTING_LAYOUT["VSDL"][0]).value = 100
+    workbook.save(target)
+    workbook.close()
+
+    service = ExpensePostingService(
+        _BangKeProvider(ready),
+        bk_path=target,
+        temp_dir=tmp_path / "Temp",
+        backup_dir=tmp_path / "Backup",
+    )
+    result = service.apply(service.analyze(batch_id=1), {})
+    assert result.written_cells == 0
+    assert result.invoice_written_cells == 1
+    assert result.posted_source_items == 1
+    workbook = load_workbook(target)
+    try:
+        sheet = workbook["T01 26"]
+        assert sheet.cell(2, FULL_POSTING_LAYOUT["VSDL"][0]).value == 100
+        assert sheet.cell(2, FULL_POSTING_LAYOUT["VSDL"][1]).value == "000123"
+    finally:
+        workbook.close()
+
+
+def test_bang_ke_keeps_current_gh_and_ll_invoice_exceptions(tmp_path: Path) -> None:
+    ready = tmp_path / "bang_ke_ready.json"
+    target = tmp_path / "BK.xlsx"
+    container = "DRYU3045911"
+    _save_bang_ke_ready(
+        ready,
+        [
+            {"sqt": 101, "container": container, "fee": "GH", "amount": 100,
+             "invoice_no": "GH-001"},
+            {"sqt": 101, "container": container, "fee": "LL", "amount": 200,
+             "invoice_no": "LL-001"},
+        ],
+    )
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T01 26")
+    _add_full_plan_row(
+        sheet, 2, sqt=101, container=container, closing_date="2026-01-10"
+    )
+    workbook.save(target)
+    workbook.close()
+
+    service = ExpensePostingService(
+        _BangKeProvider(ready),
+        bk_path=target,
+        temp_dir=tmp_path / "Temp",
+        backup_dir=tmp_path / "Backup",
+    )
+    plan = service.analyze(batch_id=1)
+    assert [conflict.conflict_type for conflict in plan.conflicts] == [
+        ConflictType.INVOICE_COLUMN_MISSING
+    ]
+    refined = service.refine(
+        plan,
+        {plan.conflicts[0].conflict_id: {"action": ResolutionAction.SKIP_INVOICE.value}},
+    )
+    assert not refined.conflicts
+    result = service.apply(refined, {})
+    assert result.written_cells == 2
+    assert result.invoice_written_cells == 0
+    workbook = load_workbook(target)
+    try:
+        sheet = workbook["T01 26"]
+        base = service._resolve_base_headers(sheet)
+        fee_columns = service._resolve_fee_columns(sheet, base)
+        assert sheet.cell(2, fee_columns["GH"]).value == 100
+        assert sheet.cell(2, fee_columns["LL"]).value == 200
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize(
+    ("invoice_action", "expected_invoice", "invoice_writes"),
+    [
+        (ResolutionAction.KEEP_EXISTING, "OLD", 0),
+        (ResolutionAction.OVERWRITE, "NEW", 1),
+    ],
+)
+def test_bang_ke_invoice_conflict_keeps_or_overwrites_by_choice(
+    tmp_path: Path,
+    invoice_action: ResolutionAction,
+    expected_invoice: str,
+    invoice_writes: int,
+) -> None:
+    ready = tmp_path / "bang_ke_ready.json"
+    target = tmp_path / "BK.xlsx"
+    container = "DRYU3045911"
+    _save_bang_ke_ready(
+        ready,
+        [{"sqt": 101, "container": container, "amount": 100,
+          "invoice_no": "NEW"}],
+    )
+    workbook = Workbook()
+    sheet = _new_full_posting_sheet(workbook, "T01 26")
+    _add_full_plan_row(
+        sheet, 2, sqt=101, container=container, closing_date="2026-01-10"
+    )
+    sheet.cell(2, FULL_POSTING_LAYOUT["VSDL"][1]).value = "OLD"
+    workbook.save(target)
+    workbook.close()
+
+    service = ExpensePostingService(
+        _BangKeProvider(ready),
+        bk_path=target,
+        temp_dir=tmp_path / "Temp",
+        backup_dir=tmp_path / "Backup",
+    )
+    plan = service.analyze(batch_id=1)
+    conflict = next(
+        value for value in plan.conflicts
+        if value.conflict_type is ConflictType.INVOICE_VALUE_CONFLICT
+    )
+    refined = service.refine(
+        plan, {conflict.conflict_id: {"action": invoice_action.value}}
+    )
+    assert not refined.conflicts
+    result = service.apply(refined, {})
+    assert result.invoice_written_cells == invoice_writes
+    workbook = load_workbook(target)
+    try:
+        sheet = workbook["T01 26"]
+        assert sheet.cell(2, FULL_POSTING_LAYOUT["VSDL"][1]).value == expected_invoice
+    finally:
+        workbook.close()
+
+
 def test_seal_posting_warns_when_same_invoice_has_existing_vsdl(
     tmp_path: Path,
 ) -> None:
