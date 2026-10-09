@@ -88,7 +88,7 @@ class ReviewMergeDialog(AppDialog):
         for field in conflicts:
             if field == "rule" and rows[0].fee == "CB":
                 continue
-            combo = QComboBox()
+            combo = QComboBox()                             
             combo.addItem("Chọn giá trị giữ lại…", None)
             for value in choices_for_field(rows, field):
                 combo.addItem(_display_value(field, value), value)

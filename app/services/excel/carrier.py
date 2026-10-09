@@ -26,7 +26,7 @@ MISSING_INVOICE = "CHƯA CÓ HĐ"
 SEA_FEE_CODES = frozenset({"CB"})
 ROAD_FEE_CODES = frozenset(DAILY_SYNC_CARRIER_FEE_CODES - SEA_FEE_CODES)
 NAM_FEE_CODES = frozenset(
-    {"NV", "HH", "NH", "HV", "VSDL", "SEAL", "LL", "LC", "SC", "QT"}
+    {"NH", "HV", "VSDL", "SEAL", "LL", "LC", "SC", "QT"}
 )
 DAILY_MANAGED_CARRIER_GROUPS = frozenset({"SEA", "ROAD"})
 

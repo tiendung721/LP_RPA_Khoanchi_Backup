@@ -57,7 +57,7 @@ def _ready(path: Path, rows: list[list[object]]) -> None:
     path.write_text(json.dumps({"v": 1, "d": rows}, ensure_ascii=False), encoding="utf-8")
 
 
-def test_posting_routes_expense_invoice_carriers_to_vt_nam(tmp_path: Path) -> None:
+def test_posting_routes_only_southern_fee_carrier_to_vt_nam(tmp_path: Path) -> None:
     bk = tmp_path / "bk.xlsx"
     ready = tmp_path / "ready.json"
     _posting_book(bk)
@@ -82,12 +82,53 @@ def test_posting_routes_expense_invoice_carriers_to_vt_nam(tmp_path: Path) -> No
     workbook = load_workbook(bk, data_only=False)
     try:
         assert workbook["T07 26"]["F2"].value is None
-        assert workbook["T07 26"]["I2"].value == "PHB / NHS"
+        assert workbook["T07 26"]["D2"].value == 1_200_000
+        assert workbook["T07 26"]["E2"].value == "HD-HP"
+        assert workbook["T07 26"]["I2"].value == "NHS"
         assert workbook[BK_DETAIL_SHEET].sheet_state == "hidden"
         detail = workbook[BK_DETAIL_SHEET]
-        assert detail.max_row == 3
-        assert {detail["H2"].value, detail["H3"].value} == {"NAM"}
-        assert {detail["L2"].value, detail["L3"].value} == {"PHB", "NHS"}
+        assert detail.max_row == 2
+        assert detail["H2"].value == "NAM"
+        assert detail["L2"].value == "NHS"
+    finally:
+        workbook.close()
+
+
+def test_posting_northern_fees_do_not_change_vt_nam(tmp_path: Path) -> None:
+    bk = tmp_path / "bk.xlsx"
+    ready = tmp_path / "ready.json"
+    _posting_book(bk, nam_carrier="SOUTH EXISTING")
+    workbook = load_workbook(bk)
+    sheet = workbook["T07 26"]
+    sheet["J1"], sheet["K1"] = "Nâng vỏ", "Số HĐ"
+    workbook.save(bk)
+    workbook.close()
+    _ready(
+        ready,
+        [
+            ["CONT700", None, "HH", "CV", "HD-HH", "NORTH HH", 1_200_000],
+            ["CONT700", None, "NV", "CV", "HD-NV", "NORTH NV", 600_000],
+        ],
+    )
+    service = ExpensePostingService(
+        _Provider(ready), bk_path=bk, backup_dir=tmp_path / "Backup"
+    )
+
+    plan = service.analyze(batch_id=1, sheet_name="T07 26")
+    assert not any(
+        conflict.conflict_type is ConflictType.CARRIER_VALUE_CONFLICT
+        for conflict in plan.conflicts
+    )
+    result = service.apply(plan, {})
+
+    assert result.carrier_written_cells == 0
+    workbook = load_workbook(bk, data_only=False)
+    try:
+        sheet = workbook["T07 26"]
+        assert (sheet["D2"].value, sheet["E2"].value) == (1_200_000, "HD-HH")
+        assert (sheet["J2"].value, sheet["K2"].value) == (600_000, "HD-NV")
+        assert sheet["I2"].value == "SOUTH EXISTING"
+        assert BK_DETAIL_SHEET not in workbook.sheetnames
     finally:
         workbook.close()
 
@@ -299,7 +340,7 @@ def test_selecting_ambiguous_invoice_carrier_keeps_other_invoice_carrier(
     _posting_book(bk)
     workbook = load_workbook(bk)
     sheet = workbook["T07 26"]
-    for column, header in ((10, "Nâng vỏ"), (11, "Số HĐ"), (12, "Hạ vỏ"), (13, "Số HĐ")):
+    for column, header in ((10, "SỬA CHỮA"), (11, "Số HĐ"), (12, "Hạ vỏ"), (13, "Số HĐ")):
         sheet.cell(1, column).value = header
     workbook.save(bk)
     workbook.close()
@@ -307,7 +348,7 @@ def test_selecting_ambiguous_invoice_carrier_keeps_other_invoice_carrier(
         ready,
         [
             ["CONT700", None, "NH", "CV", "HD-A", "NHS", 500_000],
-            ["CONT700", None, "NV", "CV", "HD-A", "TP", 600_000],
+            ["CONT700", None, "SC", "CV", "HD-A", "TP", 600_000],
             ["CONT700", None, "HV", "CV", "HD-B", "XYZ", 700_000],
         ],
     )
