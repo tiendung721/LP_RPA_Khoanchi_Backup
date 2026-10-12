@@ -285,6 +285,7 @@ class BatchRepository:
             """
             SELECT * FROM batches
             WHERE status IN ('REVIEWING', 'RECEIVED')
+              AND source_kind != 'SEA_FREIGHT_SUPPLEMENT'
             ORDER BY received_at DESC, id DESC
             """
         )

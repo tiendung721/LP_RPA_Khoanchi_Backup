@@ -312,7 +312,7 @@ def test_bang_ke_download_automatically_closes_assistant(
         runtime.close()
 
 
-def test_new_download_is_added_to_open_reconciliation_without_closing_dialog(
+def test_normal_output_download_is_not_imported_into_open_reconciliation(
     qtbot, tmp_path: Path
 ) -> None:
     runtime = _isolated_runtime(tmp_path)
@@ -373,11 +373,138 @@ def test_new_download_is_added_to_open_reconciliation_without_closing_dialog(
         qtbot.wait(20)
 
         contributions = runtime.sea_freight_repository.list_contributions(group.id)
-        assert [item.invoice_no for item in contributions] == ["INV-1", "INV-2"]
+        assert [item.invoice_no for item in contributions] == ["INV-1"]
         assert window._sea_freight_dialog.isVisible()
-        assert received.batch.id not in window._review_windows
-        assert window._sea_freight_dialog.status_label.text().startswith("Đã nhận thêm 1 HĐ")
+        assert received.batch.id in window._review_windows
+        assert assistant.completed == []
+    finally:
+        if window._sea_freight_dialog is not None:
+            window._sea_freight_dialog.close()
+        window.close()
+        runtime.close()
+
+
+def test_reconciliation_assistant_keeps_main_review_saveable(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _isolated_runtime(tmp_path)
+    runtime.sea_freight_service.matcher = _SeaMatcher(tmp_path / "BK.xlsx", 3)
+    window = MainWindow(controller=runtime, start_watcher=False)
+    assistant = _AssistantLauncher()
+    window._assistant_launcher = assistant
+    qtbot.addWidget(window)
+    errors: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "critical",
+        lambda _parent, _title, message: errors.append(message),
+    )
+    source_row = DataRow(
+        cont=None, bl="BL-1", fee="CB", rule="HD", amount=20_000_000,
+        invoice_no="INV-1", carrier="HÃNG A",
+        vessel_voyage_raw="PROSPER 2625S", vessel_name="PROSPER", voyage_no="2625S",
+        invoice_container_count=2, container_count_basis="EXPLICIT", invoice_date="2026-07-01",
+    )
+    source_path = runtime.paths.output_dir / "ket_qua_boc_tach.json"
+    source_path.write_text(
+        json.dumps({"v": 4, "d": [source_row.to_object()]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    try:
+        first = runtime.batch_service.receive_file(source_path)
+        window._apply_receive_result(first, automatic=False)
+        review = window.open_review(first.review)
+        assert review is not None
+        review.model.mark_dirty()
+        group = runtime.sea_freight_service.open_or_create(
+            source_row, bk_path=tmp_path / "BK.xlsx", month=7, year=2026,
+            source_batch_id=first.batch.id, source_item_index=0,
+            source_sha256=first.batch.sha256,
+        )
+        window.open_reconciliation(group.id)
+        dialog = window._sea_freight_dialog
+        assert dialog is not None
+        dialog.assistant_button.click()
+        incoming_dir = Path(assistant.launches[-1]["output_dir"])
+        assert incoming_dir != runtime.paths.output_dir
+        assert incoming_dir.is_dir()
+
+        extra = source_row.copy_with(
+            bl="BL-2", invoice_no="INV-2", amount=10_000_000,
+            invoice_container_count=1,
+        )
+        incoming = incoming_dir / "ket_qua_boc_tach.json"
+        incoming.write_text(
+            json.dumps({"v": 4, "d": [extra.to_object()]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        qtbot.waitUntil(
+            lambda: [item.invoice_no for item in runtime.sea_freight_repository.list_contributions(group.id)]
+            == ["INV-1", "INV-2"],
+            timeout=5_000,
+        )
+
+        assert errors == []
+        assert runtime.batch_service.current_output_batch_id == first.batch.id
+        assert runtime.batch_service.get_active_batch().id == first.batch.id
+        assert first.batch.working_path.is_file()
+        assert review.model.dirty
+        assert review.save_working()
+        assert runtime.batch_service.current_output_batch_id == first.batch.id
         assert assistant.completed == ["test-session-00000000000000000001"]
+
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        )
+        monkeypatch.setattr(QMessageBox, "information", lambda *_args, **_kwargs: None)
+        dialog.confirm()
+        assert runtime.sea_freight_repository.get_group(group.id).status.value == "ALLOCATED"
+        assert review.confirm_batch()
+        assert runtime.batch_service.current_output_batch_id == first.batch.id
+    finally:
+        if window._sea_freight_dialog is not None:
+            window._sea_freight_dialog.close()
+        window.close()
+        runtime.close()
+
+
+def test_confirmed_reconciliation_requires_new_revision_before_assistant(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _isolated_runtime(tmp_path)
+    runtime.sea_freight_service.matcher = _SeaMatcher(tmp_path / "BK.xlsx", 2)
+    window = MainWindow(controller=runtime, start_watcher=False)
+    assistant = _AssistantLauncher()
+    window._assistant_launcher = assistant
+    qtbot.addWidget(window)
+    source = DataRow(
+        cont=None, bl="BL-1", fee="CB", rule="HD", amount=20_000_000,
+        invoice_no="INV-1", vessel_voyage_raw="PROSPER 2625S",
+        vessel_name="PROSPER", voyage_no="2625S",
+        invoice_container_count=2, container_count_basis="EXPLICIT",
+    )
+    try:
+        group = runtime.sea_freight_service.open_or_create(
+            source, bk_path=tmp_path / "BK.xlsx", month=7, year=2026,
+            source_batch_id=None, source_item_index=0, source_sha256="source",
+        )
+        runtime.sea_freight_repository.mark_allocated(group.id)
+        window.open_reconciliation(group.id)
+        dialog = window._sea_freight_dialog
+        assert dialog is not None
+        assert not dialog.assistant_button.isEnabled()
+        dialog.assistant_button.click()
+        assert assistant.launches == []
+
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        )
+        dialog.create_revision()
+        assert dialog.group_id != group.id
+        assert dialog.assistant_button.isEnabled()
+        dialog.assistant_button.click()
+        assert assistant.launches[-1]["reconciliation_group_id"] == dialog.group_id
     finally:
         if window._sea_freight_dialog is not None:
             window._sea_freight_dialog.close()

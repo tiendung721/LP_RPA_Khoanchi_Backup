@@ -891,6 +891,16 @@ class SeaFreightReconciliationDialog(AppDialog):
         self.changed.emit()
 
     def _open_assistant(self) -> None:
+        group = self.service.repository.get_group(self.group_id)
+        if group is not None and group.status in {
+            GroupStatus.ALLOCATED, GroupStatus.POSTED, GroupStatus.CANCELLED
+        }:
+            QMessageBox.information(
+                self,
+                "Hồ sơ đã xác nhận",
+                "Hãy bấm Đối soát lại để mở lần đối soát mới trước khi thêm HĐ.",
+            )
+            return
         if callable(self.open_assistant):
             self.open_assistant()
 

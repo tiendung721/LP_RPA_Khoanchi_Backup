@@ -345,6 +345,93 @@ class BatchService:
     process_file = receive_file
     receive = receive_file
 
+    def receive_supplement_file(
+        self, path: str | Path, group_id: int
+    ) -> ReceiveResult:
+        """Store a sea freight source without replacing the current Output batch."""
+
+        source = Path(path)
+        if group_id <= 0:
+            raise BatchServiceError("Hồ sơ cước biển không hợp lệ.")
+        incoming_root = (
+            self.paths.system_dir / "SeaFreightIncoming" / f"group_{group_id}"
+        ).resolve()
+        try:
+            source.resolve().relative_to(incoming_root)
+        except (OSError, ValueError) as exc:
+            raise BatchServiceError("File bổ sung không nằm trong thư mục của hồ sơ.") from exc
+        if is_temporary_file(source) or source.suffix.casefold() != ".json":
+            raise BatchServiceError("File bổ sung phải là JSON đã tải xong.")
+        try:
+            size = source.stat().st_size
+        except OSError as exc:
+            raise BatchServiceError("Không thể đọc file bổ sung.") from exc
+        if not source.is_file() or size > self.max_file_size_bytes:
+            raise BatchServiceError("File bổ sung không hợp lệ hoặc vượt giới hạn dung lượng.")
+
+        # Parse before moving the download, so a failed import remains available
+        # for inspection and never affects the main Output file.
+        document = self.codec.load(source)
+        content_sha = calculate_sha256(source)
+        # Keep the batch repository's unique SHA key separate from a main batch
+        # containing identical JSON; contributions retain the real file SHA.
+        source_key = hashlib.sha256(
+            f"SEA_FREIGHT_SUPPLEMENT:{group_id}:{content_sha}".encode("ascii")
+        ).hexdigest()
+        existing = self.repository.get_by_sha256(source_key)
+        if existing is not None and existing.working_path.is_file():
+            source.unlink(missing_ok=True)
+            validation = self._validate_document(document, source_kind="ASSISTANT")
+            return ReceiveResult(
+                batch=existing,
+                duplicate=True,
+                message="File bổ sung đã được nhận trước đó.",
+                review=BatchReview(existing, document, validation),
+            )
+
+        archive_dir = self.paths.system_dir / "SeaFreightSupplements" / str(group_id)
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target = archive_dir / f"{content_sha}.json"
+        temporary = archive_dir / f".{content_sha}.tmp"
+        try:
+            shutil.copy2(source, temporary)
+            os.replace(temporary, target)
+            validation = self._validate_document(document, source_kind="ASSISTANT")
+            if existing is None:
+                metadata = self.repository.create_batch(
+                    source_filename=source.name,
+                    source_output_path=None,
+                    original_archive_path=target,
+                    working_path=target,
+                    sha256=source_key,
+                    status=BatchStatus.RECEIVED,
+                    source_kind="SEA_FREIGHT_SUPPLEMENT",
+                )
+            else:
+                metadata = self.repository.update_batch(
+                    existing.id,
+                    original_archive_path=target,
+                    working_path=target,
+                )
+            metadata = self.repository.update_batch(
+                metadata.id,
+                row_count=validation.summary.total_rows,
+                valid_count=validation.summary.valid_count,
+                warning_count=validation.summary.warning_count,
+                error_count=validation.error_count,
+                total_amount=validation.summary.total_amount,
+            )
+            source.unlink(missing_ok=True)
+        except (OSError, sqlite3.Error) as exc:
+            temporary.unlink(missing_ok=True)
+            raise BatchServiceError("Không thể lưu file bổ sung cước biển.") from exc
+        return ReceiveResult(
+            batch=metadata,
+            duplicate=False,
+            message="Đã nhận file bổ sung cước biển.",
+            review=BatchReview(metadata, document, validation),
+        )
+
     def load_batch(self, batch_id: int) -> BatchReview:
         metadata = self._require_batch(batch_id)
         try:
@@ -359,7 +446,7 @@ class BatchService:
             raise BatchDataError(
                 "Bản làm việc không còn là JSON có cấu trúc hợp lệ."
             ) from exc
-        if metadata.last_saved_at is None:
+        if metadata.last_saved_at is None and metadata.source_kind != "SEA_FREIGHT_SUPPLEMENT":
             document = self._assign_legacy_source(document, metadata.id)
             document = self._prepare_received_gpt_document(
                 metadata.working_path, document

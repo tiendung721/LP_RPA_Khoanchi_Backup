@@ -386,6 +386,58 @@ def test_saving_superseded_batch_does_not_overwrite_new_output(
     service.close()
 
 
+def test_supplement_download_does_not_replace_main_batch(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    service = BatchService(settings)
+    main = service.receive_file(
+        _write_json(
+            settings.output_dir / "ket_qua_boc_tach.json",
+            [["DRYU3026167", None, "VTN", "CV", 1]],
+        )
+    )
+    with pytest.raises(BatchServiceError, match="thư mục của hồ sơ"):
+        service.receive_supplement_file(main.batch.working_path, group_id=7)
+    assert main.batch.working_path.is_file()
+    incoming_dir = (
+        settings.output_dir / "_system" / "SeaFreightIncoming" / "group_7" / "session"
+    )
+    incoming_dir.mkdir(parents=True)
+    incoming = _write_json(
+        incoming_dir / "ket_qua_boc_tach.json",
+        [["GAOU2112422", None, "VTN", "CV", 2]],
+    )
+
+    supplement = service.receive_supplement_file(incoming, group_id=7)
+
+    assert supplement.batch.id != main.batch.id
+    assert supplement.batch.source_kind == "SEA_FREIGHT_SUPPLEMENT"
+    assert supplement.batch.working_path.is_file()
+    assert not incoming.exists()
+    assert main.batch.working_path.is_file()
+    assert service.current_output_batch_id == main.batch.id
+    assert service.get_active_batch().id == main.batch.id
+    assert [item.id for item in service.repository.list_recoverable()] == [main.batch.id]
+
+    repeated = _write_json(
+        incoming_dir / "ket_qua_boc_tach (1).json",
+        [["GAOU2112422", None, "VTN", "CV", 2]],
+    )
+    duplicate = service.receive_supplement_file(repeated, group_id=7)
+    assert duplicate.duplicate
+    assert duplicate.batch.id == supplement.batch.id
+    assert service.get_active_batch().id == main.batch.id
+    service.save_working(main.batch.id, main.review.document)
+    service.close()
+
+    reopened = BatchService(settings)
+    assert reopened.current_output_batch_id == main.batch.id
+    assert reopened.get_current_output_batch().id == main.batch.id
+    assert reopened.repository.get_by_id(supplement.batch.id).working_path.is_file()
+    reopened.close()
+
+
 def test_reapplying_same_output_keeps_review_sync_enabled(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     service = BatchService(settings)

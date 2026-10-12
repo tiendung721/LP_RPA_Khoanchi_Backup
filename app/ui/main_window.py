@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from uuid import uuid4
 from dataclasses import dataclass
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -28,6 +29,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import software_root
+from app.services.file_stability import file_sha256
+from app.services.output_watcher import OutputWatcher
 from app.services.excel.review import CorrectionIssue, SourceDataChangedError
 from app.services.excel.carrier_export import CarrierExportPreview, CarrierExportResult
 from app.services.excel.posting_export import PostingExportResult
@@ -202,6 +205,7 @@ class MainWindow(QMainWindow):
         self._review_windows: dict[Any, ReviewWindow] = {}
         self._sea_freight_dialog: SeaFreightReconciliationDialog | None = None
         self._assistant_sessions: list[_AssistantSession] = []
+        self._supplement_watchers: dict[str, OutputWatcher] = {}
         self._closing = False
         self._watcher_connected = False
 
@@ -2494,27 +2498,48 @@ class MainWindow(QMainWindow):
                 "Hãy chọn file trong Cài đặt.",
             )
             return
+        output_dir = Path(str(_attribute(settings, "output_dir", default="")))
+        if context == "reconciliation" and reconciliation_group_id is not None:
+            output_dir = (
+                output_dir / "_system" / "SeaFreightIncoming"
+                / f"group_{reconciliation_group_id}" / uuid4().hex
+            )
+        session: _AssistantSession | None = None
         try:
             result = launcher.launch(
                 bat_path=selected_bat,
-                output_dir=_attribute(settings, "output_dir", default=""),
+                output_dir=output_dir,
                 context=context,
                 reconciliation_group_id=reconciliation_group_id,
             )
             session_id = str(_attribute(result, "session_id", default="") or "")
             if session_id:
-                self._assistant_sessions.append(
-                    _AssistantSession(
-                        session_id=session_id,
-                        context=context,
-                        reconciliation_group_id=reconciliation_group_id,
-                    )
+                session = _AssistantSession(
+                    session_id=session_id,
+                    context=context,
+                    reconciliation_group_id=reconciliation_group_id,
                 )
+                self._assistant_sessions.append(session)
+                if context == "reconciliation":
+                    supplement_watcher = OutputWatcher(output_dir)
+                    supplement_watcher.file_ready_with_origin.connect(
+                        lambda raw_path, _startup, item=session:
+                            self._supplement_file_ready(raw_path, item)
+                    )
+                    supplement_watcher.file_rejected.connect(self._watcher_rejected)
+                    supplement_watcher.watcher_error.connect(
+                        lambda message: self.statusBar().showMessage(message, 10000)
+                    )
+                    self._supplement_watchers[session_id] = supplement_watcher
+                    if not supplement_watcher.start():
+                        raise RuntimeError("Không thể theo dõi file bổ sung cước biển.")
             self.statusBar().showMessage(
                 str(_attribute(result, "message", default="Đã mở Trợ lý ảo.")),
                 7000,
             )
         except Exception as exc:
+            if session is not None:
+                self._complete_assistant_session(session)
             LOGGER.exception("Không mở được Trợ lý ảo: %s", exc)
             QMessageBox.warning(
                 self,
@@ -2612,6 +2637,48 @@ class MainWindow(QMainWindow):
     ) -> None:
         self._apply_receive_result(result, automatic=True, startup=is_startup)
 
+    def _supplement_file_ready(
+        self, raw_path: str, session: _AssistantSession
+    ) -> None:
+        group_id = session.reconciliation_group_id
+        if group_id is None or self._sea_freight_service is None:
+            return
+        group = self._sea_freight_service.repository.get_group(group_id)
+        if group is None or not group.is_current or str(group.status.value) in {
+            "ALLOCATED", "POSTED", "CANCELLED"
+        }:
+            QMessageBox.warning(
+                self, "Không thể thêm HĐ",
+                "Hồ sơ này đã xác nhận. Hãy bấm Đối soát lại trước khi thêm HĐ.",
+            )
+            return
+        try:
+            received = self._batch_service.receive_supplement_file(
+                Path(raw_path), group_id
+            )
+            review = received.review
+            if review is None:
+                raise RuntimeError("Không đọc được dữ liệu file bổ sung.")
+            source_hash = file_sha256(received.batch.working_path)
+            result = self._sea_freight_service.import_supplement(
+                group_id,
+                review.document.rows,
+                source_batch_id=received.batch.id,
+                source_sha256=source_hash,
+            )
+            dialog = self._sea_freight_dialog
+            if dialog is not None and dialog.isVisible() and dialog.group_id == group_id:
+                dialog.supplement_received(result)
+            self._refresh_reconciliation_groups()
+            if result.handled_count:
+                self._complete_assistant_session(session)
+        except Exception as exc:
+            LOGGER.exception("Không nhập được file bổ sung cước biển: %s", exc)
+            QMessageBox.critical(
+                self, "Không thể thêm HĐ",
+                f"Không thể nhận file bổ sung: {exc}",
+            )
+
     def receive_file(
         self, path: str | Path, *, manual: bool = False, startup: bool = False
     ) -> Any:
@@ -2687,44 +2754,9 @@ class MainWindow(QMainWindow):
             )
         if automatic and not startup and not duplicate and review is not None:
             session = self._next_assistant_session()
-            dialog = self._sea_freight_dialog
-            if (
-                session is not None
-                and session.context == "reconciliation"
-                and self._sea_freight_service is not None
-            ):
-                group_id = session.reconciliation_group_id
-                if group_id is None:
-                    return
-                metadata = _attribute(review, "metadata", default=batch)
-                document = _attribute(review, "document")
-                rows = list(_attribute(document, "rows", "data", "d", default=[]) or [])
-                import_result = self._sea_freight_service.import_supplement(
-                    group_id,
-                    rows,
-                    source_batch_id=_batch_id(metadata),
-                    source_sha256=str(_attribute(metadata, "sha256", default="") or ""),
-                )
-                if (
-                    dialog is not None
-                    and dialog.isVisible()
-                    and dialog.group_id == group_id
-                ):
-                    dialog.supplement_received(import_result)
-                self._refresh_reconciliation_groups()
-                if int(
-                    _attribute(
-                        import_result,
-                        "handled_count",
-                        default=_attribute(import_result, "added_count", default=0),
-                    )
-                    or 0
-                ) > 0:
-                    self._complete_assistant_session(session)
-            else:
-                self._open_new_download(review)
-                if session is not None and session.context in {"home", "bang_ke"}:
-                    self._complete_assistant_session(session)
+            self._open_new_download(review)
+            if session is not None and session.context in {"home", "bang_ke"}:
+                self._complete_assistant_session(session)
 
     def _next_assistant_session(self) -> _AssistantSession | None:
         is_active = getattr(self._assistant_launcher, "is_session_active", None)
@@ -2739,6 +2771,9 @@ class MainWindow(QMainWindow):
                 LOGGER.exception("Không thể kiểm tra phiên Trợ lý ảo.")
                 return session
             self._assistant_sessions.pop(0)
+            watcher = self._supplement_watchers.pop(session.session_id, None)
+            if watcher is not None:
+                watcher.stop()
         return None
 
     def _complete_assistant_session(self, session: _AssistantSession) -> None:
@@ -2748,11 +2783,13 @@ class MainWindow(QMainWindow):
                 complete(session.session_id)
             except Exception:
                 LOGGER.exception("Không thể yêu cầu đóng cửa sổ Trợ lý ảo.")
-                return
         try:
             self._assistant_sessions.remove(session)
         except ValueError:
             pass
+        watcher = self._supplement_watchers.pop(session.session_id, None)
+        if watcher is not None:
+            watcher.stop()
 
     def _open_new_download(self, review: Any) -> None:
         """Bỏ cửa sổ cũ và đưa dữ liệu vừa tải lên màn hình kiểm tra."""
@@ -2968,7 +3005,7 @@ class MainWindow(QMainWindow):
             batch
             for batch in (batches or [])
             if str(_attribute(batch, "source_kind", default="ASSISTANT"))
-            != "SEA_FREIGHT_RECONCILIATION"
+            not in {"SEA_FREIGHT_RECONCILIATION", "SEA_FREIGHT_SUPPLEMENT"}
         ]
         self.history_page.set_batches(visible)
 
@@ -3171,6 +3208,9 @@ class MainWindow(QMainWindow):
                 return
         self._closing = True
         self._save_ui_state()
+        for supplement_watcher in self._supplement_watchers.values():
+            supplement_watcher.stop()
+        self._supplement_watchers.clear()
         watcher = self._watcher
         stop = getattr(watcher, "stop", None) if watcher is not None else None
         if callable(stop):
