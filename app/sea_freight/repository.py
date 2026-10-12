@@ -1167,7 +1167,7 @@ class SeaFreightRepository:
                     ),
                 )
                 source_id = int(cursor.lastrowid)
-                for record in snapshot.containers:
+                for record in snapshot.occurrences or snapshot.containers:
                     occurrences.setdefault(record.container, []).append(
                         (source_id, record, order)
                     )
@@ -1916,6 +1916,7 @@ class SeaFreightRepository:
         ).fetchone()[0]
         unresolved_source = any(
             str(row["resolution_kind"]) in {"AMBIGUOUS", "NOT_FOUND"}
+            and int(row["container_count"]) == 0
             for row in sources
         )
         issue = (

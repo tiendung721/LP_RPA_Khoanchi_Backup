@@ -71,8 +71,9 @@ Bước 1 hoặc chọn JSON thủ công.
 - Mọi lần ghi BK đều dùng backup, working copy, kiểm tra lại và thay file
   nguyên tử; tác vụ chạy nền để không khóa giao diện.
 - Dòng cước biển thiếu số cont có một hành động duy nhất **Đối soát số cont**.
-  Người dùng chủ động chọn một hoặc nhiều sheet tháng `TMM YY`; ứng dụng tìm cont
-  bằng **tên tàu + số chuyến** độc lập trong từng sheet rồi hợp nhất vào hồ sơ.
+  Người dùng chủ động chọn một hoặc nhiều sheet tháng `TMM YY`; ứng dụng nhận
+  dòng cont BK khi **B/L của ít nhất một HĐ trong hồ sơ hoặc tên tàu + số chuyến**
+  khớp trong sheet đó, rồi hợp nhất các cont hợp lệ vào hồ sơ.
 - Màn hình kiểm tra chỉ hiển thị một cột **Tàu/chuyến** ghép từ hai trường trên;
   khi sửa dòng, giá trị AI nguyên văn vẫn được giữ để truy vết.
 - Nếu exact match không thấy, ứng dụng đối chiếu tên tàu và phần số/hậu tố chuyến
@@ -84,8 +85,9 @@ Bước 1 hoặc chọn JSON thủ công.
   chứng từ, số HĐ, ngày, số cont và số tiền riêng để truy vết.
 - Cửa sổ đối soát hiển thị đồng thời danh sách HĐ, cont tìm được trong BK và
   bảng kết quả dự kiến. Nguồn tháng có thể thêm, bỏ, đổi tàu/chuyến và đọc lại;
-  HĐ có thể thêm, sửa, xóa và lưu trực tiếp. Cont xuất hiện ở nhiều sheet chỉ
-  được tính một lần và phải được người dùng chọn đúng vị trí nguồn trước khi xác nhận.
+  HĐ có thể thêm, sửa, xóa và lưu trực tiếp. Cont xuất hiện ở nhiều dòng BK,
+  kể cả trong cùng sheet, chỉ được tính một lần và phải được người dùng chọn
+  đúng vị trí nguồn trước khi xác nhận.
 - Tại màn hình kiểm tra file bóc tách, người dùng được xóa mọi loại cước dù batch
   đã có hồ sơ cước biển. Thao tác chỉ có hiệu lực khi bấm **Lưu**; HĐ cước biển
   bị xóa đồng thời được loại khỏi hồ sơ, hồ sơ rỗng được hủy nhưng vẫn giữ lịch

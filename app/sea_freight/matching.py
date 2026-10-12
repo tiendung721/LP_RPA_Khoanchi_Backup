@@ -12,6 +12,7 @@ from .container_numbers import validate_iso6346
 from app.services.excel.daily_sync import SOURCE_HEADER_ALIASES, SYNC_FIELDS, parse_sqt
 from app.services.excel.headers import HeaderResolver
 from app.services.excel.workbook import WorkbookGateway
+from app.services.validation_service import normalize_bl_key
 
 from .contracts import (
     BkContainerSnapshot,
@@ -29,6 +30,19 @@ from .vessel_aliases import (
 )
 
 _INVALID_BK_VALUES = frozenset({"TP", "GND", "CUOCBO", "CUOC BO", "NM", "KBB"})
+
+
+def bl_keys(values: object) -> frozenset[str]:
+    """Tách các B/L trong một hoặc nhiều ô theo cùng quy tắc nhập BK."""
+    if isinstance(values, (list, tuple, set, frozenset)):
+        return frozenset(key for value in values for key in bl_keys(value))
+    if values in (None, ""):
+        return frozenset()
+    return frozenset(
+        key
+        for part in re.split(r"[,;\r\n]+", str(values))
+        if (key := normalize_bl_key(part)) is not None
+    )
 _SEA_FREIGHT_REQUIRED_FIELDS = tuple(
     field for field in SYNC_FIELDS if field != "bl"
 )
@@ -269,6 +283,7 @@ class BkVesselMatcher:
         vessel_voyage_raw: str,
         vessel_name: str,
         voyage_no: str,
+        bl_values: object = None,
     ) -> BkContainerSnapshot:
         path = Path(bk_path).expanduser().resolve()
         vessel_key, voyage_key, combined_key = vessel_voyage_keys(vessel_name, voyage_no)
@@ -300,18 +315,26 @@ class BkVesselMatcher:
                 effective_text = resolution.canonical_vessel_voyage
             seen: set[str] = set()
             records: list[ContainerRecord] = []
+            occurrences: list[ContainerRecord] = []
             invalid_count = 0
             duplicate_count = 0
+            wanted_bl_keys = bl_keys(bl_values)
+            bl_column = header.columns.get("bl")
             for row in range(header.row_end + 1, worksheet.max_row + 1):
                 raw_vessel = worksheet.cell(row, header.columns["vessel"]).value
-                if (
-                    resolution.kind
-                    not in {
+                vessel_matches = (
+                    resolution.kind in {
                         VesselVoyageResolutionKind.EXACT,
                         VesselVoyageResolutionKind.AUTO_ALIAS,
                     }
-                    or normalize_match_key(raw_vessel) != combined_key
-                ):
+                    and normalize_match_key(raw_vessel) == combined_key
+                )
+                row_bl_keys = (
+                    bl_keys(worksheet.cell(row, bl_column).value)
+                    if wanted_bl_keys and bl_column is not None
+                    else frozenset()
+                )
+                if not vessel_matches and wanted_bl_keys.isdisjoint(row_bl_keys):
                     continue
                 raw_container = worksheet.cell(row, header.columns["container"]).value
                 try:
@@ -322,23 +345,23 @@ class BkVesselMatcher:
                     if raw_container not in (None, ""):
                         invalid_count += 1
                     continue
+                record = ContainerRecord(
+                    container=container,
+                    source_sheet=bk_sheet,
+                    source_row=row,
+                    source_sqt=parse_sqt(
+                        worksheet.cell(row, header.columns["sqt"]).value
+                    ),
+                    departure_date=_date_text(
+                        worksheet.cell(row, header.columns["departure_date"]).value
+                    ),
+                )
+                occurrences.append(record)
                 if container in seen:
                     duplicate_count += 1
                     continue
                 seen.add(container)
-                records.append(
-                    ContainerRecord(
-                        container=container,
-                        source_sheet=bk_sheet,
-                        source_row=row,
-                        source_sqt=parse_sqt(
-                            worksheet.cell(row, header.columns["sqt"]).value
-                        ),
-                        departure_date=_date_text(
-                            worksheet.cell(row, header.columns["departure_date"]).value
-                        ),
-                    )
-                )
+                records.append(record)
         finally:
             workbook.close()
         fingerprint_text = json.dumps(
@@ -352,7 +375,7 @@ class BkVesselMatcher:
                 "sqt": record.source_sqt,
                 "departure_date": record.departure_date,
             }
-            for record in records
+            for record in occurrences
         ]
         snapshot_hash = hashlib.sha256(
             json.dumps(
@@ -378,6 +401,7 @@ class BkVesselMatcher:
             canonical_vessel_name=resolution.canonical_vessel_name,
             canonical_voyage_no=resolution.canonical_voyage_no,
             alias_candidates=resolution.candidates,
+            occurrences=tuple(occurrences),
         )
 
     def suggestions(

@@ -76,6 +76,7 @@ class BkContainerSnapshot:
     canonical_vessel_name: str = ""
     canonical_voyage_no: str = ""
     alias_candidates: tuple[VesselVoyageSuggestion, ...] = ()
+    occurrences: tuple[ContainerRecord, ...] = ()
 
     @property
     def container_count(self) -> int:

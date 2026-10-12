@@ -711,6 +711,8 @@ def _write_vessel_bk(tmp_path: Path, vessels: list[tuple[str, str]]) -> Path:
     workbook.save(path)
     workbook.close()
     return path
+
+
     new_batch = batch_repository.create_batch(
         source_filename="new.json",
         source_output_path=tmp_path / "new.json",
@@ -778,6 +780,187 @@ def _write_vessel_bk(tmp_path: Path, vessels: list[tuple[str, str]]) -> Path:
     database.close()
 
 
+def _write_bl_bk(
+    tmp_path: Path, rows: list[tuple[str, str, str | None]]
+) -> Path:
+    path = tmp_path / "BK.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "T07 26"
+    sheet.append([
+        "SQT PM", "Ngày Đóng", "Số Container", "Số tấn", "Loại hàng",
+        "Nơi đóng", "Tên tàu", "Ngày chạy", "Dự kiến giao", "Người nhận",
+        "VT biển", "Vận chuyển", "Số B/L",
+    ])
+    for index, (vessel, container, bl) in enumerate(rows, start=1):
+        sheet.append([index, None, container, None, None, None, vessel,
+                      None, None, None, None, None, bl])
+    workbook.save(path)
+    workbook.close()
+    return path
+
+
+def test_sea_freight_bk_rows_match_bl_or_vessel(tmp_path: Path) -> None:
+    path = _write_bl_bk(tmp_path, [
+        ("PROSPER 2625S", _container(1), "OTHER"),
+        ("OTHER SHIP 100S", _container(2), "BL-001; EXTRA"),
+        ("OTHER SHIP 100S", _container(3), "UNRELATED"),
+    ])
+    snapshot = BkVesselMatcher().snapshot(
+        path, "T07 26", vessel_voyage_raw="PROSPER 2625S",
+        vessel_name="PROSPER", voyage_no="2625S", bl_values=("BL 001",),
+    )
+
+    assert [item.container for item in snapshot.containers] == [
+        _container(1), _container(2)
+    ]
+    assert [item.source_row for item in snapshot.containers] == [2, 3]
+
+
+def test_sea_freight_bl_match_uses_all_invoices(tmp_path: Path) -> None:
+    path = _write_bl_bk(tmp_path, [
+        ("OTHER SHIP 100S", _container(1), "BL-A"),
+        ("OTHER SHIP 100S", _container(2), "BL-B"),
+    ])
+    database = Database(tmp_path / "state.db")
+    database.initialize()
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(repository)
+    rows = [
+        (0, _row(1, 100, "A").copy_with(bl="BL-A")),
+        (1, _row(1, 100, "B").copy_with(bl="BL-B")),
+    ]
+
+    opened = service.open_or_create_many(
+        rows, bk_path=path, month=7, year=2026,
+        source_batch_id=None, source_sha256="both-invoices",
+    )
+
+    assert opened.group.status is GroupStatus.READY
+    assert [row["container"] for row in repository.list_container_rows(opened.group.id)] == [
+        _container(1), _container(2)
+    ]
+    assert service.prepare_allocation(opened.group.id)
+    database.close()
+
+
+def test_sea_freight_same_container_on_two_bl_or_vessel_rows_needs_selection(
+    tmp_path: Path,
+) -> None:
+    path = _write_bl_bk(tmp_path, [
+        ("PROSPER 2625S", _container(1), "OTHER"),
+        ("OTHER SHIP 100S", _container(1), "BL-A"),
+    ])
+    database = Database(tmp_path / "state.db")
+    database.initialize()
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(repository)
+    opened = service.open_or_create(
+        _row(1, 100, "A").copy_with(bl="BL-A"), bk_path=path,
+        month=7, year=2026, source_batch_id=None,
+        source_item_index=0, source_sha256="duplicate-source",
+    )
+
+    assert opened.status is GroupStatus.METADATA_CONFLICT
+    assert len(repository.list_container_occurrences(opened.id)) == 2
+    assert len(repository.unresolved_duplicate_containers(opened.id)) == 1
+    selected = service.select_container_source(
+        opened.id, _container(1), source_sheet="T07 26", source_row=3,
+    )
+    assert selected.status is GroupStatus.READY
+    assert repository.list_container_rows(opened.id)[0]["source_row"] == 3
+    database.close()
+
+
+def test_sea_freight_editing_invoice_bl_refreshes_bk_source(tmp_path: Path) -> None:
+    path = _write_bl_bk(tmp_path, [
+        ("OTHER SHIP 100S", _container(1), "BL-A"),
+        ("OTHER SHIP 100S", _container(2), "BL-B"),
+    ])
+    database = Database(tmp_path / "state.db")
+    database.initialize()
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(repository)
+    group = service.open_or_create(
+        _row(1, 100, "A").copy_with(bl="BL-A"), bk_path=path,
+        month=7, year=2026, source_batch_id=None,
+        source_item_index=0, source_sha256="edited-bl",
+    )
+    contribution = repository.list_contributions(group.id)[0]
+
+    saved = service.save_group(
+        group.id, vessel_voyage_raw="PROSPER 2625S",
+        vessel_name="PROSPER", voyage_no="2625S",
+        invoices=[{
+            "id": contribution.id, "invoice_no": "A", "bl": "BL-B",
+            "invoice_container_count": 1, "amount": 100,
+            "invoice_date": "2026-07-15", "carrier": "HÃNG TÀU",
+        }],
+    )
+
+    assert saved.status is GroupStatus.READY
+    assert repository.list_container_rows(group.id)[0]["source_row"] == 3
+    assert repository.list_contributions(group.id)[0].bl == "BL-B"
+    database.close()
+
+
+def test_sea_freight_new_invoice_bl_expands_bk_sources(tmp_path: Path) -> None:
+    path = _write_bl_bk(tmp_path, [
+        ("OTHER SHIP 100S", _container(1), "BL-A"),
+        ("OTHER SHIP 100S", _container(2), "BL-B"),
+    ])
+    database = Database(tmp_path / "state.db")
+    database.initialize()
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(repository)
+    group = service.open_or_create(
+        _row(1, 100, "A").copy_with(bl="BL-A"), bk_path=path,
+        month=7, year=2026, source_batch_id=None,
+        source_item_index=0, source_sha256="initial-bl",
+    )
+
+    result = service.import_supplement(
+        group.id, [_row(1, 100, "B").copy_with(bl="BL-B")],
+        source_batch_id=None, source_sha256="added-bl",
+    )
+
+    assert result.added_count == 1
+    assert repository.get_group(group.id).status is GroupStatus.READY
+    assert [row["container"] for row in repository.list_container_rows(group.id)] == [
+        _container(1), _container(2)
+    ]
+    database.close()
+
+
+def test_sea_freight_reopening_group_keeps_existing_invoice_bl_rows(
+    tmp_path: Path,
+) -> None:
+    path = _write_bl_bk(tmp_path, [
+        ("OTHER SHIP 100S", _container(1), "BL-A"),
+        ("OTHER SHIP 100S", _container(2), "BL-B"),
+    ])
+    database = Database(tmp_path / "state.db")
+    database.initialize()
+    repository = SeaFreightRepository(database)
+    service = SeaFreightReconciliationService(repository)
+    first = service.open_or_create(
+        _row(1, 100, "A").copy_with(bl="BL-A"), bk_path=path,
+        month=7, year=2026, source_batch_id=None,
+        source_item_index=0, source_sha256="first-bl",
+    )
+
+    second = service.open_or_create(
+        _row(1, 100, "B").copy_with(bl="BL-B"), bk_path=path,
+        month=7, year=2026, source_batch_id=None,
+        source_item_index=1, source_sha256="second-bl",
+    )
+
+    assert second.id == first.id
+    assert second.status is GroupStatus.READY
+    assert [row["container"] for row in repository.list_container_rows(first.id)] == [
+        _container(1), _container(2)
+    ]
+    database.close()
 def test_same_invoice_with_changed_business_data_is_conflict_not_link(
     tmp_path: Path,
 ) -> None:

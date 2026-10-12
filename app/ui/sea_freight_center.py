@@ -572,6 +572,7 @@ class SeaFreightReconciliationDialog(AppDialog):
         source_count = len(self._source_rows)
         unresolved_sources = sum(
             source.resolution_kind.value in {"AMBIGUOUS", "NOT_FOUND"}
+            and source.container_count == 0
             for source in self._source_rows
         )
         warning_sources = sum(
@@ -1090,7 +1091,10 @@ class ReconciliationSourceManagerDialog(AppDialog):
 
         for row_index, source in enumerate(sources):
             resolution_kind = source.resolution_kind.value
-            requires_attention = resolution_kind in {"AMBIGUOUS", "NOT_FOUND"}
+            requires_attention = (
+                resolution_kind in {"AMBIGUOUS", "NOT_FOUND"}
+                and source.container_count == 0
+            )
             has_warnings = bool(
                 source.invalid_container_count or source.duplicate_container_count
             )
@@ -1106,8 +1110,13 @@ class ReconciliationSourceManagerDialog(AppDialog):
             values = (
                 source.bk_sheet,
                 source.vessel_voyage_raw,
-                SeaFreightReconciliationDialog.SOURCE_RESOLUTION_LABELS.get(
-                    resolution_kind, resolution_kind
+                (
+                    "Khớp B/L"
+                    if resolution_kind in {"AMBIGUOUS", "NOT_FOUND"}
+                    and source.container_count > 0
+                    else SeaFreightReconciliationDialog.SOURCE_RESOLUTION_LABELS.get(
+                        resolution_kind, resolution_kind
+                    )
                 ),
                 source.container_count,
                 status,
