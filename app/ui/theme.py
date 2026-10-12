@@ -188,6 +188,11 @@ QFrame#excelSummaryMetric[tone="warning"] {{
 QFrame#excelSummaryMetric[tone="neutral"] {{
     border-top: 3px solid #94A3B8;
 }}
+QFrame#excelSummaryMetric[selected="true"] {{
+    background: #EFF6FF;
+    border: 2px solid {PRIMARY};
+    border-top: 3px solid {PRIMARY};
+}}
 QLabel#excelSummaryMetricLabel {{
     color: {MUTED_TEXT};
     font-size: 8.5pt;
@@ -257,6 +262,47 @@ QFrame#excelSummaryDetails {{
 QFrame#excelSummaryDetails[tone="warning"] {{
     background: #FFFCED;
     border-color: #E8D58B;
+}}
+QFrame#postingConfirmationDetails {{
+    background: {SURFACE};
+    border: 1px solid #BFDBFE;
+    border-radius: 10px;
+}}
+QLabel#postingDetailsTitle {{
+    color: {PRIMARY_DARK};
+    font-size: 11pt;
+    font-weight: 700;
+}}
+QLabel#postingDetailsDescription,
+QLabel#postingDetailsCount {{
+    color: {MUTED_TEXT};
+    font-size: 8.5pt;
+}}
+QToolButton#postingDetailsToggle {{
+    color: {PRIMARY_DARK};
+    border: none;
+    font-weight: 650;
+}}
+QTreeWidget#postingDetailsTree {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 7px;
+}}
+QFrame#postingDetailsSelected {{
+    background: #F6F9FE;
+    border: 1px solid #D8E5F5;
+    border-radius: 7px;
+}}
+QLabel#postingDetailsSelectedTitle {{
+    color: #173B6B;
+    font-weight: 700;
+}}
+QLabel#postingDetailsFieldName {{
+    color: #475467;
+    font-weight: 650;
+}}
+QLabel#postingDetailsFieldValue {{
+    color: #1F2937;
 }}
 QFrame#conflictProblemDetails {{
     background: {SURFACE};

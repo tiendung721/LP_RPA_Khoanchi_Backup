@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTableWidget,
+    QTreeWidget,
 )
 
 import app.ui.excel_dialogs as excel_dialogs_module
@@ -722,6 +723,112 @@ def test_posting_confirmation_summarizes_file_effects_in_plain_language() -> Non
     assert summary.tables[0].rows == (("T07 26", 1, 1, 1, 1, 2),)
     assert summary.notices[0].tone == "warning"
     assert "1 khoản sẽ thay thế" in summary.notices[0].text
+
+
+def test_posting_confirmation_details_keep_cell_and_source_counts_distinct() -> None:
+    plan = SimpleNamespace(
+        selected_sheet="T08 26",
+        target_sheets={"T08 26", "T09 26"},
+        items=[
+            SimpleNamespace(
+                source_indices=[0, 1],
+                source_items=[
+                    {"source_item_index": 0, "amount": 100, "invoice_no": "HD-1", "source_document_name": "a.pdf"},
+                    {"source_item_index": 1, "amount": 200, "invoice_no": "HD-2", "source_document_name": "b.pdf"},
+                ],
+                status="PLANNED", action="OVERWRITE",
+                cell_state=SimpleNamespace(kind="EMPTY", coordinate="AH42"),
+                sheet_name="T08 26", source_sqt=12345, input_sqt=99999,
+                selected_fee="NV", amount=300, current_value=None,
+                target_row=42, target_cell="AH42", container="ABCU1234567",
+            ),
+            SimpleNamespace(
+                source_indices=[2], source_items=[{"source_item_index": 2, "amount": -200}],
+                status="PLANNED", action="ADD",
+                cell_state=SimpleNamespace(kind="NUMBER", coordinate="AJ43"),
+                sheet_name="T08 26", source_sqt=12345, input_sqt=None,
+                selected_fee="HH", amount=-200, current_value=1000,
+                target_row=43, target_cell="AJ43", container="ABCU1234567",
+            ),
+            SimpleNamespace(
+                source_indices=[3], status="ALREADY_EXISTS", action=None,
+                cell_state=SimpleNamespace(kind="SAME_VALUE", coordinate="AK44"),
+                sheet_name="T08 26", source_sqt=12346, input_sqt=None,
+                selected_fee="NH", amount=400, current_value=400,
+                target_row=44, target_cell="AK44", container="TCLU7654321",
+            ),
+            SimpleNamespace(
+                source_indices=[4], status="USER_SKIPPED", action="KEEP_EXISTING",
+                cell_state=SimpleNamespace(kind="NUMBER", coordinate="AL10"),
+                sheet_name="T09 26", source_sqt=None, input_sqt=54321,
+                selected_fee="SEAL", amount=500, current_value=600,
+                target_row=10, target_cell="AL10", container="XYZU4567890",
+            ),
+        ],
+    )
+
+    summary = posting_confirmation_summary(plan)
+    details = summary.posting_details
+
+    assert details is not None
+    assert [metric.value for metric in summary.metrics] == [2, 3, 1, 1]
+    assert [len(details.rows_for(index)) for index in range(4)] == [2, 3, 1, 1]
+    assert details.cells[0].qt_label == "QT 12345"
+    assert details.cells[0].source_count == 2
+    assert [row.amount for row in details.write[:2]] == [100, 200]
+    assert details.cells[1].value_after == 800
+    assert details.skip[0].qt_label == "QT nguồn 54321"
+    assert "Giữ số tiền" in details.skip[0].reason
+
+
+def test_posting_confirmation_cards_show_inline_qt_details(qtbot) -> None:
+    plan = SimpleNamespace(
+        selected_sheet="T08 26", target_sheets={"T08 26"},
+        items=[
+            SimpleNamespace(
+                source_indices=[0], source_items=[{"source_item_index": 0, "amount": 500, "invoice_no": "HD-1", "source_document_name": "a.pdf"}],
+                status="PLANNED", action="OVERWRITE",
+                cell_state=SimpleNamespace(kind="NUMBER", coordinate="AH42"),
+                sheet_name="T08 26", source_sqt=12345,
+                selected_fee="NV", amount=500, current_value=400,
+                target_row=42, target_cell="AH42", container="ABCU1234567",
+            ),
+            SimpleNamespace(
+                source_indices=[1], status="ALREADY_EXISTS", action=None,
+                cell_state=SimpleNamespace(kind="SAME_VALUE", coordinate="AK44"),
+                sheet_name="T08 26", source_sqt=12346,
+                selected_fee="NH", amount=300, current_value=300,
+                target_row=44, target_cell="AK44", container="TCLU7654321",
+            ),
+        ],
+    )
+    dialog = ExcelConfirmationDialog(
+        posting_confirmation_summary(plan), confirm_label="Nhập 1 khoản vào BK"
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    cards = dialog.findChildren(QFrame, "excelSummaryMetric")
+    tree = dialog.findChild(QTreeWidget, "postingDetailsTree")
+
+    assert len(cards) == 4
+    assert tree is not None
+    qtbot.mouseClick(cards[1], Qt.MouseButton.LeftButton)
+    assert dialog.posting_details_widget.metric_index == 1
+    assert tree.topLevelItem(0).text(0) == "QT 12345 · T08 26"
+    assert "400 đ" in dialog.posting_details_widget.fields["before"].text()
+    assert "500 đ" in dialog.posting_details_widget.fields["after"].text()
+    dialog.posting_details_widget.search.setText("99999")
+    assert tree.topLevelItemCount() == 0
+    dialog.posting_details_widget.search.clear()
+    summary_table = dialog.findChild(QTableWidget, "excelSummaryTable")
+    summary_table.cellClicked.emit(0, 0)
+    assert dialog.posting_details_widget.sheet_filter.currentData() == "T08 26"
+    qtbot.mouseClick(cards[2], Qt.MouseButton.LeftButton)
+    assert tree.topLevelItem(0).text(0) == "QT 12346 · T08 26"
+    qtbot.mouseClick(cards[3], Qt.MouseButton.LeftButton)
+    assert tree.topLevelItemCount() == 0
+    assert "Không có khoản nào" in dialog.posting_details_widget.selected_title.text()
+    assert dialog.confirm_button.text() == "Nhập 1 khoản vào BK"
 
 
 def test_regular_posting_still_reanalyzes_the_selected_month(monkeypatch) -> None:

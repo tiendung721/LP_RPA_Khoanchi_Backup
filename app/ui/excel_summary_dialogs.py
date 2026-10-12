@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -30,7 +30,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.constants import FEE_CATALOG
+
 from .app_dialog import AppDialog
+from .posting_confirmation_details import (
+    PostingConfirmationDetails,
+    PostingDetailData,
+    PostingDetailRow,
+)
 from .presentation import fit_window_to_screen
 
 
@@ -74,6 +81,7 @@ class ExcelOperationSummary:
     details: tuple[SummaryDetails, ...] = ()
     change_count: int = 0
     issue_count: int = 0
+    posting_details: PostingDetailData | None = None
 
 
 def _attribute(source: Any, *names: str, default: Any = None) -> Any:
@@ -160,6 +168,129 @@ def _posting_bucket(item: Any) -> str:
     if status == "PLANNED":
         return "write_new" if cell_kind in {"EMPTY", "ZERO"} else "overwrite"
     return "skip"
+
+
+def _posting_detail_data(plan: Any) -> PostingDetailData:
+    cells: list[PostingDetailRow] = []
+    write: list[PostingDetailRow] = []
+    already: list[PostingDetailRow] = []
+    skip: list[PostingDetailRow] = []
+    for item in _sequence(_attribute(plan, "items", default=())):
+        bucket = _posting_bucket(item)
+        source_indices = _sequence(_attribute(item, "source_indices", default=()))
+        source_items = {
+            _attribute(source, "source_item_index"): source
+            for source in _sequence(_attribute(item, "source_items", default=()))
+        }
+        sources = (
+            [(index, source_items.get(index)) for index in source_indices]
+            if source_indices else [(None, None)]
+        )
+        sheet = str(
+            _attribute(item, "sheet_name", default=None)
+            or _attribute(plan, "selected_sheet", default=None)
+            or "Chưa xác định sheet"
+        )
+        bk_sqt = _attribute(item, "source_sqt", default=None)
+        input_sqt = _attribute(item, "input_sqt", default=None)
+        sqt = bk_sqt if bk_sqt is not None else input_sqt
+        sqt_origin = "BK" if bk_sqt is not None else "Nguồn"
+        fee_code = str(_attribute(item, "selected_fee", "fee", default="") or "")
+        fee_description = FEE_CATALOG.get(fee_code, fee_code)
+        short_fee = fee_description.split(",", 1)[0].split(";", 1)[0]
+        fee = f"{fee_code} · {short_fee}" if fee_code in FEE_CATALOG else fee_code
+        cell_state = _attribute(item, "cell_state", default=None)
+        before = _attribute(item, "current_value", default=None)
+        amount = _attribute(item, "amount", default=None)
+        action = _code(_attribute(item, "action", default=""))
+        if bucket in {"write_new", "overwrite"}:
+            if action == "ADD" and isinstance(before, (int, float)) and not isinstance(before, bool):
+                after = before + amount if isinstance(amount, (int, float)) else None
+                reason = "Điều chỉnh số tiền đang có trong BK."
+            else:
+                after = amount
+                reason = (
+                    "Thay số tiền đang có trong BK."
+                    if bucket == "overwrite" else "Ghi số tiền vào ô BK."
+                )
+        else:
+            after = before
+            if bucket == "already":
+                reason = "Số tiền khoản phí đã đúng với BK; không ghi lại ô tiền."
+            elif action == "KEEP_FORMULA":
+                reason = "Giữ công thức đang có trong BK theo lựa chọn."
+            elif action == "KEEP_EXISTING":
+                reason = "Giữ số tiền đang có trong BK theo lựa chọn."
+            elif _code(_attribute(item, "status", default="")) == "NOT_MATCHED":
+                reason = "Không tìm thấy dòng BK phù hợp."
+            elif _code(_attribute(item, "status", default="")) == "UNRESOLVED":
+                reason = "Chưa xác định được vị trí BK."
+            else:
+                reason = "Bỏ qua khoản phí theo lựa chọn."
+        result = bucket
+        target_row = _attribute(item, "target_row", default=None)
+        target_cell = _attribute(item, "target_cell", default=None) or _attribute(
+            cell_state, "coordinate", default=None
+        )
+        invoice_candidates = _sequence(_attribute(item, "invoice_candidates", default=()))
+        common = dict(
+            sheet_name=sheet,
+            sqt=sqt,
+            sqt_origin=sqt_origin,
+            container=_attribute(item, "container", default=None),
+            fee=fee,
+            value_before=before,
+            value_after=after,
+            target_row=target_row,
+            target_cell=target_cell,
+            result=result,
+            reason=reason,
+            source_count=len(sources),
+        )
+        if bucket in {"write_new", "overwrite"}:
+            documents = [
+                str(name) for _index, source in sources
+                if (name := _attribute(source, "source_document_name", default=None))
+            ]
+            invoices = [
+                str(number) for _index, source in sources
+                if (number := _attribute(source, "invoice_no", default=None))
+            ]
+            cells.append(
+                PostingDetailRow(
+                    **common,
+                    amount=amount,
+                    invoice_no=", ".join(dict.fromkeys(invoices)) or (
+                        str(invoice_candidates[0]) if len(invoice_candidates) == 1 else None
+                    ),
+                    source_document_name=", ".join(dict.fromkeys(documents)) or None,
+                    source_row=None,
+                )
+            )
+        destination = (
+            write if bucket in {"write_new", "overwrite"}
+            else already if bucket == "already"
+            else skip
+        )
+        for index, source in sources:
+            source_amount = _attribute(
+                source, "amount", default=amount if len(sources) == 1 else None
+            )
+            source_index = int(index) + 1 if index is not None else None
+            destination.append(
+                PostingDetailRow(
+                    **common,
+                    amount=source_amount,
+                    invoice_no=_attribute(source, "invoice_no", default=None) or (
+                        str(invoice_candidates[0]) if len(invoice_candidates) == 1 else None
+                    ),
+                    source_document_name=_attribute(
+                        source, "source_document_name", default=None
+                    ),
+                    source_row=source_index,
+                )
+            )
+    return PostingDetailData(tuple(cells), tuple(write), tuple(already), tuple(skip))
 
 
 def daily_confirmation_summary(
@@ -331,6 +462,7 @@ def posting_confirmation_summary(plan: Any) -> ExcelOperationSummary:
         ) if rows else (),
         change_count=write_count,
         issue_count=totals["overwrite"],
+        posting_details=_posting_detail_data(plan),
     )
 
 
@@ -685,6 +817,31 @@ def payment_completion_summary(result: Any) -> ExcelOperationSummary:
     )
 
 
+class _PostingMetricCard(QFrame):
+    activated = Signal(int)
+
+    def __init__(self, metric_index: int) -> None:
+        super().__init__()
+        self.metric_index = metric_index
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event: Any) -> None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self.activated.emit(self.metric_index)
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.activated.emit(self.metric_index)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class _ExcelSummaryDialog(AppDialog):
     """Khung trình bày chung; footer do lớp con cung cấp."""
 
@@ -701,6 +858,8 @@ class _ExcelSummaryDialog(AppDialog):
         # phải QWidget; ở runtime parent vẫn luôn là cửa sổ chính thực tế.
         super().__init__(parent if isinstance(parent, QWidget) else None)
         self.summary = summary
+        self._posting_metric_cards: list[_PostingMetricCard] = []
+        self.posting_details_widget: PostingConfirmationDetails | None = None
         self.setObjectName("excelSummaryDialog")
         self.setWindowTitle(summary.title)
         self.setMinimumSize(700, 460)
@@ -712,6 +871,7 @@ class _ExcelSummaryDialog(AppDialog):
         scroll.setObjectName("excelSummaryScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll = scroll
         body = QWidget()
         body.setObjectName("excelSummaryBody")
         body_layout = QVBoxLayout(body)
@@ -720,11 +880,15 @@ class _ExcelSummaryDialog(AppDialog):
         self._build_metrics(body_layout)
         self._build_notices(body_layout)
         self._build_tables(body_layout)
+        self._build_posting_details(body_layout)
         self._build_details(body_layout)
         body_layout.addStretch(1)
         scroll.setWidget(body)
         self._outer.addWidget(scroll, 1)
-        fit_window_to_screen(self, 860, 620)
+        if summary.posting_details is not None:
+            fit_window_to_screen(self, 1100, 800)
+        else:
+            fit_window_to_screen(self, 860, 620)
 
     def _build_header(self) -> None:
         header = QFrame()
@@ -761,9 +925,17 @@ class _ExcelSummaryDialog(AppDialog):
         grid = QGridLayout()
         grid.setSpacing(10)
         for index, metric in enumerate(self.summary.metrics):
-            card = QFrame()
+            card = (
+                _PostingMetricCard(index)
+                if self.summary.posting_details is not None else QFrame()
+            )
             card.setObjectName("excelSummaryMetric")
             card.setProperty("tone", metric.tone)
+            if isinstance(card, _PostingMetricCard):
+                card.setAccessibleName(f"Xem chi tiết {metric.label}: {metric.value} {metric.note}")
+                card.setProperty("selected", index == 0)
+                card.activated.connect(self._select_posting_metric)
+                self._posting_metric_cards.append(card)
             card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(13, 10, 13, 10)
@@ -777,9 +949,18 @@ class _ExcelSummaryDialog(AppDialog):
             card_layout.addWidget(label)
             card_layout.addWidget(value)
             if metric.note:
-                note = QLabel(metric.note)
+                note_text = (
+                    f"{metric.note} · Bấm để xem"
+                    if isinstance(card, _PostingMetricCard) else metric.note
+                )
+                note = QLabel(note_text)
                 note.setObjectName("excelSummaryMetricNote")
                 card_layout.addWidget(note)
+                if isinstance(card, _PostingMetricCard):
+                    note.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            if isinstance(card, _PostingMetricCard):
+                label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                value.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             grid.addWidget(card, index // 4, index % 4)
         layout.addLayout(grid)
 
@@ -846,7 +1027,38 @@ class _ExcelSummaryDialog(AppDialog):
             header.setStretchLastSection(False)
             table.setMinimumHeight(min(260, 72 + len(table_data.rows) * 34))
             table.setMaximumHeight(min(300, 76 + len(table_data.rows) * 34))
+            if self.summary.posting_details is not None and table_data.title == "Kết quả theo sheet":
+                table.setCursor(Qt.CursorShape.PointingHandCursor)
+                table.cellClicked.connect(
+                    lambda row, _column, current=table: self._set_posting_sheet(
+                        current.item(row, 0).text()
+                    )
+                )
             layout.addWidget(table)
+
+    def _build_posting_details(self, layout: QVBoxLayout) -> None:
+        if self.summary.posting_details is None:
+            return
+        self.posting_details_widget = PostingConfirmationDetails(
+            self.summary.posting_details
+        )
+        layout.addWidget(self.posting_details_widget)
+
+    def _select_posting_metric(self, metric_index: int) -> None:
+        if self.posting_details_widget is None:
+            return
+        for index, card in enumerate(self._posting_metric_cards):
+            card.setProperty("selected", index == metric_index)
+            card.style().unpolish(card)
+            card.style().polish(card)
+        self.posting_details_widget.set_metric(metric_index)
+        self._scroll.verticalScrollBar().setValue(self.posting_details_widget.y())
+
+    def _set_posting_sheet(self, sheet_name: str) -> None:
+        if self.posting_details_widget is None:
+            return
+        self.posting_details_widget.set_sheet(sheet_name)
+        self._scroll.verticalScrollBar().setValue(self.posting_details_widget.y())
 
     def _build_details(self, layout: QVBoxLayout) -> None:
         for detail in self.summary.details:
