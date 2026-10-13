@@ -17,7 +17,11 @@ from PySide6.QtWidgets import (
 )
 
 from .app_dialog import AppDialog
-from .review_merge import FIELD_LABELS, choices_for_field
+from .review_merge import (
+    FIELD_LABELS,
+    choices_for_field,
+    combined_invoice_no_for_same_date,
+)
 from .review_table_model import RULE_CATALOG, ReviewRow
 
 
@@ -76,7 +80,15 @@ class ReviewMergeDialog(AppDialog):
             notices.append("Có dòng trùng hoàn toàn; hãy xác nhận đây là các khoản tiền cần cộng.")
         if rows[0].fee == "CB":
             notices.append("Cước biển dùng tiền tổng hóa đơn; chỉ gộp nếu các số tiền thực sự cộng dồn. Quy tắc giữ HD.")
-        if conflicts:
+        combined_invoice_no = (
+            combined_invoice_no_for_same_date(rows) if "invoice_no" in conflicts else None
+        )
+        if combined_invoice_no is not None:
+            notices.append(
+                "Các dòng cùng ngày HĐ nhưng khác số HĐ. Nếu gộp, dòng tổng sẽ "
+                f"giữ đủ các số HĐ: {combined_invoice_no}."
+            )
+        if any(field != "invoice_no" or combined_invoice_no is None for field in conflicts):
             notices.append("Chọn thông tin sẽ giữ trên dòng tổng. Giá trị khác sẽ không còn trong JSON sau khi lưu.")
         for notice in notices:
             label = QLabel(notice)
@@ -86,6 +98,8 @@ class ReviewMergeDialog(AppDialog):
         form_widget = QWidget()
         form = QFormLayout(form_widget)
         for field in conflicts:
+            if field == "invoice_no" and combined_invoice_no is not None:
+                continue
             if field == "rule" and rows[0].fee == "CB":
                 continue
             combo = QComboBox()                             

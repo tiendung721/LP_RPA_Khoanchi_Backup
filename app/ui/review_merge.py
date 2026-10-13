@@ -164,6 +164,33 @@ def conflicting_fields(rows: Sequence[ReviewRow]) -> tuple[str, ...]:
     return tuple(field for field in fields if len(choices_for_field(rows, field)) > 1)
 
 
+def combined_invoice_no_for_same_date(rows: Sequence[ReviewRow]) -> str | None:
+    """Giữ các số HĐ khác nhau khi toàn nhóm có cùng ngày HĐ hợp lệ."""
+
+    if len(rows) < 2:
+        return None
+    invoice_date = _date_key(rows[0].invoice_date)
+    if invoice_date is None or any(
+        _date_key(row.invoice_date) != invoice_date for row in rows[1:]
+    ):
+        return None
+
+    numbers: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row.invoice_no, str):
+            continue
+        # Dòng đã gộp có thể được gộp tiếp sau khi người dùng chỉnh sửa.
+        for part in row.invoice_no.split(","):
+            number = " ".join(part.split())
+            key = _invoice_key(number)
+            if key is None or key in seen:
+                continue
+            seen.add(key)
+            numbers.append(number)
+    return ", ".join(numbers) if len(numbers) > 1 else None
+
+
 def is_exact_duplicate_group(rows: Sequence[ReviewRow]) -> bool:
     objects = [row.to_object() for row in rows]
     return any(left == right for index, left in enumerate(objects) for right in objects[index + 1 :])
@@ -182,7 +209,11 @@ def merged_row(
         raise ValueError("Cần ít nhất hai dòng có số tiền hợp lệ để gộp.")
     selected = selections or {}
     payload = rows[0].to_object()
+    combined_invoice_no = combined_invoice_no_for_same_date(rows)
     for field in MERGE_FIELDS:
+        if field == "invoice_no" and combined_invoice_no is not None:
+            payload[field] = combined_invoice_no
+            continue
         if field in selected:
             payload[field] = selected[field]
             continue

@@ -28,10 +28,11 @@ Bước 1 hoặc chọn JSON thủ công.
   xem JSON thô, lưu và xác nhận.
 - Với kết quả GPT bóc hóa đơn, cửa sổ kiểm tra tự gộp các dòng cùng container,
   cùng loại cước và trùng số HĐ hoặc ngày HĐ khi thông tin còn lại thống nhất.
-  Nếu số HĐ, ngày HĐ, SQT hoặc thông tin nguồn mâu thuẫn, người dùng chọn giá trị
-  giữ trên dòng tổng trước khi gộp. Dòng trùng hoàn toàn và cước biển cũng cần
-  xác nhận; `CXD` phải được phân loại trước. Chỉ khi bấm **Lưu**, một dòng tổng
-  mới được ghi vào JSON để nhập BK theo luồng hiện có.
+  Nếu cùng ngày HĐ nhưng khác số HĐ, người dùng xác nhận trước khi gộp; dòng tổng
+  giữ đủ các số HĐ khác nhau, ví dụ `14171, 14172`. Ngày HĐ, SQT hoặc thông tin
+  nguồn mâu thuẫn vẫn cần chọn giá trị giữ trên dòng tổng. Dòng trùng hoàn toàn
+  và cước biển cũng cần xác nhận; `CXD` phải được phân loại trước. Chỉ khi bấm
+  **Lưu**, một dòng tổng mới được ghi vào JSON để nhập BK theo luồng hiện có.
 - Bước 2 hiển thị trạng thái file và thời điểm lưu gần nhất theo định dạng
   `HH:mm ngày dd/MM/yyyy`.
 - Bước 3 cho phép chọn nhiều sheet tháng trong cùng một tác vụ khi đồng bộ

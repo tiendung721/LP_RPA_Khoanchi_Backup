@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.ui.review_merge import (
     candidate_groups,
+    combined_invoice_no_for_same_date,
     conflicting_fields,
     has_valid_amounts,
     is_exact_duplicate_group,
@@ -85,9 +86,29 @@ def test_conflicts_and_exact_duplicates_need_review() -> None:
     right = row(200, invoice_no="INV-B", sqt=2)
     assert rows_match(left, right)  # Cùng ngày HĐ.
     assert conflicting_fields([left, right]) == ("invoice_no", "sqt")
-    assert merged_row([left, right], {"invoice_no": "INV-B", "sqt": 2}).amount == 300
+    merged = merged_row([left, right], {"sqt": 2})
+    assert merged.amount == 300
+    assert merged.invoice_no == "INV-A, INV-B"
     assert is_exact_duplicate_group([left, row(100, invoice_no="INV-A", sqt=1)])
     assert not has_valid_amounts([left, row(None)])
+
+
+def test_same_date_combines_unique_invoice_numbers_in_source_order() -> None:
+    rows = [
+        row(100, invoice_no=" 014171 "),
+        row(200, invoice_no="14172"),
+        row(300, invoice_no="014171, 14173"),
+    ]
+    assert combined_invoice_no_for_same_date(rows) == "014171, 14172, 14173"
+    assert merged_row(rows).invoice_no == "014171, 14172, 14173"
+
+
+def test_different_invoice_dates_do_not_combine_invoice_numbers() -> None:
+    rows = [
+        row(100, invoice_no="14171", invoice_date="2026-08-29"),
+        row(200, invoice_no="14172", invoice_date="2026-08-30"),
+    ]
+    assert combined_invoice_no_for_same_date(rows) is None
 
 
 def test_rule_conflict_keeps_the_user_selected_rule_and_cb_uses_hd() -> None:

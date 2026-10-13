@@ -3432,10 +3432,13 @@ def test_review_merged_total_posts_as_one_expense(tmp_path: Path) -> None:
     combined = merged_row(
         [
             ReviewRow(cont=container, fee="VSDL", rule="ST", amount=amount,
-                      invoice_no="26955", invoice_date="2026-08-29")
-            for amount in (291_600, 70_200, 75_600)
+                      invoice_no=invoice_no, invoice_date="2026-08-29")
+            for amount, invoice_no in (
+                (291_600, "26955"), (70_200, "26956"), (75_600, "26955")
+            )
         ]
     )
+    assert combined.invoice_no == "26955, 26956"
     ready.write_text(
         json.dumps({"v": 4, "d": [combined.to_object()]}, ensure_ascii=False),
         encoding="utf-8",
@@ -3460,7 +3463,7 @@ def test_review_merged_total_posts_as_one_expense(tmp_path: Path) -> None:
     try:
         amount_column, invoice_column = POSTING_INVOICE_LAYOUT["VSDL"]
         assert workbook["T08 26"].cell(2, amount_column).value == 437_400
-        assert workbook["T08 26"].cell(2, int(invoice_column)).value == "26955"
+        assert workbook["T08 26"].cell(2, int(invoice_column)).value == "26955, 26956"
     finally:
         workbook.close()
 

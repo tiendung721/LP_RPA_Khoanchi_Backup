@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from PySide6.QtWidgets import QDialog, QDialogButtonBox
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel
 
 from app.config import AppSettings
 from app.services.batch_service import BatchService
@@ -143,7 +143,7 @@ def test_editing_fee_merges_with_existing_rows(qtbot, monkeypatch) -> None:
         window.close()
 
 
-def test_conflicting_invoice_requires_selection_and_cancel_keeps_rows(qtbot, monkeypatch) -> None:
+def test_conflicting_invoice_requires_confirmation_and_cancel_keeps_rows(qtbot, monkeypatch) -> None:
     window = ReviewWindow(_payload([_row(100, invoice_no="INV-A"), _row(200, invoice_no="INV-B")]))
     qtbot.addWidget(window)
     try:
@@ -155,15 +155,21 @@ def test_conflicting_invoice_requires_selection_and_cancel_keeps_rows(qtbot, mon
     finally:
         window.close()
 
-    window = ReviewWindow(_payload([_row(100, invoice_no="INV-A"), _row(200, invoice_no="INV-B")]))
+    saved_documents: list[Any] = []
+    window = ReviewWindow(
+        _payload([_row(100, invoice_no="INV-A"), _row(200, invoice_no="INV-B")]),
+        save_handler=lambda _batch_id, document: saved_documents.append(document),
+    )
     qtbot.addWidget(window)
     monkeypatch.setattr(ReviewMergeDialog, "exec", lambda _dialog: QDialog.DialogCode.Accepted)
-    monkeypatch.setattr(ReviewMergeDialog, "selected_values", lambda _dialog: {"invoice_no": "INV-B"})
     try:
         window._run_merge_review(show_dialogs=True)
         assert window.model.rowCount() == 1
-        assert window.model.row_at(0).invoice_no == "INV-B"
+        assert window.model.row_at(0).invoice_no == "INV-A, INV-B"
         assert window.model.row_at(0).amount == 300
+        assert window.save_working()
+        assert len(saved_documents[0].rows) == 1
+        assert saved_documents[0].rows[0].invoice_no == "INV-A, INV-B"
     finally:
         window.model.mark_clean()
         window.close()
@@ -194,17 +200,35 @@ def test_accepting_conflict_does_not_merge_an_unmatched_third_line(qtbot, monkey
 
 
 def test_review_dialog_requires_explicit_conflict_choice(qtbot) -> None:
+    first = _row(100, invoice_no="INV-A")
+    second = _row(200, invoice_no="INV-B")
+    first.sqt = 1
+    second.sqt = 2
     dialog = ReviewMergeDialog(
-        [_row(100, invoice_no="INV-A"), _row(200, invoice_no="INV-B")],
+        [first, second],
         [0, 1],
-        ("invoice_no",),
+        ("invoice_no", "sqt"),
     )
     qtbot.addWidget(dialog)
     button = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok)
     assert not button.isEnabled()
-    dialog._selectors["invoice_no"].setCurrentIndex(2)
+    assert "invoice_no" not in dialog._selectors
+    dialog._selectors["sqt"].setCurrentIndex(2)
     assert button.isEnabled()
-    assert dialog.selected_values() == {"invoice_no": "INV-B"}
+    assert dialog.selected_values() == {"sqt": 2}
+    dialog.close()
+
+
+def test_review_dialog_shows_combined_invoices_without_choice(qtbot) -> None:
+    dialog = ReviewMergeDialog(
+        [_row(100, invoice_no="14171"), _row(200, invoice_no="14172")],
+        [0, 1],
+        ("invoice_no",),
+    )
+    qtbot.addWidget(dialog)
+    assert dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+    assert dialog.selected_values() == {}
+    assert any("14171, 14172" in label.text() for label in dialog.findChildren(QLabel))
     dialog.close()
 
 
