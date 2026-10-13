@@ -323,7 +323,7 @@ class WorkflowPage(QWidget):
         self.carrier_export_status_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
-        self.posting_export_status_label = QLabel("Chưa có lượt nhập BK để xuất")
+        self.posting_export_status_label = QLabel("Chưa có dòng BK vừa nhập để xuất")
         self.posting_export_status_label.setObjectName("postingExportStatusLabel")
         self.posting_export_status_label.setWordWrap(True)
         self.posting_export_status_label.setProperty("muted", True)
@@ -347,7 +347,7 @@ class WorkflowPage(QWidget):
         self.export_posting_button = QPushButton("Xuất Excel")
         self.export_posting_button.setObjectName("exportPostingWorkbookButton")
         self.export_posting_button.setProperty("primary", True)
-        self.export_posting_button.setAccessibleName("Xuất các khoản chi của lượt nhập BK gần nhất")
+        self.export_posting_button.setAccessibleName("Xuất các dòng BK được cập nhật trong lượt nhập gần nhất")
         self.export_posting_button.setEnabled(False)
         self.view_daily_sync_button = QPushButton("Chưa có dữ liệu")
         self.view_daily_sync_button.setObjectName("viewLatestDailySyncButton")
@@ -448,8 +448,8 @@ class WorkflowPage(QWidget):
             self.view_expense_posting_button,
         )
         self.posting_export_action = add_excel_action(
-            "Kết quả nhập BK → Excel",
-            "Xuất tất cả khoản chi của lượt nhập BK gần nhất, kèm file nguồn và trạng thái.",
+            "Các dòng BK vừa nhập → Excel",
+            "Xuất các dòng BK có thay đổi trong lượt nhập gần nhất; tô màu ô vừa cập nhật.",
             self.posting_export_status_label,
             self.export_posting_button,
             self.view_posting_export_button,
@@ -883,7 +883,7 @@ class WorkflowPage(QWidget):
         self.posting_export_status_label.setText(
             message or (
                 "Sẵn sàng xuất lượt nhập gần nhất"
-                if available else "Chưa có lượt nhập BK để xuất"
+                if available else "Chưa có dòng BK vừa nhập để xuất"
             )
         )
 

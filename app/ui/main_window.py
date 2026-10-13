@@ -719,7 +719,13 @@ class MainWindow(QMainWindow):
         try:
             preview = service.latest_preview()
             if preview is None:
-                QMessageBox.information(self, "Chưa có dữ liệu", "Chưa có lượt nhập BK hoàn tất với dữ liệu để xuất.")
+                QMessageBox.information(
+                    self, "Chưa có dữ liệu",
+                    "Chưa có ảnh chụp BK theo format mới. Hãy hoàn tất một lượt nhập BK mới có thay đổi.",
+                )
+                return
+            if preview.row_count == 0:
+                QMessageBox.information(self, "Không có dòng BK", "Lượt này không có dòng BK được cập nhật.")
                 return
             output_dir = str(_attribute(self._settings, "output_dir", default="") or "").strip()
             default_dir = Path(output_dir) if output_dir else Path.home()
@@ -1859,9 +1865,9 @@ class MainWindow(QMainWindow):
         if isinstance(result, PostingExportResult):
             self._load_excel_history()
             QMessageBox.information(
-                self, "Đã xuất kết quả nhập BK",
-                f"Đã xuất {result.row_count} dòng của {result.invoice_count} HĐ.\n"
-                f"Tổng tiền ghi lượt này: {result.written_total:,.0f} đ\n\n"
+                self, "Đã xuất các dòng BK vừa nhập",
+                f"Đã xuất {result.row_count} dòng BK / {result.sqt_count} SQT "
+                f"trên {result.sheet_count} sheet tháng.\n\n"
                 f"File: {result.target_path}",
             )
             return
@@ -2330,12 +2336,18 @@ class MainWindow(QMainWindow):
         )
         self.workflow_page.set_latest_excel_data_available("posting_export", available_file)
         if preview is None:
-            self.workflow_page.set_posting_export_available(False)
+            self.workflow_page.set_posting_export_available(
+                False, "Chưa có ảnh chụp BK theo format mới; cần lượt nhập mới có thay đổi",
+            )
+        elif preview.row_count == 0:
+            self.workflow_page.set_posting_export_available(
+                False, f"Lượt #{preview.run_id}: không có dòng BK được cập nhật",
+            )
         else:
             self.workflow_page.set_posting_export_available(
                 True,
-                f"Lượt #{preview.run_id}: {preview.invoice_count} HĐ, "
-                f"{preview.row_count} dòng; đã ghi {preview.written_total:,.0f} đ",
+                f"Lượt #{preview.run_id}: {preview.sqt_count} SQT, "
+                f"{preview.row_count} dòng BK trên {preview.sheet_count} tháng",
             )
 
     @Slot(str)

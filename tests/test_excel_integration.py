@@ -1889,11 +1889,11 @@ def test_posting_allocates_two_documents_to_two_months_in_one_atomic_apply(
     assert result.target_sheets == ("T06 26", "T07 26")
     assert result.posted_source_items == 15
     snapshot = postings.export_snapshots[result.run_id]
-    assert snapshot["invoice_count"] == 2
+    assert snapshot["version"] == 2
     assert snapshot["row_count"] == 15
-    assert {row["source_document_name"] for row in snapshot["rows"]} == {
-        "Hoa_don_A.pdf", "Hoa_don_B.pdf"
-    }
+    assert snapshot["sqt_count"] == 15
+    assert {sheet["name"] for sheet in snapshot["sheets"]} == {"T06 26", "T07 26"}
+    assert all(row["changed_columns"] for sheet in snapshot["sheets"] for row in sheet["rows"])
     assert len(list((runtime / "Backup").glob("*.xlsx"))) == 1
     workbook = load_workbook(target, data_only=False)
     try:
@@ -3203,7 +3203,8 @@ def test_posting_history_preserves_keep_action_and_cell_value(
     assert postings.items[0]["value_after"] == existing
     assert postings.items[0]["match_reason"] == "CONTAINER_ONLY"
     assert postings.metadata["batch_id"] == 71
-    assert postings.export_snapshots[result.run_id]["rows"][0]["status"] == "Giữ nguyên"
+    assert postings.export_snapshots[result.run_id]["row_count"] == 0
+    assert postings.export_snapshots[result.run_id]["sheets"] == []
     assert not (runtime_dir / "Backup").exists()
 
 
