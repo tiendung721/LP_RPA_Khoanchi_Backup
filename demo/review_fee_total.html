@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Demo — Tổng tiền theo loại cước</title>
+  <style>
+    :root { font-family: "Segoe UI", Arial, sans-serif; color: #092449; background: #dce6f2; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; padding: 16px; display: grid; place-items: center; }
+    .window { width: min(1400px, 100%); height: min(940px, calc(100vh - 32px)); min-height: 620px; display: flex; flex-direction: column; background: #f3f7fd; border: 1px solid #438ef0; border-radius: 10px; box-shadow: 0 16px 36px #14345a38; overflow: hidden; }
+    .titlebar { height: 38px; flex: 0 0 38px; display: flex; align-items: center; gap: 9px; padding: 0 11px; color: white; background: #0877d1; font-size: 14px; }
+    .app-icon { width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid #b9d9f1; font-size: 15px; }
+    .window-controls { margin-left: auto; font-size: 18px; letter-spacing: 18px; white-space: nowrap; }
+    .content { min-height: 0; flex: 1; padding: 16px 15px 0; display: flex; flex-direction: column; }
+    h1 { margin: 0; color: #092245; font-size: 29px; line-height: 1.25; }
+    .filename { margin: 2px 0 11px; color: #6382af; font-size: 14px; }
+    .metadata { min-height: 51px; display: grid; grid-template-columns: 1.2fr 1fr 1.2fr auto; align-items: center; gap: 14px; padding: 9px 13px; background: #fff; border: 1px solid #d1deee; border-radius: 11px; box-shadow: 0 1px 2px #b6c8da20; font-size: 15px; }
+    .muted { color: #5d7dad; }
+    .metadata strong { margin-left: 7px; color: #0a2447; font-weight: 600; }
+    .technical { border: 0; background: transparent; color: #264d83; font: inherit; white-space: nowrap; cursor: pointer; }
+    .metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+    .metric { display: flex; justify-content: space-between; gap: 8px; min-width: 0; padding: 7px 11px; background: white; border: 1px solid #d1deee; border-radius: 9px; font-size: 15px; }
+    .metric strong { white-space: nowrap; }
+    .valid { color: #058746; } .warning { color: #ac6400; } .error { color: #d42424; }
+    .filters { display: grid; grid-template-columns: 1fr 1fr 119px; gap: 9px; margin-top: 11px; }
+    input, select, button { font: inherit; }
+    input, select { width: 100%; min-width: 0; height: 47px; padding: 0 12px; border: 1px solid #c0d0e4; border-radius: 10px; background: white; color: #092449; font-size: 15px; }
+    input::placeholder { color: #8ba0bf; }
+    input:focus, select:focus { outline: 2px solid #75b3ff; outline-offset: 1px; }
+    select { cursor: pointer; }
+    button { cursor: pointer; }
+    .clear { border: 1px solid #c0d0e4; border-radius: 10px; background: white; color: #092449; font-size: 15px; }
+    .clear:hover { background: #edf5ff; }
+    .actions { min-height: 68px; display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
+    .actions button { height: 47px; padding: 0 18px; border: 1px solid #bfd0e7; border-radius: 10px; background: #fff; color: #0a2447; }
+    .actions button:disabled { color: #9bb0ca; background: #eef2f7; cursor: default; }
+    .actions .danger { color: #c72020; border-color: #ffb7b7; }
+    .table-wrap { flex: 1; min-height: 200px; overflow: auto; border: 1px solid #d4e0ee; border-radius: 10px; background: white; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 15px; }
+    th { position: sticky; top: 0; z-index: 1; height: 47px; background: #eaf1f8; border-bottom: 1px solid #d4e0ee; font-weight: 500; }
+    th, td { padding: 0 10px; border-right: 1px solid #dfe8f2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    th:last-child, td:last-child { border-right: 0; }
+    td { height: 40px; border-bottom: 1px solid #dcece5; background: #eafbf1; }
+    .amount { text-align: right; }
+    .center { text-align: center; }
+    .dash { color: #7890a8; }
+    .empty { padding: 30px; text-align: center; background: white; color: #6680a4; }
+    .footer { flex: 0 0 auto; min-height: 70px; display: flex; align-items: center; gap: 15px; padding: 8px 15px; background: #f3f7fd; border-top: 1px solid #d7e2f0; }
+    .row-count { color: #5d7dad; white-space: nowrap; font-size: 15px; }
+    .filtered-total { display: flex; align-items: center; gap: 9px; padding: 9px 13px; background: #e6f1ff; border: 1px solid #b1d1ff; border-radius: 9px; color: #164985; white-space: nowrap; font-size: 15px; }
+    .filtered-total[hidden] { display: none; }
+    .filtered-total strong { color: #06438d; font-size: 18px; }
+    .footer-actions { margin-left: auto; display: flex; gap: 9px; }
+    .footer-actions button { min-width: 105px; height: 45px; padding: 0 15px; border: 1px solid #bdcfe6; border-radius: 9px; background: white; color: #102c51; }
+    .footer-actions .save { background: #2468e8; color: white; border-color: #2468e8; }
+    .demo-ribbon { position: absolute; top: 60px; right: max(28px, calc((100vw - 1400px) / 2 + 17px)); color: #275c9b; background: #e9f3ff; border: 1px solid #bad8fb; padding: 5px 9px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+    @media (max-width: 1100px) {
+      .metadata { grid-template-columns: 1fr 1fr; }
+      .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .filters { grid-template-columns: 1fr 1fr 116px; }
+      .footer { flex-wrap: wrap; }
+      .filtered-total { order: 1; }
+      .footer-actions { order: 2; }
+    }
+    @media (max-width: 720px) {
+      body { padding: 0; }
+      .window { min-height: 100vh; height: 100vh; border-radius: 0; }
+      h1 { font-size: 23px; }
+      .metadata { grid-template-columns: 1fr; gap: 4px; }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .filters { grid-template-columns: 1fr 1fr; }
+      .filters input { grid-column: 1 / -1; }
+      .clear { min-height: 42px; }
+      .actions { overflow-x: auto; justify-content: flex-start; }
+      .actions button { flex: 0 0 auto; }
+      table { min-width: 990px; }
+      .footer-actions { margin-left: 0; }
+      .demo-ribbon { top: 52px; right: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="window" aria-label="Demo cửa sổ kiểm tra dữ liệu bóc tách">
+    <div class="titlebar"><span class="app-icon">⚙</span><span>Xem và chỉnh sửa dữ liệu bóc tách - Trợ lý Dữ liệu Quyết toán</span><span class="window-controls" aria-hidden="true">− □ ×</span></div>
+    <div class="content">
+      <h1>Kiểm tra dữ liệu bóc tách</h1>
+      <div class="filename">ket_qua_boc_tach_20261017_151043.json</div>
+      <div class="metadata">
+        <span><span class="muted">Nhận:</span><strong>17/10/2026 15:10:43</strong></span>
+        <span><span class="muted">Lưu gần nhất:</span><strong>—</strong></span>
+        <span><span class="muted">Trạng thái:</span><strong>Đã tiếp nhận</strong></span>
+        <button class="technical" type="button" title="Bản demo giao diện">▸ Thông tin kỹ thuật</button>
+      </div>
+      <div class="metrics" aria-label="Thống kê toàn bộ dữ liệu">
+        <div class="metric"><span class="muted">Tổng dòng</span><strong id="all-count">271</strong></div>
+        <div class="metric"><span class="muted">Hợp lệ</span><strong id="valid-count" class="valid">271</strong></div>
+        <div class="metric"><span class="muted">Cảnh báo</span><strong class="warning">0</strong></div>
+        <div class="metric"><span class="muted">Lỗi</span><strong class="error">0</strong></div>
+        <div class="metric"><span class="muted">Tổng tiền</span><strong id="all-total">88.836.848 ₫</strong></div>
+      </div>
+      <div class="filters">
+        <input id="search" type="search" placeholder="Tìm số container, vận đơn, hóa đơn hoặc bên vận tải... (Ctrl+F)" aria-label="Tìm kiếm">
+        <select id="document" aria-label="Lọc chứng từ"><option value="">Tất cả chứng từ – 271 dòng</option></select>
+        <button id="clear" class="clear" type="button">Xóa bộ lọc</button>
+        <select id="fee" aria-label="Lọc loại cước"></select>
+        <select id="status" aria-label="Lọc trạng thái"><option value="">Tất cả trạng thái</option><option value="valid">Hợp lệ</option><option value="warning">Cảnh báo</option><option value="error">Lỗi</option></select>
+      </div>
+      <div class="actions"><button type="button" disabled>Thêm dòng</button><button type="button" disabled>Sửa dòng</button><button type="button" disabled>Gán/đổi số HĐ</button><button class="danger" type="button" disabled>Xóa dòng</button></div>
+      <div class="table-wrap">
+        <table aria-label="Dữ liệu bóc tách">
+          <colgroup><col style="width: 14%"><col style="width: 12%"><col style="width: 9%"><col style="width: 17%"><col style="width: 17%"><col style="width: 20%"><col style="width: 11%"></colgroup>
+          <thead><tr><th>Tên loại cước</th><th>Số HĐ</th><th>Ngày HĐ</th><th>Bên vận tải</th><th>Số tiền cuối cùng (VND)</th><th>Cảnh báo / lỗi</th><th></th></tr></thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="footer">
+      <span id="visible-count" class="row-count">Đang hiển thị 13/271 dòng</span>
+      <span id="filtered-total" class="filtered-total" role="status" aria-live="polite"><span id="filtered-caption">Tổng tiền QT đang hiển thị</span><strong id="filtered-amount">0 ₫</strong></span>
+      <div class="footer-actions"><button type="button" disabled>Đóng</button><button class="save" type="button" disabled>Lưu</button></div>
+    </div>
+  </main>
+  <div class="demo-ribbon">DEMO GIAO DIỆN</div>
+  <script>
+    const feeNames = {
+      CB: 'Cước biển', CBDH: 'Cước bộ đóng hàng; gồm DtD và Door-to-Door',
+      VTN: 'Cước bộ trả hàng; gồm Dr-to-Dr (Dr to Dr)', NV: 'Nâng vỏ, nâng container rỗng',
+      HH: 'Hạ hàng, hạ container có hàng từ xe xuống bãi', NH: 'Nâng hàng, nâng container có hàng từ bãi lên xe',
+      HV: 'Hạ vỏ, hạ container rỗng từ xe xuống bãi', VSDL: 'Vệ sinh, D/O, phí chứng từ, lệnh giao hàng, điện thả hàng, THC hoặc terminal độc lập',
+      SEAL: 'Phí seal, phí chì', LC: 'Lưu container, lưu vỏ, lưu hàng xuất, demurrage, detention, storage',
+      QT: 'Quá tải, quá trọng lượng hoặc phụ thu trọng lượng', GH: 'Gia hạn', LL: 'Phí/công làm lệnh riêng',
+      SC: 'Sửa chữa hoặc hư hỏng container', CXD: 'Chưa đủ căn cứ hoặc loại phí chưa có mã chính thức'
+    };
+    const feeEl = document.querySelector('#fee');
+    feeEl.add(new Option('Tất cả loại cước', ''));
+    Object.entries(feeNames).forEach(([code, name]) => feeEl.add(new Option(`${code} – ${name}`, code)));
+    feeEl.value = 'QT';
+
+    const qtAmounts = [34000, 38000, 33600, 135000, 135000, 34000, 38000, 38000, 33600, 33600, 135000, 135000, 38000];
+    const otherFees = Object.keys(feeNames).filter(code => code !== 'QT');
+    const rows = qtAmounts.map((amount, i) => ({ fee: 'QT', amount, doc: 'DOC-A', invoice: '', date: '', carrier: '', container: `QT-CONT-${String(i + 1).padStart(3, '0')}`, status: 'valid' }));
+    for (let i = 0; i < 258; i++) {
+      rows.push({ fee: otherFees[i % otherFees.length], amount: 120000 + (i % 11) * 36000, doc: i % 3 === 0 ? 'DOC-A' : 'DOC-B', invoice: `HD-${String(i + 1).padStart(4, '0')}`, date: '17/10/2026', carrier: i % 2 ? 'Vận tải An Bình' : 'Vận tải Minh Anh', container: `CONT-${String(i + 1).padStart(4, '0')}`, status: 'valid' });
+    }
+    const targetTotal = 88836848;
+    rows[rows.length - 1].amount += targetTotal - rows.reduce((sum, row) => sum + row.amount, 0);
+    const money = value => new Intl.NumberFormat('vi-VN').format(value) + ' ₫';
+    const number = value => new Intl.NumberFormat('vi-VN').format(value);
+    const documentEl = document.querySelector('#document');
+    for (const doc of ['DOC-A', 'DOC-B']) {
+      const count = rows.filter(row => row.doc === doc).length;
+      documentEl.add(new Option(`${doc === 'DOC-A' ? 'ket_qua_boc_tach.json' : 'bang_ke_bo_sung.xlsx'} – ${count} dòng`, doc));
+    }
+    const searchEl = document.querySelector('#search');
+    const statusEl = document.querySelector('#status');
+    const bodyEl = document.querySelector('#table-body');
+    const totalEl = document.querySelector('#filtered-total');
+    document.querySelector('#all-count').textContent = number(rows.length);
+    document.querySelector('#valid-count').textContent = number(rows.length);
+    document.querySelector('#all-total').textContent = money(rows.reduce((sum, row) => sum + row.amount, 0));
+    function render() {
+      const search = searchEl.value.trim().toLocaleLowerCase('vi');
+      const filtered = rows.filter(row => (!feeEl.value || row.fee === feeEl.value)
+        && (!documentEl.value || row.doc === documentEl.value)
+        && (!statusEl.value || row.status === statusEl.value)
+        && (!search || [row.container, row.invoice, row.carrier].some(value => value.toLocaleLowerCase('vi').includes(search))));
+      document.querySelector('#visible-count').textContent = `Đang hiển thị ${number(filtered.length)}/${number(rows.length)} dòng`;
+      totalEl.hidden = !feeEl.value;
+      document.querySelector('#filtered-caption').textContent = `Tổng tiền ${feeEl.value} đang hiển thị`;
+      document.querySelector('#filtered-amount').textContent = money(filtered.reduce((sum, row) => sum + row.amount, 0));
+      bodyEl.replaceChildren();
+      if (!filtered.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 7;
+        td.className = 'empty';
+        td.textContent = 'Không có dòng phù hợp với bộ lọc.';
+        tr.append(td);
+        bodyEl.append(tr);
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      for (const row of filtered) {
+        const tr = document.createElement('tr');
+        const cells = [feeNames[row.fee], row.invoice || '—', row.date || '—', row.carrier || '—', number(row.amount), 'Không có', 'Đối soát'];
+        cells.forEach((value, index) => {
+          const td = document.createElement('td');
+          td.textContent = value;
+          td.title = value;
+          if (index === 4) td.className = 'amount';
+          else if (index === 6) td.className = 'center';
+          else if (value === '—') td.className = 'dash';
+          tr.append(td);
+        });
+        fragment.append(tr);
+      }
+      bodyEl.append(fragment);
+    }
+    [feeEl, documentEl, statusEl].forEach(el => el.addEventListener('change', render));
+    searchEl.addEventListener('input', render);
+    document.querySelector('#clear').addEventListener('click', () => { searchEl.value = ''; documentEl.value = ''; feeEl.value = ''; statusEl.value = ''; render(); });
+    document.addEventListener('keydown', event => { if (event.ctrlKey && event.key.toLowerCase() === 'f') { event.preventDefault(); searchEl.focus(); } });
+    render();
+  </script>
+</body>
+</html>

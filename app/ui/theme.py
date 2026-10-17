@@ -53,6 +53,15 @@ QFrame#reviewMetric {{
     border: 1px solid {BORDER};
     border-radius: 8px;
 }}
+QFrame#reviewFilteredAmount {{
+    background: #E6F1FF;
+    border: 1px solid #B1D1FF;
+    border-radius: 8px;
+}}
+QLabel#reviewFilteredAmountValue {{
+    color: #06438D;
+    font-weight: 700;
+}}
 QLabel#reviewMetaValue {{
     font-weight: 600;
 }}

@@ -701,6 +701,17 @@ class ReviewWindow(QMainWindow):
         self.visible_label = QLabel()
         self.visible_label.setProperty("muted", True)
         bottom.addWidget(self.visible_label)
+        self.filtered_amount_card = QFrame()
+        self.filtered_amount_card.setObjectName("reviewFilteredAmount")
+        filtered_amount_layout = QHBoxLayout(self.filtered_amount_card)
+        filtered_amount_layout.setContentsMargins(10, 6, 10, 6)
+        filtered_amount_layout.setSpacing(8)
+        self.filtered_amount_caption = QLabel()
+        self.filtered_amount_value = QLabel()
+        self.filtered_amount_value.setObjectName("reviewFilteredAmountValue")
+        filtered_amount_layout.addWidget(self.filtered_amount_caption)
+        filtered_amount_layout.addWidget(self.filtered_amount_value)
+        bottom.addWidget(self.filtered_amount_card)
         bottom.addStretch(1)
         self.confirm_button = QPushButton("Lưu")
         self.confirm_button.setObjectName("confirmButton")
@@ -875,6 +886,22 @@ class ReviewWindow(QMainWindow):
             else "Không có dòng phù hợp với bộ lọc. Hãy đổi điều kiện hoặc chọn Xóa bộ lọc."
         )
         self.empty_label.setVisible(visible == 0)
+        fee_code = str(self.fee_filter.currentData() or "")
+        self.filtered_amount_card.setVisible(bool(fee_code))
+        if fee_code:
+            amount = 0
+            for row in range(visible):
+                value = self.proxy_model.index(
+                    row, ReviewTableModel.COLUMN_AMOUNT
+                ).data(Qt.ItemDataRole.UserRole)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    amount += value
+            self.filtered_amount_caption.setText(
+                f"Tổng tiền {fee_code} đang hiển thị"
+            )
+            self.filtered_amount_value.setText(
+                f"{amount:,} ₫".replace(",", ".")
+            )
 
     def _update_dirty(self, dirty: bool) -> None:
         self.dirty_label.setVisible(dirty)

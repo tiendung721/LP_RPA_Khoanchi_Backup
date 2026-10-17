@@ -568,6 +568,58 @@ def test_review_window_uses_compact_balanced_layout(qtbot) -> None:
         window.close()
 
 
+def test_fee_total_follows_visible_rows_and_updates_after_edit(qtbot) -> None:
+    rows = [
+        ReviewRow(
+            cont="DRYU3026167", fee="QT", rule="CV", amount=100,
+            source_document_id="DOC-A", source_document_name="A.pdf",
+        ),
+        ReviewRow(
+            cont="MSCU1234567", fee="QT", rule="CV", amount=200,
+            source_document_id="DOC-B", source_document_name="B.pdf",
+        ),
+        ReviewRow(
+            cont="VSGU2250713", fee="CB", rule="HD", amount=500,
+            source_document_id="DOC-B", source_document_name="B.pdf",
+        ),
+    ]
+    window = ReviewWindow(
+        {"status": "REVIEWING", "last_saved_at": "2026-10-17T15:10:43"},
+        rows=rows,
+    )
+    qtbot.addWidget(window)
+
+    try:
+        assert not window.filtered_amount_card.isVisibleTo(window)
+        assert window.stat_labels["amount"].text() == "800 ₫"
+
+        window.fee_filter.setCurrentIndex(window.fee_filter.findData("QT"))
+        assert window.filtered_amount_card.isVisibleTo(window)
+        assert window.filtered_amount_caption.text() == "Tổng tiền QT đang hiển thị"
+        assert window.filtered_amount_value.text() == "300 ₫"
+        assert window.visible_label.text() == "Đang hiển thị 2/3 dòng"
+
+        window.document_filter.setCurrentIndex(
+            window.document_filter.findData("DOC-B")
+        )
+        assert window.filtered_amount_value.text() == "200 ₫"
+        window.search_edit.setText("không khớp")
+        assert window.filtered_amount_value.text() == "0 ₫"
+        window.search_edit.clear()
+
+        rows[1].amount = 250
+        window.model.update_row(1, rows[1])
+        assert window.filtered_amount_value.text() == "250 ₫"
+        assert window.stat_labels["amount"].text() == "850 ₫"
+
+        window.clear_filters()
+        assert not window.filtered_amount_card.isVisibleTo(window)
+        assert window.visible_label.text() == "Đang hiển thị 3/3 dòng"
+    finally:
+        window.model.mark_clean()
+        window.close()
+
+
 def test_edit_dialog_hides_rule_but_preserves_its_value(qtbot) -> None:
     dialog = EditRowDialog(
         ReviewRow(
