@@ -25,9 +25,7 @@ MISSING_INVOICE = "CHƯA CÓ HĐ"
 
 SEA_FEE_CODES = frozenset({"CB"})
 ROAD_FEE_CODES = frozenset(DAILY_SYNC_CARRIER_FEE_CODES - SEA_FEE_CODES)
-NAM_FEE_CODES = frozenset(
-    {"NH", "HV", "VSDL", "SEAL", "LL", "LC", "SC", "QT"}
-)
+NAM_FEE_CODES = frozenset({"VTN"})
 DAILY_MANAGED_CARRIER_GROUPS = frozenset({"SEA", "ROAD"})
 
 BK_CARRIER_HEADER_ALIASES: dict[str, tuple[str, ...]] = {

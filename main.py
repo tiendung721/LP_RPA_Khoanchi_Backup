@@ -21,6 +21,14 @@ from app.ui.theme import apply_application_theme
 
 LOGGER = logging.getLogger(__name__)
 APP_VERSION = "1.0.0"
+WINDOWS_APP_ID = "KIKAI.Solution.PM"
+
+
+def _set_windows_app_id() -> None:
+    if sys.platform == "win32":
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_ID)
 
 
 def _parse_arguments(arguments: Sequence[str]) -> tuple[argparse.Namespace, list[str]]:
@@ -48,6 +56,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
     if not raw_arguments:
         raw_arguments = ["main.py"]
     options, qt_arguments = _parse_arguments(raw_arguments)
+    _set_windows_app_id()
     application = QApplication([raw_arguments[0], *qt_arguments])
     application.setApplicationName(APP_NAME)
     application.setApplicationDisplayName(APP_NAME)
@@ -86,6 +95,8 @@ def run(arguments: Sequence[str] | None = None) -> int:
         LOGGER.info("Khởi động %s %s", APP_NAME, APP_VERSION)
 
         window = MainWindow(controller=runtime)
+        if not icon.isNull():
+            window.setWindowIcon(icon)
         application.aboutToQuit.connect(runtime.close)
         window.show()
         exit_code = application.exec()

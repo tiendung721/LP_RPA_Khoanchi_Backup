@@ -22,8 +22,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.services.carrier_policy import carrier_is_managed_by_daily_sync
-
 from .app_dialog import AppDialog
 from .presentation import fit_window_to_screen
 from .review_table_model import (
@@ -367,13 +365,9 @@ class EditRowDialog(AppDialog):
             self._select_combo_data(self.rule_combo, "HD")
         elif changed_fee and current != "CB" and self.rule_combo.currentData() == "HD":
             self._select_combo_data(self.rule_combo, None)
-        if (
-            carrier_is_managed_by_daily_sync(current)
-            and not carrier_is_managed_by_daily_sync(self._last_fee)
-        ):
-            # Khi đổi một HĐ phí thành loại vận tải lấy từ Hàng ngày, carrier
-            # cũ không được vô tình trở thành một ghi đè thủ công. Ô vẫn mở để
-            # user nhập lại sau thao tác đổi mã nếu đó thực sự là chủ ý.
+        if self._last_fee is not None and current != self._last_fee:
+            # Bên vận tải của mã phí cũ không được gán sang mã phí mới.
+            # Người dùng có thể nhập lại sau khi xác nhận chứng từ.
             self.carrier_edit.clear()
         self._last_fee = current
         self._update_sea_freight_visibility()

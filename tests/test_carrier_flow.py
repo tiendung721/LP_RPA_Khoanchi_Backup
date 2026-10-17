@@ -61,11 +61,13 @@ def test_posting_routes_only_southern_fee_carrier_to_vt_nam(tmp_path: Path) -> N
     bk = tmp_path / "bk.xlsx"
     ready = tmp_path / "ready.json"
     _posting_book(bk)
+    _add_road_fee_columns(bk)
     _ready(
         ready,
         [
             ["CONT700", None, "HH", "CV", "HD-HP", "PHB", 1_200_000],
             ["CONT700", None, "NH", "CV", "HD-NAM", "NHS", 500_000],
+            ["CONT700", None, "VTN", "CV", "HD-VTN", "SOUTH", 300_000],
         ],
     )
     service = ExpensePostingService(
@@ -84,12 +86,10 @@ def test_posting_routes_only_southern_fee_carrier_to_vt_nam(tmp_path: Path) -> N
         assert workbook["T07 26"]["F2"].value is None
         assert workbook["T07 26"]["D2"].value == 1_200_000
         assert workbook["T07 26"]["E2"].value == "HD-HP"
-        assert workbook["T07 26"]["I2"].value == "NHS"
-        assert workbook[BK_DETAIL_SHEET].sheet_state == "hidden"
-        detail = workbook[BK_DETAIL_SHEET]
-        assert detail.max_row == 2
-        assert detail["H2"].value == "NAM"
-        assert detail["L2"].value == "NHS"
+        assert workbook["T07 26"]["G2"].value == 500_000
+        assert workbook["T07 26"]["I2"].value == "SOUTH"
+        assert workbook["T07 26"]["L2"].value == 300_000
+        assert BK_DETAIL_SHEET not in workbook.sheetnames
     finally:
         workbook.close()
 
@@ -173,7 +173,7 @@ def test_posting_blank_daily_sync_carrier_keeps_existing_value(
         workbook.close()
 
 
-def test_posting_reviewed_daily_sync_carrier_requires_overwrite_choice(
+def test_posting_vtn_carrier_does_not_overwrite_daily_road_carrier(
     tmp_path: Path,
 ) -> None:
     bk = tmp_path / "bk.xlsx"
@@ -189,24 +189,41 @@ def test_posting_reviewed_daily_sync_carrier_requires_overwrite_choice(
     )
 
     plan = service.analyze(batch_id=1, sheet_name="T07 26")
-    conflict = next(
-        conflict
+    assert not any(
+        conflict.conflict_type is ConflictType.CARRIER_VALUE_CONFLICT
         for conflict in plan.conflicts
-        if conflict.conflict_type is ConflictType.CARRIER_VALUE_CONFLICT
     )
-    assert conflict.carrier == "USER ROAD"
-    assert conflict.allowed_actions == (
-        ResolutionAction.KEEP_EXISTING,
-        ResolutionAction.OVERWRITE,
-    )
-    service.apply(
-        plan,
-        {conflict.conflict_id: {"action": "OVERWRITE"}},
-    )
+    service.apply(plan, {})
 
     workbook = load_workbook(bk, data_only=False)
     try:
-        assert workbook["T07 26"]["F2"].value == "USER ROAD"
+        assert workbook["T07 26"]["F2"].value == "DAILY ROAD"
+        assert workbook["T07 26"]["I2"].value == "USER ROAD"
+    finally:
+        workbook.close()
+
+
+def test_posting_vtn_without_carrier_preserves_old_vt_nam_value(tmp_path: Path) -> None:
+    bk = tmp_path / "bk.xlsx"
+    ready = tmp_path / "ready.json"
+    _posting_book(bk, hp_carrier="DAILY ROAD", nam_carrier="LEGACY VALUE")
+    _add_road_fee_columns(bk)
+    _ready(ready, [["CONT700", None, "VTN", "CV", "HD-3", None, 200]])
+    service = ExpensePostingService(
+        _Provider(ready), bk_path=bk, backup_dir=tmp_path / "Backup"
+    )
+
+    plan = service.analyze(batch_id=1, sheet_name="T07 26")
+    assert not plan.conflicts
+    result = service.apply(plan, {})
+
+    assert result.carrier_written_cells == 0
+    workbook = load_workbook(bk, data_only=False)
+    try:
+        sheet = workbook["T07 26"]
+        assert sheet["F2"].value == "DAILY ROAD"
+        assert sheet["I2"].value == "LEGACY VALUE"
+        assert sheet["L2"].value == 200
     finally:
         workbook.close()
 
@@ -239,11 +256,12 @@ def test_posting_carrier_conflict_append_only_for_different_invoice(tmp_path: Pa
     bk = tmp_path / "bk.xlsx"
     ready = tmp_path / "ready.json"
     _posting_book(bk, nam_carrier="NHS")
+    _add_road_fee_columns(bk)
     workbook = load_workbook(bk)
-    workbook["T07 26"]["H2"] = "HD-OLD"
+    workbook["T07 26"]["M2"] = "HD-OLD"
     workbook.save(bk)
     workbook.close()
-    _ready(ready, [["CONT700", None, "NH", "CV", "HD-NEW", "TP", 500_000]])
+    _ready(ready, [["CONT700", None, "VTN", "CV", "HD-NEW", "TP", 500_000]])
     service = ExpensePostingService(
         _Provider(ready), bk_path=bk, backup_dir=tmp_path / "Backup"
     )
@@ -270,11 +288,12 @@ def test_posting_same_invoice_does_not_offer_append_carrier(tmp_path: Path) -> N
     bk = tmp_path / "bk.xlsx"
     ready = tmp_path / "ready.json"
     _posting_book(bk, nam_carrier="NHS")
+    _add_road_fee_columns(bk)
     workbook = load_workbook(bk)
-    workbook["T07 26"]["H2"] = "HD-SAME"
+    workbook["T07 26"]["M2"] = "HD-SAME"
     workbook.save(bk)
     workbook.close()
-    _ready(ready, [["CONT700", None, "NH", "CV", "HD-SAME", "TP", 500_000]])
+    _ready(ready, [["CONT700", None, "VTN", "CV", "HD-SAME", "TP", 500_000]])
     service = ExpensePostingService(
         _Provider(ready), bk_path=bk, backup_dir=tmp_path / "Backup"
     )
@@ -298,11 +317,12 @@ def test_posting_keep_multiple_existing_carriers_requires_effective_choice(
     bk = tmp_path / "bk.xlsx"
     ready = tmp_path / "ready.json"
     _posting_book(bk, nam_carrier="NHS / TP")
+    _add_road_fee_columns(bk)
     workbook = load_workbook(bk)
-    workbook["T07 26"]["H2"] = "HD-OLD"
+    workbook["T07 26"]["M2"] = "HD-OLD"
     workbook.save(bk)
     workbook.close()
-    _ready(ready, [["CONT700", None, "NH", "CV", "HD-NEW", "XYZ", 500_000]])
+    _ready(ready, [["CONT700", None, "VTN", "CV", "HD-NEW", "XYZ", 500_000]])
     service = ExpensePostingService(
         _Provider(ready), bk_path=bk, backup_dir=tmp_path / "Backup"
     )
@@ -327,12 +347,12 @@ def test_posting_keep_multiple_existing_carriers_requires_effective_choice(
     workbook = load_workbook(bk, data_only=False)
     try:
         assert workbook["T07 26"]["I2"].value == "NHS / TP"
-        assert workbook[BK_DETAIL_SHEET]["L2"].value == "TP"
+        assert BK_DETAIL_SHEET not in workbook.sheetnames
     finally:
         workbook.close()
 
 
-def test_selecting_ambiguous_invoice_carrier_keeps_other_invoice_carrier(
+def test_service_fees_keep_source_carriers_without_writing_vt_nam(
     tmp_path: Path,
 ) -> None:
     bk = tmp_path / "bk.xlsx"
@@ -357,29 +377,16 @@ def test_selecting_ambiguous_invoice_carrier_keeps_other_invoice_carrier(
     )
 
     plan = service.analyze(batch_id=1, sheet_name="T07 26")
-    conflict = next(
-        value
-        for value in plan.conflicts
-        if value.conflict_type is ConflictType.MULTIPLE_SOURCE_CARRIERS
-    )
-    refined = service.refine(
-        plan,
-        {
-            conflict.conflict_id: {
-                "action": "SELECT_CARRIER",
-                "selected_carrier": "NHS",
-            }
-        },
-    )
     assert not any(
         value.conflict_type is ConflictType.MULTIPLE_SOURCE_CARRIERS
-        for value in refined.conflicts
+        for value in plan.conflicts
     )
-    service.apply(refined, {})
+    service.apply(plan, {})
 
     workbook = load_workbook(bk, data_only=False)
     try:
-        assert workbook["T07 26"]["I2"].value == "NHS / XYZ"
+        assert workbook["T07 26"]["I2"].value is None
+        assert BK_DETAIL_SHEET not in workbook.sheetnames
     finally:
         workbook.close()
 
@@ -469,10 +476,16 @@ def _payment_target(path: Path) -> None:
     workbook.close()
 
 
-def test_payment_sync_writes_carriers_and_builds_summary(tmp_path: Path) -> None:
+def test_payment_sync_preserves_nam_carrier_and_builds_summary(tmp_path: Path) -> None:
     bk, payment = tmp_path / "bk.xlsx", tmp_path / "payment.xlsx"
     _payment_source(bk)
     _payment_target(payment)
+    workbook = load_workbook(payment)
+    workbook["T07 26 NAM"]["A8"] = 700
+    workbook["T07 26 NAM"]["B8"] = "CONT700"
+    workbook["T07 26 NAM"]["R8"] = "EXISTING NAM"
+    workbook.save(payment)
+    workbook.close()
     service = PaymentSyncService(
         bk_path=bk,
         payment_path=payment,
@@ -483,11 +496,11 @@ def test_payment_sync_writes_carriers_and_builds_summary(tmp_path: Path) -> None
     result = service.apply(plan, {})
 
     assert result.target_results["HP"].carrier_written_cells == 1
-    assert result.target_results["NAM"].carrier_written_cells == 1
+    assert result.target_results["NAM"].carrier_written_cells == 0
     workbook = load_workbook(payment, data_only=False)
     try:
         assert workbook["T07 26 HP"]["F8"].value == "PHB"
-        assert workbook["T07 26 NAM"]["T8"].value == "NHS"
+        assert workbook["T07 26 NAM"]["T8"].value == "EXISTING NAM"
         assert PAYMENT_SUMMARY_SHEET in workbook.sheetnames
         summary = workbook[PAYMENT_SUMMARY_SHEET]
         assert {summary["B2"].value, summary["B3"].value} == {"NHS", "PHB"}

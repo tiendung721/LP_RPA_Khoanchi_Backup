@@ -143,7 +143,7 @@ def test_review_populates_all_managed_carriers_from_daily_workbook(
     assert [row.carrier for row in window.model.rows()] == [
         "DAILY SEA",
         "DAILY ROAD",
-        "DAILY ROAD",
+        None,
         "USER EDIT",
     ]
     assert window.model.dirty
@@ -608,7 +608,7 @@ def test_edit_dialog_hides_rule_but_preserves_its_value(qtbot) -> None:
         dialog.close()
 
 
-def test_daily_sync_fee_keeps_carrier_editable_and_clears_stale_fee_carrier(
+def test_changing_fee_to_vtn_clears_old_carrier_and_allows_review(
     qtbot,
 ) -> None:
     dialog = EditRowDialog(

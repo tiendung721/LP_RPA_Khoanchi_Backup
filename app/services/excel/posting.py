@@ -565,6 +565,7 @@ class ExpensePostingService:
             action
             for action in actions
             if action.get("carrier_group") in {"HP", "NAM"}
+            and action.get("fee_selected") != "VTN"
             and action.get("status")
             in {PostingItemStatus.POSTED, PostingItemStatus.ALREADY_EXISTS}
         ]
@@ -1650,6 +1651,7 @@ class ExpensePostingService:
             action
             for action in actions
             if action.get("carrier_group") in {"HP", "NAM"}
+            and action.get("fee_selected") != "VTN"
             and action.get("status")
             in {PostingItemStatus.POSTED, PostingItemStatus.ALREADY_EXISTS}
         ]
@@ -3801,7 +3803,7 @@ class ExpensePostingService:
                 )
                 continue
             if group in DAILY_MANAGED_CARRIER_GROUPS:
-                # Carrier GPT của CB/CBDH/VTN đã bị bỏ khi tiếp nhận. Nếu có
+                # Carrier GPT của CB/CBDH đã bị bỏ khi tiếp nhận. Nếu có
                 # incoming ở đây thì đó là giá trị chuẩn đã điền trên màn hình
                 # review hoặc giá trị user đã sửa và xác nhận.
                 current = split_carriers(cell.value)
@@ -4626,6 +4628,10 @@ class ExpensePostingService:
                 )
                 if chosen in {ResolutionAction.OVERWRITE, ResolutionAction.APPEND_CARRIER}:
                     effective = source_carrier
+                elif group == "NAM" and not source_carrier:
+                    # Giá trị X cũ có thể thuộc một khoản phí khác. Giữ nguyên
+                    # ô đó nhưng không nhận nó làm carrier của VTN mới.
+                    effective = None
                 elif len(current_parts) == 1:
                     effective = current_parts[0]
                 elif carrier_key(source_carrier) in {carrier_key(value) for value in current_parts}:

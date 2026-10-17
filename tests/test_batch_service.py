@@ -142,14 +142,14 @@ def test_receive_strips_only_gpt_carriers_managed_by_daily_sync(
 
     assert result.review is not None
     assert [row.carrier for row in result.review.document.rows] == [
-        None,
+        "GPT VTN DÀI",
         None,
         None,
         "NHS",
     ]
     persisted = json.loads(_current_json(settings).read_text(encoding="utf-8"))
     assert [row["carrier"] for row in persisted["d"]] == [
-        None,
+        "GPT VTN DÀI",
         None,
         None,
         "NHS",

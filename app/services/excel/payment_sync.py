@@ -1856,7 +1856,9 @@ def _source_sync_columns(worksheet: Any) -> ResolvedSourceSyncColumns:
         boundary=summary_start,
     )
     carrier_columns: dict[str, int] = {}
-    for target_type, field in (("HP", "carrier_hp"), ("NAM", "carrier_nam")):
+    # VT TRONG NAM chỉ thuộc VTN; không dùng cột này để gán bên vận tải
+    # cho các khoản phí trên sheet Thanh toán NAM.
+    for target_type, field in (("HP", "carrier_hp"),):
         matches = _matching_columns(
             headers,
             BK_HEADER_ALIASES[field],

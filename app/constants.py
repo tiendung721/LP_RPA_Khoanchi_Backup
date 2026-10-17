@@ -40,10 +40,9 @@ FEE_CATALOG = MappingProxyType(
 )
 FEE_CODES: Final = frozenset(FEE_CATALOG)
 
-# Ba loại cước này lấy bên vận tải chuẩn từ workbook Hàng ngày. ``carrier`` do
-# GPT bóc cho chúng chỉ là dữ liệu trùng nguồn và phải được bỏ trước màn hình
-# review; người dùng vẫn có thể nhập lại thủ công khi cần xử lý ngoại lệ.
-DAILY_SYNC_CARRIER_FEE_CODES: Final = frozenset({"CB", "CBDH", "VTN"})
+# Cước biển và cước bộ đóng hàng lấy bên vận tải từ workbook Hàng ngày.
+# Bên vận tải của VTN lấy từ chứng từ đã xác nhận để ghi vào VT TRONG NAM.
+DAILY_SYNC_CARRIER_FEE_CODES: Final = frozenset({"CB", "CBDH"})
 
 RULE_CATALOG = MappingProxyType(
     {

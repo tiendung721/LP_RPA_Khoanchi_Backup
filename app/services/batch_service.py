@@ -888,7 +888,8 @@ class BatchService:
         """Bỏ phí VAT và làm sạch carrier trùng nguồn trước lần review đầu tiên.
 
         Chỉ dữ liệu vừa nhận từ GPT (chưa từng được user lưu) đi qua đây. Sau
-        khi user tự nhập carrier cho CB/CBDH/VTN, bản đã lưu sẽ được giữ nguyên.
+        khi user tự nhập carrier cho CB/CBDH, bản đã lưu sẽ được giữ nguyên.
+        Carrier của VTN được giữ từ nguồn để đối chiếu và ghi VT TRONG NAM.
         """
 
         rows = [
