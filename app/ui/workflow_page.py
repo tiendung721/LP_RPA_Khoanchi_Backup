@@ -347,7 +347,7 @@ class WorkflowPage(QWidget):
         self.export_posting_button = QPushButton("Xuất Excel")
         self.export_posting_button.setObjectName("exportPostingWorkbookButton")
         self.export_posting_button.setProperty("primary", True)
-        self.export_posting_button.setAccessibleName("Xuất các dòng BK được cập nhật trong lượt nhập gần nhất")
+        self.export_posting_button.setAccessibleName("Xuất các dòng BK được đối chiếu trong lượt nhập gần nhất")
         self.export_posting_button.setEnabled(False)
         self.view_daily_sync_button = QPushButton("Chưa có dữ liệu")
         self.view_daily_sync_button.setObjectName("viewLatestDailySyncButton")
@@ -448,8 +448,8 @@ class WorkflowPage(QWidget):
             self.view_expense_posting_button,
         )
         self.posting_export_action = add_excel_action(
-            "Các dòng BK vừa nhập → Excel",
-            "Xuất các dòng BK có thay đổi trong lượt nhập gần nhất; tô màu ô vừa cập nhật.",
+            "Các dòng BK trong lượt nhập → Excel",
+            "Xuất các dòng BK được đối chiếu trong lượt nhập gần nhất; tô màu ô vừa cập nhật.",
             self.posting_export_status_label,
             self.export_posting_button,
             self.view_posting_export_button,

@@ -10,7 +10,9 @@ from openpyxl.styles import PatternFill
 from app.database import Database
 from app.repositories.excel_run_repository import ExcelRunRepository
 from app.repositories.expense_posting_repository import ExpensePostingRepository
-from app.services.excel.models import ExcelRunStatus, PostingPlan, PostingResult, WorkbookFingerprint
+from app.services.excel.models import (
+    ExcelRunStatus, PostingItemStatus, PostingPlan, PostingResult, WorkbookFingerprint,
+)
 from app.services.excel.payment_sync import SUMMARY_HEADERS
 from app.services.excel.posting_export import (
     CHANGED_FILL,
@@ -85,20 +87,20 @@ def test_export_uses_bk_rows_and_saved_values_across_months(tmp_path: Path) -> N
     postings = ExpensePostingRepository(database)
     run = runs.create_run(operation="EXPENSE_POSTING", target_path=bk)
     actions = [
-        {"sheet_name": "T07 26", "target_row": 2, "target_column": 13, "amount_write": True},
-        {"sheet_name": "T07 26", "target_row": 2, "invoice_target_column": 15, "invoice_write": True},
-        {"sheet_name": "T08 26", "target_row": 2, "carrier_target_column": 24, "carrier_write": True},
-        {"sheet_name": "T08 26", "target_row": 2, "target_column": 25, "amount_write": True},
-        {"sheet_name": "T08 26", "target_row": 3, "target_column": 13, "amount_write": True},
-        {"sheet_name": "T07 26", "target_row": 3, "target_column": 13, "amount_write": False},
+        {"status": PostingItemStatus.POSTED, "sheet_name": "T07 26", "target_row": 2, "target_column": 13, "amount_write": True},
+        {"status": PostingItemStatus.POSTED, "sheet_name": "T07 26", "target_row": 2, "invoice_target_column": 15, "invoice_write": True},
+        {"status": PostingItemStatus.POSTED, "sheet_name": "T08 26", "target_row": 2, "carrier_target_column": 24, "carrier_write": True},
+        {"status": PostingItemStatus.POSTED, "sheet_name": "T08 26", "target_row": 2, "target_column": 25, "amount_write": True},
+        {"status": PostingItemStatus.POSTED, "sheet_name": "T08 26", "target_row": 3, "target_column": 13, "amount_write": True},
+        {"status": PostingItemStatus.ALREADY_EXISTS, "sheet_name": "T07 26", "target_row": 3, "target_column": 13, "amount_write": False},
     ]
     snapshot = build_posting_export_snapshot(
         _plan(bk, run.id), actions,
         PostingResult(status=ExcelRunStatus.SUCCEEDED, target_path=bk, run_id=run.id),
     )
-    assert snapshot["version"] == 2
-    assert snapshot["row_count"] == 3
-    assert snapshot["sqt_count"] == 3
+    assert snapshot["version"] == 3
+    assert snapshot["row_count"] == 4
+    assert snapshot["sqt_count"] == 4
     assert [item["name"] for item in snapshot["sheets"]] == ["T07 26", "T08 26"]
     assert snapshot["sheets"][0]["rows"][0]["changed_columns"] == [13, 15]
     postings.save_export_snapshot(run.id, snapshot)
@@ -113,13 +115,14 @@ def test_export_uses_bk_rows_and_saved_values_across_months(tmp_path: Path) -> N
     exporter = PostingExportService(ExcelRunRepository(reopened.database), reopened)
     preview = exporter.latest_preview()
     assert preview is not None
-    assert preview.row_count == 3
-    assert preview.sqt_count == 3
+    assert preview.row_count == 4
+    assert preview.sqt_count == 4
+    assert preview.snapshot_version == 3
     assert preview.sheet_count == 2
-    assert preview.filename.startswith("BK_vua_nhap_T07-26_T08-26_3SQT_")
+    assert preview.filename.startswith("BK_vua_nhap_T07-26_T08-26_4SQT_")
     target = tmp_path / preview.filename
     result = exporter.export(run.id, target)
-    assert result.row_count == 3
+    assert result.row_count == 4
     assert exporter.latest_preview().last_export_path == target
     with pytest.raises(FileExistsError):
         exporter.export(run.id, target)
@@ -140,11 +143,12 @@ def test_export_uses_bk_rows_and_saved_values_across_months(tmp_path: Path) -> N
         assert first["V2"].fill.fgColor.rgb[-6:] != CHANGED_FILL
         assert first["B2"].value == datetime(2026, 7, 10)
         assert first["B2"].number_format == "dd/mm/yyyy"
-        assert first["A3"].value is None  # Unchanged SQT 702 is absent.
+        assert first["A3"].value == 702
+        assert first["M3"].fill.fgColor.rgb[-6:] != CHANGED_FILL
         assert second["A3"].value == 802
         assert second["M3"].value == "=E3*100"  # Original row 3 stays row 3 here.
-        assert first.auto_filter.ref == "A1:AR2"
-        assert first["A4"].value.startswith("Ô vàng:")
+        assert first.auto_filter.ref == "A1:AR3"
+        assert first["A5"].value.startswith("Ô vàng:")
     finally:
         book.close()
 
@@ -154,7 +158,7 @@ def test_formula_rebases_when_original_bk_row_moves(tmp_path: Path) -> None:
     _bk(bk)
     snapshot = build_posting_export_snapshot(
         _plan(bk, 1),
-        [{"sheet_name": "T08 26", "target_row": 3, "target_column": 13, "amount_write": True}],
+        [{"status": PostingItemStatus.POSTED, "sheet_name": "T08 26", "target_row": 3, "target_column": 13, "amount_write": True}],
         PostingResult(status=ExcelRunStatus.SUCCEEDED, target_path=bk, run_id=1),
     )
     book = PostingExportService._workbook(snapshot)
@@ -174,7 +178,7 @@ def test_latest_run_with_no_bk_changes_does_not_export_old_run(tmp_path: Path) -
     first = runs.create_run(operation="EXPENSE_POSTING", target_path=bk)
     postings.save_export_snapshot(first.id, build_posting_export_snapshot(
         _plan(bk, first.id),
-        [{"sheet_name": "T07 26", "target_row": 2, "target_column": 13, "amount_write": True}],
+        [{"status": PostingItemStatus.POSTED, "sheet_name": "T07 26", "target_row": 2, "target_column": 13, "amount_write": True}],
         PostingResult(status=ExcelRunStatus.SUCCEEDED, target_path=bk, run_id=first.id),
     ))
     runs.finish_run(first.id, status="SUCCEEDED")
@@ -190,6 +194,78 @@ def test_latest_run_with_no_bk_changes_does_not_export_old_run(tmp_path: Path) -
     with pytest.raises(PostingExportError, match="không có dòng BK"):
         exporter.export(second.id, tmp_path / "empty.xlsx")
     assert not (tmp_path / "empty.xlsx").exists()
+
+
+def test_no_changes_run_exports_already_existing_bk_rows(tmp_path: Path) -> None:
+    bk = tmp_path / "BK.xlsx"
+    _bk(bk)
+    database = Database(tmp_path / "state.db")
+    runs = ExcelRunRepository(database)
+    postings = ExpensePostingRepository(database)
+    run = runs.create_run(operation="EXPENSE_POSTING", target_path=bk)
+    snapshot = build_posting_export_snapshot(
+        _plan(bk, run.id),
+        [
+            {"status": PostingItemStatus.ALREADY_EXISTS, "sheet_name": "T07 26", "target_row": 2},
+            {"status": PostingItemStatus.ALREADY_EXISTS, "sheet_name": "T07 26", "target_row": 2},
+            {"status": PostingItemStatus.USER_SKIPPED, "sheet_name": "T07 26", "target_row": 3},
+            {"status": PostingItemStatus.NOT_MATCHED},
+        ],
+        PostingResult(status=ExcelRunStatus.NO_CHANGES, target_path=bk, run_id=run.id),
+    )
+    assert snapshot["row_count"] == 1
+    assert snapshot["sheets"][0]["rows"][0]["changed_columns"] == []
+    postings.save_export_snapshot(run.id, snapshot)
+    runs.finish_run(run.id, status="NO_CHANGES")
+
+    exporter = PostingExportService(runs, postings)
+    preview = exporter.latest_preview()
+    assert preview is not None and preview.row_count == 1
+    target = tmp_path / "unchanged.xlsx"
+    exporter.export(run.id, target)
+    book = load_workbook(target)
+    try:
+        assert book["T07 26"]["A2"].value == 701
+        assert book["T07 26"]["A3"].value is None
+        assert book["T07 26"]["M2"].fill.fgColor.rgb[-6:] != CHANGED_FILL
+    finally:
+        book.close()
+
+
+def test_old_snapshot_remains_exportable_with_legacy_scope(tmp_path: Path) -> None:
+    bk = tmp_path / "BK.xlsx"
+    _bk(bk)
+    database = Database(tmp_path / "state.db")
+    runs = ExcelRunRepository(database)
+    postings = ExpensePostingRepository(database)
+    run = runs.create_run(operation="EXPENSE_POSTING", target_path=bk)
+    snapshot = build_posting_export_snapshot(
+        _plan(bk, run.id),
+        [{"status": PostingItemStatus.POSTED, "sheet_name": "T07 26", "target_row": 2, "target_column": 13, "amount_write": True}],
+        PostingResult(status=ExcelRunStatus.SUCCEEDED, target_path=bk, run_id=run.id),
+    )
+    snapshot["version"] = 2
+    postings.save_export_snapshot(run.id, snapshot)
+    runs.finish_run(run.id, status="SUCCEEDED")
+
+    exporter = PostingExportService(runs, postings)
+    preview = exporter.latest_preview()
+    assert preview is not None and preview.snapshot_version == 2
+    assert exporter.export(run.id, tmp_path / "old_scope.xlsx").row_count == 1
+
+    empty_run = runs.create_run(operation="EXPENSE_POSTING", target_path=bk)
+    empty_snapshot = build_posting_export_snapshot(
+        _plan(bk, empty_run.id), [],
+        PostingResult(status=ExcelRunStatus.NO_CHANGES, target_path=bk, run_id=empty_run.id),
+    )
+    empty_snapshot["version"] = 2
+    postings.save_export_snapshot(empty_run.id, empty_snapshot)
+    runs.finish_run(empty_run.id, status="NO_CHANGES")
+    empty_preview = exporter.latest_preview()
+    assert empty_preview is not None and empty_preview.snapshot_version == 2
+    assert empty_preview.row_count == 0
+    with pytest.raises(PostingExportError, match="không lưu các dòng đúng sẵn"):
+        exporter.export(empty_run.id, tmp_path / "old_empty.xlsx")
 
 
 def test_legacy_audit_snapshot_is_not_exposed_as_bk_format(tmp_path: Path) -> None:

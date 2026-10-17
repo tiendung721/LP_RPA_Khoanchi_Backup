@@ -1,4 +1,4 @@
-"""Export the BK rows changed by the latest completed expense posting run."""
+"""Export the BK rows handled by the latest completed expense posting run."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from openpyxl.styles import Alignment, Border, Color, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from .headers import normalize_header
-from .models import ExcelOperation, PostingPlan, PostingResult
+from .models import ExcelOperation, PostingItemStatus, PostingPlan, PostingResult
 from .payment_sync import find_summary_start
 from .workbook import WorkbookChangedError, workbook_fingerprint
 
@@ -27,7 +27,8 @@ class PostingExportError(RuntimeError):
     pass
 
 
-SNAPSHOT_VERSION = 2
+SNAPSHOT_VERSION = 3
+SUPPORTED_SNAPSHOT_VERSIONS = {2, SNAPSHOT_VERSION}
 CHANGED_FILL = "FFF2B3"
 CHANGED_BORDER = "D59D00"
 _TECHNICAL_HEADERS = {normalize_header("Date cập nhật"), normalize_header("Trạng thái RPA")}
@@ -166,27 +167,30 @@ def build_posting_export_snapshot(
 ) -> dict[str, Any]:
     """Capture final BK values now, so a later export cannot drift with the BK file."""
 
-    changed: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
+    selected: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
     for action in actions:
-        columns = _changed_columns(action)
-        if not columns:
+        if action.get("status") not in {
+            PostingItemStatus.POSTED,
+            PostingItemStatus.ALREADY_EXISTS,
+        }:
             continue
+        columns = _changed_columns(action)
         sheet_name = str(action.get("sheet_name") or "")
         target_row = action.get("target_row")
         if not sheet_name or target_row is None or int(target_row) < 2:
-            raise PostingExportError("Khoản đã ghi thiếu sheet hoặc dòng BK.")
-        changed[sheet_name][int(target_row)].update(columns)
+            raise PostingExportError("Khoản trong lượt nhập thiếu sheet hoặc dòng BK.")
+        selected[sheet_name][int(target_row)].update(columns)
 
     sheets: list[dict[str, Any]] = []
     sqt_keys: set[tuple[str, str]] = set()
-    if changed:
+    if selected:
         book = load_workbook(result.target_path, read_only=False, data_only=False)
         try:
-            missing = set(changed).difference(book.sheetnames)
+            missing = set(selected).difference(book.sheetnames)
             if missing:
                 raise PostingExportError(f"Không tìm thấy sheet BK đã ghi: {', '.join(sorted(missing))}.")
             for name in book.sheetnames:
-                if name not in changed:
+                if name not in selected:
                     continue
                 sheet = book[name]
                 last_column = _business_last_column(sheet)
@@ -201,7 +205,7 @@ def build_posting_export_snapshot(
                     for col in range(1, last_column + 1)
                 ]
                 rows: list[dict[str, Any]] = []
-                for bk_row, columns in sorted(changed[name].items()):
+                for bk_row, columns in sorted(selected[name].items()):
                     if bk_row > sheet.max_row:
                         raise PostingExportError(f"Dòng {bk_row} không còn trong sheet {name}.")
                     if any(col > last_column for col in columns):
@@ -244,6 +248,7 @@ class PostingExportPreview:
     sqt_count: int
     sheet_count: int
     filename: str
+    snapshot_version: int
     last_export_path: Path | None = None
 
 
@@ -274,7 +279,7 @@ class PostingExportService:
         if run is None:
             return None
         snapshot = self.posting_repository.get_export_snapshot(run.id)
-        if snapshot is None or snapshot.get("version") != SNAPSHOT_VERSION:
+        if snapshot is None or snapshot.get("version") not in SUPPORTED_SNAPSHOT_VERSIONS:
             return None
         completed = str(snapshot["completed_at"])
         stamp = datetime.fromisoformat(completed.replace("Z", "+00:00")).strftime("%Y%m%d_%H%M")
@@ -294,6 +299,7 @@ class PostingExportService:
             sqt_count=int(snapshot["sqt_count"]),
             sheet_count=len(names),
             filename=filename,
+            snapshot_version=int(snapshot["version"]),
             last_export_path=self.posting_repository.get_export_path(run.id),
         )
 
@@ -309,10 +315,14 @@ class PostingExportService:
         if run.operation != ExcelOperation.EXPENSE_POSTING.value or run.status not in {"SUCCEEDED", "NO_CHANGES"}:
             raise PostingExportError("Lượt nhập BK chưa hoàn tất.")
         snapshot = self.posting_repository.get_export_snapshot(run_id)
-        if snapshot is None or snapshot.get("version") != SNAPSHOT_VERSION:
+        if snapshot is None or snapshot.get("version") not in SUPPORTED_SNAPSHOT_VERSIONS:
             raise PostingExportError("Lượt nhập này chưa có ảnh chụp dòng BK theo format mới.")
         if int(snapshot["row_count"]) == 0:
-            raise PostingExportError("Lượt này không có dòng BK được cập nhật.")
+            if snapshot["version"] == 2:
+                raise PostingExportError(
+                    "Ảnh chụp cũ không có dòng BK đã ghi và không lưu các dòng đúng sẵn."
+                )
+            raise PostingExportError("Lượt này không có dòng BK được đối chiếu để xuất.")
         target = Path(destination)
         if target.suffix.lower() != ".xlsx":
             raise PostingExportError("File xuất phải có đuôi .xlsx.")

@@ -18,6 +18,7 @@ from app.services.excel.carrier import (
 from app.services.excel.models import ConflictType, ResolutionAction
 from app.services.excel.payment_sync import SUMMARY_HEADERS, PaymentSyncService
 from app.services.excel.posting import ExpensePostingService
+from app.ui.excel_task_controller import ExcelTaskController
 
 
 class _Provider:
@@ -350,6 +351,59 @@ def test_posting_keep_multiple_existing_carriers_requires_effective_choice(
         assert BK_DETAIL_SHEET not in workbook.sheetnames
     finally:
         workbook.close()
+
+
+def test_review_overwrite_carrier_after_row_selection_keeps_earlier_choices(
+    tmp_path: Path, qtbot
+) -> None:
+    bk = tmp_path / "bk.xlsx"
+    ready = tmp_path / "ready.json"
+    _posting_book(bk, nam_carrier="OLD700")
+    _add_road_fee_columns(bk)
+    workbook = load_workbook(bk)
+    sheet = workbook["T07 26"]
+    sheet.append((701, None, "CONT701", None, None, None, None, None, "OLD701"))
+    sheet.append((702, None, "CONT701", None, None, None, None, None, "OLD702"))
+    workbook.save(bk)
+    workbook.close()
+    _ready(
+        ready,
+        [
+            ["CONT700", None, "VTN", "CV", "HD-1", "NEW700", 500_000],
+            ["CONT701", None, "VTN", "CV", "HD-2", "NEW701", 400_000],
+        ],
+    )
+    service = ExpensePostingService(
+        _Provider(ready), bk_path=bk, backup_dir=tmp_path / "Backup"
+    )
+    plan = service.analyze(batch_id=1, sheet_name="T07 26")
+    choices = {}
+    for conflict in plan.conflicts:
+        if conflict.conflict_type is ConflictType.MULTIPLE_CONTAINER_MATCH:
+            candidate = conflict.row_candidates[0]
+            choices[conflict.conflict_id] = {
+                "action": "SELECT_ROW",
+                "selected_row": candidate.row,
+                "selected_source_sheet": candidate.source_sheet,
+            }
+        else:
+            choices[conflict.conflict_id] = {"action": "OVERWRITE"}
+
+    controller = ExcelTaskController(expense_posting_service=service)
+    try:
+        first = controller._prepare_review(service, plan, choices, lambda *_: None)
+        assert not first.ready
+        assert len(first.conflicts) == 1
+        assert first.conflicts[0].conflict_type is ConflictType.CARRIER_VALUE_CONFLICT
+
+        choices[first.conflicts[0].conflict_id] = {"action": "OVERWRITE"}
+        second = controller._prepare_review(service, plan, choices, lambda *_: None)
+        assert second.ready
+        assert not second.conflicts
+        result = service.apply(second.prepared_plan, {})
+        assert result.carrier_written_cells == 2
+    finally:
+        controller.shutdown()
 
 
 def test_service_fees_keep_source_carriers_without_writing_vt_nam(

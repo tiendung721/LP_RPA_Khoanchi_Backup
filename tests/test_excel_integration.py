@@ -1889,7 +1889,7 @@ def test_posting_allocates_two_documents_to_two_months_in_one_atomic_apply(
     assert result.target_sheets == ("T06 26", "T07 26")
     assert result.posted_source_items == 15
     snapshot = postings.export_snapshots[result.run_id]
-    assert snapshot["version"] == 2
+    assert snapshot["version"] == 3
     assert snapshot["row_count"] == 15
     assert snapshot["sqt_count"] == 15
     assert {sheet["name"] for sheet in snapshot["sheets"]} == {"T06 26", "T07 26"}
@@ -3716,15 +3716,23 @@ def test_posting_same_value_only_updates_date_when_explicitly_reposted(
     workbook.save(target)
     workbook.close()
 
+    normal_runs = _RunHistoryRepository()
+    normal_postings = _PostingHistoryRepository()
     normal = _posting_service(
         ready,
         target,
         tmp_path / "Normal",
+        run_repository=normal_runs,
+        posting_repository=normal_postings,
         clock=lambda: fixed,
     )
     normal_result = normal.apply(normal.analyze(sheet_name="T07 26"), {})
+    assert normal_result.status is ExcelRunStatus.NO_CHANGES
     assert normal_result.written_cells == 0
     assert normal_result.backup_path is None
+    normal_snapshot = normal_postings.export_snapshots[normal_result.run_id]
+    assert normal_snapshot["row_count"] == 1
+    assert normal_snapshot["sheets"][0]["rows"][0]["changed_columns"] == []
     workbook = load_workbook(target)
     try:
         headers = [

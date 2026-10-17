@@ -721,11 +721,17 @@ class MainWindow(QMainWindow):
             if preview is None:
                 QMessageBox.information(
                     self, "Chưa có dữ liệu",
-                    "Chưa có ảnh chụp BK theo format mới. Hãy hoàn tất một lượt nhập BK mới có thay đổi.",
+                    "Chưa có ảnh chụp BK theo format mới. Hãy hoàn tất một lượt nhập BK mới.",
                 )
                 return
             if preview.row_count == 0:
-                QMessageBox.information(self, "Không có dòng BK", "Lượt này không có dòng BK được cập nhật.")
+                message = (
+                    "Ảnh chụp cũ không lưu các dòng BK đã đúng sẵn. "
+                    "Hãy hoàn tất một lượt nhập BK mới để xuất đầy đủ."
+                    if preview.snapshot_version < 3
+                    else "Lượt này không có dòng BK được đối chiếu để xuất."
+                )
+                QMessageBox.information(self, "Không có dòng BK", message)
                 return
             output_dir = str(_attribute(self._settings, "output_dir", default="") or "").strip()
             default_dir = Path(output_dir) if output_dir else Path.home()
@@ -2337,11 +2343,23 @@ class MainWindow(QMainWindow):
         self.workflow_page.set_latest_excel_data_available("posting_export", available_file)
         if preview is None:
             self.workflow_page.set_posting_export_available(
-                False, "Chưa có ảnh chụp BK theo format mới; cần lượt nhập mới có thay đổi",
+                False, "Chưa có ảnh chụp BK theo format mới; cần lượt nhập mới",
+            )
+        elif preview.snapshot_version < 3 and preview.row_count == 0:
+            self.workflow_page.set_posting_export_available(
+                False,
+                f"Lượt #{preview.run_id} (ảnh chụp cũ): không lưu dòng đúng sẵn; "
+                "cần lượt nhập mới để xuất đầy đủ",
+            )
+        elif preview.snapshot_version < 3:
+            self.workflow_page.set_posting_export_available(
+                True,
+                f"Lượt #{preview.run_id} (ảnh chụp cũ): chỉ có {preview.row_count} "
+                "dòng BK đã ghi; cần lượt nhập mới để xuất cả dòng đúng sẵn",
             )
         elif preview.row_count == 0:
             self.workflow_page.set_posting_export_available(
-                False, f"Lượt #{preview.run_id}: không có dòng BK được cập nhật",
+                False, f"Lượt #{preview.run_id}: không có dòng BK được đối chiếu để xuất",
             )
         else:
             self.workflow_page.set_posting_export_available(

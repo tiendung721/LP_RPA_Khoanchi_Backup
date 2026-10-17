@@ -859,6 +859,23 @@ class ExpensePostingService:
                     }
                     if carrier_key(selected_carrier) not in valid:
                         raise ExpensePostingError("Bên vận tải được chọn không hợp lệ.")
+                selected_existing_carrier = None
+                if (
+                    action is ResolutionAction.KEEP_EXISTING
+                    and conflict.details.get("requires_existing_carrier_selection")
+                ):
+                    selected_existing_carrier = self._resolution_attr(
+                        value, "selected_carrier"
+                    )
+                    if carrier_key(selected_existing_carrier) not in {
+                        carrier_key(candidate)
+                        for candidate in conflict.details.get(
+                            "existing_carrier_candidates", ()
+                        )
+                    }:
+                        raise ExpensePostingError(
+                            "Bên vận tải hiện có được chọn không hợp lệ."
+                        )
                 ambiguous_invoices = {
                     _invoice_key(invoice)
                     for invoice in conflict.details.get(
@@ -872,13 +889,16 @@ class ExpensePostingService:
                             for invoice in items[index].invoice_candidates
                         )
                     )
-                    items[index].selected_carrier = (
-                        str(selected_carrier)
-                        if selected_carrier is not None
-                        and (
-                            not ambiguous_invoices
+                    if action is ResolutionAction.SELECT_CARRIER:
+                        items[index].selected_carrier = (
+                            str(selected_carrier)
+                            if not ambiguous_invoices
                             or belongs_to_ambiguous_invoice
+                            else None
                         )
+                    items[index].selected_existing_carrier = (
+                        str(selected_existing_carrier)
+                        if selected_existing_carrier is not None
                         else None
                     )
                     items[index].carrier_action = (
@@ -962,6 +982,9 @@ class ExpensePostingService:
                 item.selected_fee = str(selected_fee)
                 item.selected_invoice = None
                 item.invoice_action = None
+                item.carrier_action = None
+                item.selected_carrier = None
+                item.selected_existing_carrier = None
             elif action is ResolutionAction.SELECT_ROW:
                 selected_row = self._resolution_attr(value, "selected_row")
                 selected_source_sheet = self._resolution_attr(
@@ -976,6 +999,9 @@ class ExpensePostingService:
                 item.match_reason = "MANUAL"
                 item.target_row = None
                 item.invoice_action = None
+                item.carrier_action = None
+                item.selected_carrier = None
+                item.selected_existing_carrier = None
             elif action in {
                 ResolutionAction.OVERWRITE,
             }:
@@ -3709,6 +3735,8 @@ class ExpensePostingService:
             if column is None:
                 if not item.carrier_candidates:
                     continue
+                if item.carrier_action is ResolutionAction.KEEP_EXISTING:
+                    continue
                 conflicts.append(
                     self._item_conflict(
                         batch_hash,
@@ -3729,6 +3757,12 @@ class ExpensePostingService:
 
         for (row, group), indexes in grouped.items():
             first = items[indexes[0]]
+            persisted_actions = {items[index].carrier_action for index in indexes}
+            persisted_action = (
+                next(iter(persisted_actions))
+                if len(persisted_actions) == 1
+                else None
+            )
             column = int(carrier_columns[group])
             cell = worksheet.cell(row, column)
             incoming = unique_carriers(
@@ -3824,6 +3858,19 @@ class ExpensePostingService:
                         items[index].carrier_action = ResolutionAction.KEEP_EXISTING
                         items[index].carrier_value_after = cell.value
                     continue
+                if persisted_action in {
+                    ResolutionAction.KEEP_EXISTING,
+                    ResolutionAction.OVERWRITE,
+                } and (
+                    persisted_action is ResolutionAction.OVERWRITE
+                    or len(current) <= 1
+                    or all(
+                        carrier_key(items[index].selected_existing_carrier)
+                        in {carrier_key(value) for value in current}
+                        for index in indexes
+                    )
+                ):
+                    continue
                 conflicts.append(
                     self._item_conflict(
                         batch_hash,
@@ -3887,6 +3934,16 @@ class ExpensePostingService:
                     for value in incoming
                 )
             )
+            if persisted_action in actions and (
+                persisted_action is not ResolutionAction.KEEP_EXISTING
+                or not requires_existing_selection
+                or all(
+                    carrier_key(items[index].selected_existing_carrier)
+                    in {carrier_key(value) for value in current}
+                    for index in indexes
+                )
+            ):
+                continue
             conflicts.append(
                 self._item_conflict(
                     batch_hash,
@@ -4607,17 +4664,26 @@ class ExpensePostingService:
             current_parts = split_carriers(before)
             selected_existing_carrier = None
             if (
-                conflict is not None
-                and chosen is ResolutionAction.KEEP_EXISTING
-                and conflict.details.get("requires_existing_carrier_selection")
+                chosen is ResolutionAction.KEEP_EXISTING
+                and len(current_parts) > 1
             ):
-                value = resolutions.get(conflict.conflict_id)
-                selected_existing_carrier = self._resolution_attr(
-                    value, "selected_carrier"
+                selection_required = bool(
+                    conflict is not None
+                    and conflict.details.get("requires_existing_carrier_selection")
                 )
-                if carrier_key(selected_existing_carrier) not in {
-                    carrier_key(candidate) for candidate in current_parts
-                }:
+                if selection_required:
+                    value = resolutions.get(conflict.conflict_id)
+                    selected_existing_carrier = self._resolution_attr(
+                        value, "selected_carrier"
+                    )
+                else:
+                    selected_existing_carrier = items[indexes[0]].selected_existing_carrier
+                if (
+                    (selection_required or selected_existing_carrier is not None)
+                    and carrier_key(selected_existing_carrier) not in {
+                        carrier_key(candidate) for candidate in current_parts
+                    }
+                ):
                     raise ExpensePostingError(
                         "Phải chọn một bên vận tải hiện có khi giữ nguyên ô có nhiều mã."
                     )

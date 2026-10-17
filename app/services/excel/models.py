@@ -488,6 +488,7 @@ class PostingItem:
     carrier_current_value: Any = None
     carrier_value_after: Any = None
     carrier_action: ResolutionAction | None = None
+    selected_existing_carrier: str | None = None
 
     @property
     def fee(self) -> str:
