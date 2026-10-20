@@ -80,6 +80,8 @@ def rows_match(left: ReviewRow, right: ReviewRow) -> bool:
         return False
     if left.fee != right.fee or left.fee == "CXD":
         return False
+    if left.source_fee_name != right.source_fee_name:
+        return False
     invoice_left = _invoice_key(left.invoice_no)
     invoice_right = _invoice_key(right.invoice_no)
     date_left = _date_key(left.invoice_date)

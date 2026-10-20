@@ -147,7 +147,11 @@ def parse_document(raw: object) -> BatchDocument:
             expected_row_keys = v3_keys
         else:
             expected_row_keys = v4_keys
-        if keys != expected_row_keys:
+        allowed_row_keys = (
+            (expected_row_keys, expected_row_keys | {"source_fee_name"})
+            if version == SCHEMA_VERSION else (expected_row_keys,)
+        )
+        if keys not in allowed_row_keys:
             missing = sorted(expected_row_keys - keys)
             extra = sorted(str(key) for key in keys - expected_row_keys)
             details = []
@@ -162,6 +166,16 @@ def parse_document(raw: object) -> BatchDocument:
                 row_index=index,
             )
         row = DataRow.from_mapping(item)
+        if row.source_fee_name is not None and (
+            not isinstance(row.source_fee_name, str)
+            or not row.source_fee_name.strip()
+        ):
+            raise SchemaError(
+                f"Dòng {index + 1} có tên phí gốc không hợp lệ.",
+                code="source_fee_name_invalid",
+                row_index=index,
+                field="source_fee_name",
+            )
         if version == OBJECT_SCHEMA_VERSION:
             row = row.copy_with(
                 source_document_id=legacy_source_id,

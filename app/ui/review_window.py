@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from .app_dialog import AppDialog
+from .bulk_fee_dialog import BulkFeeDialog
 from .bulk_invoice_dialog import BulkInvoiceDialog
 from .presentation import fit_window_to_screen
 from .edit_row_dialog import EditRowDialog
@@ -620,6 +621,8 @@ class ReviewWindow(QMainWindow):
         self.add_button.setObjectName("addRowButton")
         self.edit_button = QPushButton("Sửa dòng")
         self.edit_button.setObjectName("editRowButton")
+        self.bulk_fee_button = QPushButton("Gán/đổi loại cước")
+        self.bulk_fee_button.setObjectName("bulkFeeButton")
         self.bulk_invoice_button = QPushButton("Gán/đổi số HĐ")
         self.bulk_invoice_button.setObjectName("bulkInvoiceButton")
         self.delete_button = QPushButton("Xóa dòng")
@@ -628,6 +631,7 @@ class ReviewWindow(QMainWindow):
         for button in (
             self.add_button,
             self.edit_button,
+            self.bulk_fee_button,
             self.bulk_invoice_button,
             self.delete_button,
         ):
@@ -671,6 +675,7 @@ class ReviewWindow(QMainWindow):
         self.table.setColumnWidth(ReviewTableModel.COLUMN_BL, 130)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_VESSEL_VOYAGE, 190)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_FEE_NAME, 160)
+        self.table.setColumnWidth(ReviewTableModel.COLUMN_SOURCE_FEE_NAME, 190)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_INVOICE_NO, 130)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_CARRIER, 190)
         self.table.setColumnWidth(ReviewTableModel.COLUMN_AMOUNT, 185)
@@ -782,6 +787,7 @@ class ReviewWindow(QMainWindow):
         self.clear_filter_button.clicked.connect(self.clear_filters)
         self.add_button.clicked.connect(self.add_row)
         self.edit_button.clicked.connect(self.edit_selected_row)
+        self.bulk_fee_button.clicked.connect(self.bulk_edit_fees)
         self.bulk_invoice_button.clicked.connect(self.bulk_edit_invoice_numbers)
         self.delete_button.clicked.connect(self.delete_selected_row)
         self.raw_button.clicked.connect(self.show_raw_json)
@@ -902,6 +908,7 @@ class ReviewWindow(QMainWindow):
             self.filtered_amount_value.setText(
                 f"{amount:,} ₫".replace(",", ".")
             )
+        self._update_action_state()
 
     def _update_dirty(self, dirty: bool) -> None:
         self.dirty_label.setVisible(dirty)
@@ -947,6 +954,13 @@ class ReviewWindow(QMainWindow):
         )
         self.edit_button.setEnabled(selected_count == 1 and not self._saving)
         self.delete_button.setEnabled(selected_count > 0 and not self._saving)
+        self.bulk_fee_button.setEnabled(
+            not self._saving
+            and any(
+                self.model.row_at(position).fee != "CB"
+                for position in self._filtered_source_rows()
+            )
+        )
         is_bang_ke = (
             str(_value(self._metadata, "source_kind", default="ASSISTANT"))
             .split(".")[-1]
@@ -1003,6 +1017,47 @@ class ReviewWindow(QMainWindow):
             if (source_index := self.proxy_model.mapToSource(proxy_index)).isValid()
         }
         return sorted(source_rows)
+
+    def _filtered_source_rows(self) -> list[int]:
+        return [
+            source_index.row()
+            for index in range(self.proxy_model.rowCount())
+            if (source_index := self.proxy_model.mapToSource(
+                self.proxy_model.index(index, 0)
+            )).isValid()
+        ]
+
+    def bulk_edit_fees(self) -> None:
+        if not self.bulk_fee_button.isEnabled():
+            return
+        dialog = BulkFeeDialog(
+            self.model.rows(),
+            selected_positions=self._selected_source_rows(),
+            filtered_positions=self._filtered_source_rows(),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        changed_positions = dialog.change_positions()
+        changed_runtime_ids = [
+            self.model.runtime_id_at(position) for position in changed_positions
+        ]
+        changed = self.model.bulk_update_fee(
+            dialog.scope_positions(),
+            fee=dialog.fee or "",
+            mode=dialog.mode,
+            old_fee=dialog.old_fee,
+        )
+        if changed:
+            for runtime_id in changed_runtime_ids:
+                position = self.model.find_runtime_id(runtime_id)
+                if position is not None:
+                    self._merge_origins[runtime_id] = (self.model.row_at(position),)
+            self._run_merge_review()
+            self.statusBar().showMessage(
+                f"Đã đổi loại cước cho {changed} dòng. Hãy kiểm tra và bấm Lưu.",
+                8000,
+            )
 
     def bulk_edit_invoice_numbers(self) -> None:
         if not self.bulk_invoice_button.isEnabled():

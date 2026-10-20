@@ -100,6 +100,7 @@ class ReviewRow:
     source_document_id: Any = "MANUAL"
     source_document_name: Any = "Dòng thêm thủ công"
     sqt: Any = None
+    source_fee_name: Any = None
     runtime_id: str = field(default_factory=lambda: uuid4().hex)
 
     def as_array(self) -> list[Any]:
@@ -114,7 +115,7 @@ class ReviewRow:
         ]
 
     def to_object(self) -> dict[str, Any]:
-        return {
+        result = {
             "source_document_id": self.source_document_id,
             "source_document_name": self.source_document_name,
             "sqt": self.sqt,
@@ -132,6 +133,9 @@ class ReviewRow:
             "carrier": self.carrier,
             "amount": self.amount,
         }
+        if self.source_fee_name is not None:
+            result["source_fee_name"] = self.source_fee_name
+        return result
 
     @classmethod
     def from_mapping(
@@ -141,6 +145,7 @@ class ReviewRow:
             cont=_mapping_value(value, "cont", "container"),
             bl=_mapping_value(value, "bl", "bill_of_lading", "bill"),
             sqt=_mapping_value(value, "sqt", "source_sqt", "qt"),
+            source_fee_name=_mapping_value(value, "source_fee_name"),
             fee=_mapping_value(value, "fee", "fee_code", default="CXD"),
             rule=_mapping_value(value, "rule", "rule_code"),
             amount=_mapping_value(value, "amount"),
@@ -267,6 +272,7 @@ def coerce_review_row(value: Any) -> ReviewRow:
                 "source_document_name": getattr(
                     value, "source_document_name", "Dòng thêm thủ công"
                 ),
+                "source_fee_name": getattr(value, "source_fee_name", None),
             }
         )
     raise TypeError(f"Không thể chuyển kiểu {type(value).__name__} thành dòng dữ liệu.")
@@ -310,6 +316,38 @@ def bulk_invoice_change_positions(
     return changed
 
 
+def bulk_fee_change_positions(
+    rows: Sequence[ReviewRow],
+    positions: Iterable[int],
+    *,
+    fee: str,
+    mode: str,
+    old_fee: str | None = None,
+) -> list[int]:
+    """Tính các dòng đổi loại cước; CB không được đổi hoặc gán hàng loạt."""
+
+    if fee not in FEE_CATALOG or fee == "CB":
+        raise ValueError("Vui lòng chọn loại cước mới khác CB.")
+    if mode not in {"fill", "replace", "overwrite"}:
+        raise ValueError("Cách cập nhật loại cước không hợp lệ.")
+    if mode == "replace" and (old_fee not in FEE_CATALOG or old_fee == "CB"):
+        raise ValueError("Vui lòng chọn loại cước cũ khác CB.")
+
+    changed: list[int] = []
+    for position in sorted(set(positions)):
+        if not 0 <= position < len(rows):
+            raise IndexError("Dòng cần cập nhật không tồn tại.")
+        current = rows[position].fee
+        if current == "CB" or current == fee:
+            continue
+        if mode == "fill" and current != "CXD":
+            continue
+        if mode == "replace" and current != old_fee:
+            continue
+        changed.append(position)
+    return changed
+
+
 def validate_row(row: ReviewRow, *, allow_negative: bool = False) -> RowValidation:
     """Kiểm tra các lỗi chặn/cảnh báo độc lập của một dòng."""
 
@@ -320,6 +358,10 @@ def validate_row(row: ReviewRow, *, allow_negative: bool = False) -> RowValidati
         errors.append("Mã chứng từ nguồn phải là chuỗi không rỗng.")
     if not isinstance(row.source_document_name, str) or not row.source_document_name.strip():
         errors.append("Tên chứng từ nguồn phải là chuỗi không rỗng.")
+    if row.source_fee_name is not None and (
+        not isinstance(row.source_fee_name, str) or not row.source_fee_name.strip()
+    ):
+        errors.append("Tên phí gốc phải là chuỗi không rỗng hoặc null.")
 
     if row.cont is not None and not isinstance(row.cont, str):
         errors.append("Container phải là chuỗi hoặc null.")
@@ -415,15 +457,16 @@ class ReviewTableModel(QAbstractTableModel):
     COLUMN_CONTAINER_COUNT_BASIS = 6
     COLUMN_FEE = 7
     COLUMN_FEE_NAME = 8
-    COLUMN_RULE = 9
-    COLUMN_RULE_NAME = 10
-    COLUMN_INVOICE_NO = 11
-    COLUMN_INVOICE_DATE = 12
-    COLUMN_CARRIER = 13
-    COLUMN_AMOUNT = 14
-    COLUMN_STATUS = 15
-    COLUMN_MESSAGES = 16
-    COLUMN_LOOKUP_ACTION = 17
+    COLUMN_SOURCE_FEE_NAME = 9
+    COLUMN_RULE = 10
+    COLUMN_RULE_NAME = 11
+    COLUMN_INVOICE_NO = 12
+    COLUMN_INVOICE_DATE = 13
+    COLUMN_CARRIER = 14
+    COLUMN_AMOUNT = 15
+    COLUMN_STATUS = 16
+    COLUMN_MESSAGES = 17
+    COLUMN_LOOKUP_ACTION = 18
 
     ACTION_VISIBLE_ROLE = int(Qt.ItemDataRole.UserRole) + 10
     ACTION_ENABLED_ROLE = int(Qt.ItemDataRole.UserRole) + 11
@@ -440,6 +483,7 @@ class ReviewTableModel(QAbstractTableModel):
         "Căn cứ SL",
         "Mã cước",
         "Tên loại cước",
+        "Phí gốc trên bảng kê",
         "Mã xử lý",
         "Diễn giải xử lý tiền",
         "Số HĐ",
@@ -584,6 +628,7 @@ class ReviewTableModel(QAbstractTableModel):
             row.container_count_basis,
             row.fee,
             FEE_CATALOG.get(row.fee, "") if isinstance(row.fee, str) else "",
+            row.source_fee_name,
             row.rule,
             RULE_CATALOG.get(row.rule, "")
             if row.rule is None or isinstance(row.rule, str)
@@ -613,6 +658,7 @@ class ReviewTableModel(QAbstractTableModel):
             self.COLUMN_CONT,
             self.COLUMN_BL,
             self.COLUMN_VESSEL_VOYAGE,
+            self.COLUMN_SOURCE_FEE_NAME,
             self.COLUMN_RULE,
             self.COLUMN_INVOICE_NO,
             self.COLUMN_INVOICE_DATE,
@@ -768,6 +814,29 @@ class ReviewTableModel(QAbstractTableModel):
         new_value = " ".join(invoice_no.split())
         for position in changed:
             self._rows[position].invoice_no = new_value
+        self._after_mutation()
+        return len(changed)
+
+    def bulk_update_fee(
+        self,
+        positions: Iterable[int],
+        *,
+        fee: str,
+        mode: str,
+        old_fee: str | None = None,
+    ) -> int:
+        changed = bulk_fee_change_positions(
+            self._rows, positions, fee=fee, mode=mode, old_fee=old_fee
+        )
+        if not changed:
+            return 0
+        for position in changed:
+            row = self._rows[position]
+            row.fee = fee
+            # Bên vận tải của loại cước cũ không được mang sang loại mới.
+            row.carrier = None
+            if row.rule == "HD":
+                row.rule = None
         self._after_mutation()
         return len(changed)
 
@@ -1133,9 +1202,12 @@ class ReviewFilterProxyModel(QSortFilterProxyModel):
             carrier = model.index(
                 source_row, ReviewTableModel.COLUMN_CARRIER, source_parent
             ).data(Qt.ItemDataRole.UserRole)
+            source_fee_name = model.index(
+                source_row, ReviewTableModel.COLUMN_SOURCE_FEE_NAME, source_parent
+            ).data(Qt.ItemDataRole.UserRole)
             haystack = (
                 f"{cont or ''} {bl or ''} {vessel_voyage or ''} "
-                f"{invoice_no or ''} {carrier or ''}"
+                f"{invoice_no or ''} {carrier or ''} {source_fee_name or ''}"
             ).casefold()
             if self._search_text not in haystack:
                 return False

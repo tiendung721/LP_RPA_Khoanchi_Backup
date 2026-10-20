@@ -55,6 +55,7 @@ class DataRow:
         "source_document_id",
         "source_document_name",
         "sqt",
+        "source_fee_name",
     )
 
     cont: str | None
@@ -73,6 +74,7 @@ class DataRow:
     source_document_id: str = "MANUAL"
     source_document_name: str = "Dòng thêm thủ công"
     sqt: int | None = None
+    source_fee_name: str | None = None
 
     @classmethod
     def from_sequence(cls, value: Sequence[Any]) -> "DataRow":
@@ -120,10 +122,11 @@ class DataRow:
             source_document_id=value.get("source_document_id", "MANUAL"),
             source_document_name=value.get("source_document_name", "Dòng thêm thủ công"),
             sqt=value.get("sqt"),
+            source_fee_name=value.get("source_fee_name"),
         )
 
     def to_object(self) -> dict[str, Any]:
-        return {
+        result = {
             "source_document_id": self.source_document_id,
             "source_document_name": self.source_document_name,
             "sqt": self.sqt,
@@ -141,6 +144,9 @@ class DataRow:
             "carrier": self.carrier,
             "amount": self.amount,
         }
+        if self.source_fee_name is not None:
+            result["source_fee_name"] = self.source_fee_name
+        return result
 
     def copy_with(self, **changes: Any) -> "DataRow":
         unknown = set(changes).difference(self.FIELD_NAMES)

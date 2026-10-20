@@ -130,6 +130,7 @@ class EditRowDialog(AppDialog):
         self._last_fee: object = None
         self._source_document_id = source_document_id
         self._source_document_name = source_document_name
+        self._source_fee_name: str | None = None
         self._build_ui()
         fit_window_to_screen(self, 720, 700)
         self._connect_signals()
@@ -174,6 +175,12 @@ class EditRowDialog(AppDialog):
         )
         self.source_document_label.setWordWrap(True)
         form.addRow("Chứng từ nguồn:", self.source_document_label)
+        self.source_fee_name_label = QLabel()
+        self.source_fee_name_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.source_fee_name_label.setWordWrap(True)
+        form.addRow("Phí gốc trên bảng kê:", self.source_fee_name_label)
 
         self.container_edit = QLineEdit()
         self.container_edit.setObjectName("containerEdit")
@@ -394,9 +401,11 @@ class EditRowDialog(AppDialog):
         value = coerce_review_row(row)
         self._source_document_id = value.source_document_id
         self._source_document_name = value.source_document_name
+        self._source_fee_name = value.source_fee_name
         self.source_document_label.setText(
             f"{self._source_document_name} ({self._source_document_id})"
         )
+        self.source_fee_name_label.setText(self._source_fee_name or "—")
         self._original_vessel_voyage_raw = value.vessel_voyage_raw
         self.container_edit.setText(value.cont if isinstance(value.cont, str) else "")
         self.bl_edit.setText(value.bl if isinstance(value.bl, str) else "")
@@ -503,6 +512,7 @@ class EditRowDialog(AppDialog):
             invoice_date=normalize_optional_text(self.invoice_date_edit.text()),
             source_document_id=self._source_document_id,
             source_document_name=self._source_document_name,
+            source_fee_name=self._source_fee_name,
         )
         return row, amount_error
 

@@ -125,7 +125,7 @@ Root chỉ có đúng hai khóa `v` và `d`. Mỗi phần tử của `d` là m�
 - `NH`: Nâng hàng, nâng container có hàng từ bãi lên xe.
 - `HV`: Hạ vỏ, hạ container rỗng từ xe xuống bãi.
 - `VSDL`: Vệ sinh, D/O, phí chứng từ, lệnh giao hàng, điện thả hàng, THC/terminal độc lập.
-- `SEAL`: Phí seal, phí chì khi là dòng dịch vụ có tiền; số seal/chì chỉ để tham chiếu không tạo phí.
+- `SEAL`: Phí seal, phí chì có tiền trên hóa đơn không có CB; phí seal/chì trên cùng hóa đơn cước biển được gộp vào CB. Số seal/chì chỉ để tham chiếu, không tạo phí.
 - `LC`: Lưu container/vỏ/hàng, lưu bãi, gia hạn, demurrage, detention, storage.
 - `QT`: Quá tải, quá trọng lượng hoặc phụ thu trọng lượng.
 - `LL`: Phí/công làm lệnh riêng.
@@ -252,6 +252,7 @@ Không tự tạo mã mới.
 `SC → LC → QT → NV → HH → NH → HV → SEAL → VSDL → LL → CB → CBDH → VTN → CXD`.
 
 Từ khóa cụ thể như lưu cont, sửa chữa, quá tải phải ưu tiên hơn cụm chung như cước vận chuyển.
+Ngoại lệ: phí seal/chì có tiền trên cùng hóa đơn CB thuộc CB, không xuất SEAL riêng dù SEAL đứng trước CB trong thứ tự ưu tiên.
 
 # 18. QUY TẮC CB – CƯỚC BIỂN
 Chỉ dùng CB khi nội dung thể hiện vận chuyển bằng biển từ cảng/terminal này đến cảng/terminal khác.
@@ -261,7 +262,7 @@ Dấu hiệu:
 - Cảng đi và cảng đến.
 - B/L, tàu và chuyến phù hợp ngữ cảnh biển.
 - BAF, LSS và phụ phí nhiên liệu biển.
-- THC đầu đi/đầu đến hoặc phụ phí biển nằm trong cùng hóa đơn cước biển.
+- THC đầu đi/đầu đến, phí seal/chì hoặc phụ phí biển nằm trong cùng hóa đơn cước biển.
 
 Quy tắc:
 1. Mỗi cặp tàu/chuyến CB khác nhau là một nhóm đối soát và bắt buộc tạo một object riêng. Nếu hóa đơn chỉ có một nhóm thì tạo một object cho nhóm đó.
@@ -273,11 +274,11 @@ Quy tắc:
 7. Nếu chứng từ ghi tổng thanh toán sau VAT riêng của nhóm tàu/chuyến, dùng số đó làm `amount`.
 8. Nếu chứng từ chỉ ghi tiền trước VAT riêng cho từng nhóm và VAT hoặc tổng thanh toán chung của hóa đơn rõ ràng, phân bổ VAT thực tế theo tỷ trọng tiền trước VAT của từng nhóm; làm tròn đến đồng và điều chỉnh phần dư ở nhóm cuối để tổng `amount` của các nhóm khớp đúng tổng thanh toán hóa đơn. Đây là phân bổ theo căn cứ tiền rõ ràng, không phải chia đều theo container.
 9. Nếu không có tiền hoặc căn cứ phân bổ riêng theo nhóm, vẫn phải tạo đủ object cho mọi tàu/chuyến nhưng đặt `amount=null`. Không chép toàn bộ tổng hóa đơn vào nhiều object, không chia đều theo số container và không bỏ tàu/chuyến chỉ để tránh `amount=null`.
-10. Gộp ocean freight, BAF, LSS, THC và phụ phí biển thuộc cùng nhóm tàu/chuyến; không tách các phụ phí này thành object riêng.
+10. Gộp ocean freight, BAF, LSS, THC, phí seal/chì và phụ phí biển trên cùng hóa đơn CB vào đúng nhóm tàu/chuyến; không xuất object SEAL riêng cho hóa đơn này. Nếu hóa đơn chỉ có một nhóm tàu/chuyến, CB lấy tổng thanh toán sau VAT của cả hóa đơn, gồm cả seal, đúng một lần. Nếu có nhiều nhóm, vẫn giữ mỗi nhóm một object CB và phân bổ phí seal theo căn cứ của chứng từ; không nhân toàn bộ phí seal cho từng nhóm.
 11. Phải cố gắng lấy đủ B/L, tàu/chuyến và số lượng container cho từng nhóm để đối soát BK. Một B/L chung cho toàn nhóm thì dùng B/L đó; nhiều B/L cùng tàu/chuyến thì nối bằng `; `.
 12. Tàu/chuyến hoặc IMO đơn độc không đủ biến tuyến đường bộ thành CB.
 13. THC trong hóa đơn biển cảng–cảng thuộc CB; THC hóa đơn độc lập thuộc VSDL.
-14. Nếu hóa đơn trộn CB với khoản độc lập không thuộc phụ phí biển và không thể biểu diễn mà không cộng trùng, dùng CXD cho tổng chưa thể tách hoặc amount=null; không tạo một dòng CB bằng tổng rồi tiếp tục tạo dòng phí trùng.
+14. Phí seal/chì trên cùng hóa đơn CB áp dụng quy tắc 10. Với khoản độc lập khác không thuộc CB mà không thể biểu diễn mà không cộng trùng, dùng CXD cho tổng chưa thể tách hoặc amount=null; không tạo một dòng CB bằng tổng rồi tiếp tục tạo dòng phí trùng.
 15. Quy tắc `container=null` và tách theo tàu/chuyến chỉ áp dụng cho object `fee="CB"`. Các object CBDH, VTN, NV, HH, NH, HV, VSDL, LC, QT, LL, SC, CXD hoặc loại khác vẫn điền container và tách dòng theo quy tắc riêng, kể cả khi cùng hóa đơn với CB.
 
 # 19. QUY TẮC CBDH – CƯỚC BỘ ĐÓNG HÀNG
@@ -329,7 +330,9 @@ Gồm vệ sinh/cleaning, D/O/Delivery Order, phí chứng từ, lệnh giao hà
 5. “Phí phát sinh” không rõ bản chất là CXD.
 
 # 22A. QUY TẮC SEAL / PHÍ CHÌ
-Khi hóa đơn ghi phí chì, phí seal hoặc seal fee như một dòng dịch vụ có tiền, xuất fee="SEAL" riêng. Không lấy số seal/chì hoặc mã niêm phong làm container hay khoản phí. Dù cùng hóa đơn với VSDL, giữ hai fee và hai amount riêng, cùng invoice_no; không đưa tiền SEAL vào VSDL. Tính VAT của dòng SEAL theo đúng thuế suất/chứng từ và đối chiếu tổng hóa đơn một lần.
+Khi cùng một hóa đơn có CB và dòng phí chì/phí seal/seal fee có tiền, gộp dòng này vào amount CB sau VAT theo mục 18; không xuất fee="SEAL" riêng, không trừ phí seal khỏi tổng thanh toán của CB và không cộng VAT hai lần. Ví dụ HĐ 00009288 có cước và phụ phí biển 13.600.000 đồng, phí seal 100.000 đồng, tổng thanh toán 13.700.000 đồng: xuất CB amount=13700000, không xuất SEAL.
+
+Chỉ khi hóa đơn không có CB, phí seal/chì có tiền mới xuất fee="SEAL" riêng. Nếu cùng hóa đơn với VSDL, giữ hai fee và hai amount sau VAT riêng, cùng invoice_no; không đưa SEAL vào VSDL. Không lấy số seal/chì hoặc mã niêm phong làm container hay khoản phí. Tính VAT theo đúng chứng từ và đối chiếu tổng hóa đơn một lần.
 
 # 23. QUY TẮC LC
 Gồm lưu container/vỏ/hàng, lưu bãi, trễ hạn trả rỗng, gia hạn, demurrage, detention và storage.
@@ -378,7 +381,7 @@ Nếu xác định chắc đây là chi phí và có tiền cuối cùng hợp l
 Không xác định ST chỉ dựa vào chữ “Thành tiền”. Trên hóa đơn VAT, “Thành tiền” từng dòng thường là trước thuế nếu cuối hóa đơn còn có cộng tiền hàng, tiền VAT và tổng thanh toán.
 
 Thứ tự áp dụng:
-1. CB: tổng thanh toán toàn hóa đơn, HD.
+1. CB: tổng thanh toán toàn hóa đơn, gồm phí seal/chì nếu cùng hóa đơn, HD; không xuất thêm SEAL cho khoản đã nằm trong CB.
 2. Giá ghi rõ sau VAT/bao VAT/giá thanh toán: ST.
 3. Có tiền trước thuế và VAT từng dòng: amount=trước thuế+VAT, CV.
 4. Có tiền trước thuế và thuế suất: amount=trước thuế×(1+thuế suất), CV.
@@ -496,7 +499,7 @@ Phải kiểm tra:
 13. CB không bị chia tổng theo container.
 14. Mọi object CB đều có container=null và đã cố gắng có B/L, tàu/chuyến và count để đối soát.
 15. Mỗi tàu/chuyến CB khác nhau đã có một object riêng; không tàu/chuyến nào bị gộp, chọn đại diện hoặc bỏ sót.
-16. Khi có căn cứ phân bổ theo nhóm, tổng amount của mọi nhóm tàu/chuyến cùng hóa đơn khớp tổng thanh toán và không bị nhân lặp.
+16. Khi có căn cứ phân bổ theo nhóm, tổng amount của mọi nhóm tàu/chuyến cùng hóa đơn khớp tổng thanh toán và không bị nhân lặp; phí seal/chì cùng hóa đơn CB đã nằm trong CB đúng một lần, không có object SEAL riêng.
 17. ST chỉ dùng khi giá sau VAT rõ; VAT cộng đúng một lần.
 18. carrier chỉ lấy khi có căn cứ, không suy đoán.
 19. Tổng tiền khớp chứng từ khi đủ căn cứ.
